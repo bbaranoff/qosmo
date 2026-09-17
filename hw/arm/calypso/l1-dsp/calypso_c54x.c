@@ -8321,9 +8321,17 @@ static int c54x_exec_one(C54xState *s)
              * binutils tic54x-opc.c : "max" 1,1,1, 0xF486, 0xFEFF
              * → constant moved from 0xF492 to 0xF486 (impl est correct). */
             if ((op & 0xFEFF) == 0xF486) {
+                /* [2026-09-17] FIX_MAXMIN_DST — MAX dst (bit 8 : 0=A 1=B),
+                 * SPRU172C 4-99 : dst = max(A,B) ; C=0 si le max est A, C=1 sinon.
+                 * L'ancien code ignorait le bit de destination : il ecrivait
+                 * TOUJOURS A, donc « max B » ne mettait jamais B a jour. C'est ce
+                 * qui figeait l'argmax du correlateur SCH (0x84e8 `max B`, B restait
+                 * 0) -> pic au bord (index 43) -> 78 bits mal cadres -> CRC SB faux. */
                 int64_t sa = sext40(s->a), sb = sext40(s->b);
-                if (sa < sb) { s->a = s->b; s->st0 |= ST0_C; }
-                else { s->st0 &= ~ST0_C; }
+                int a_is_max = (sa >= sb);
+                int64_t mx = a_is_max ? sa : sb;
+                if ((op >> 8) & 1) s->b = sext40(mx); else s->a = sext40(mx);
+                if (a_is_max) s->st0 &= ~ST0_C; else s->st0 |= ST0_C;
                 return consumed + s->lk_used;
             }
 
@@ -8332,9 +8340,14 @@ static int c54x_exec_one(C54xState *s)
              * binutils : "min" 1,1,1, 0xF487, 0xFEFF
              * → constant moved from 0xF493 to 0xF487. */
             if ((op & 0xFEFF) == 0xF487) {
+                /* [2026-09-17] FIX_MAXMIN_DST — MIN dst (bit 8), SPRU172C 4-100 :
+                 * dst = min(A,B) ; C=0 si le min est A, C=1 sinon. Meme bug de
+                 * destination ignoree que MAX ci-dessus. */
                 int64_t sa = sext40(s->a), sb = sext40(s->b);
-                if (sa > sb) { s->a = s->b; s->st0 |= ST0_C; }
-                else { s->st0 &= ~ST0_C; }
+                int a_is_min = (sa <= sb);
+                int64_t mn = a_is_min ? sa : sb;
+                if ((op >> 8) & 1) s->b = sext40(mn); else s->a = sext40(mn);
+                if (a_is_min) s->st0 &= ~ST0_C; else s->st0 |= ST0_C;
                 return consumed + s->lk_used;
             }
 

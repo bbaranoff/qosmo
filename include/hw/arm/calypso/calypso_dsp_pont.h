@@ -63,6 +63,7 @@ typedef struct {
     uint32_t type;
     uint32_t a;
     uint32_t b;
+    uint32_t c;   /* [2026-09-17] TICK : tpu_offset (qbits) pour caler la fenetre RX du DSP */
 } CalypsoPontMsg;
 
 #endif

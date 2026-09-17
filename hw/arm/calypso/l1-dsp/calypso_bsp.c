@@ -974,6 +974,76 @@ static void bsp_trxd_readable(void *opaque)
  * matche la cadence ARM frame_irq/tdma. Et surtout : sous load DSP heavy,
  * VIRTUAL tournait moins vite que wall → drain trop lent → BSP queue
  * overflow → 95% des bursts droppés. */
+/* [2026-09-17] Drain explicite pour l'hote HORS QEMU (c54x_exe --arm) : le
+ * iohandler bsp_trxd_readable et le timer bsp_drain_cb ne sont branchés que dans
+ * la boucle d'événements QEMU. En standalone, personne ne vide la socket UDP 6702
+ * et les bursts du pont/BTS s'accumulent (Recv-Q) sans jamais atteindre le DSP.
+ * On appelle ceci une fois par trame depuis pont.c. Retourne le nb de bursts lus. */
+/* [2026-09-17] Suivi du tpu_offset du firmware (relaye par QEMU dans le TICK).
+ * Quand le firmware decale sa fenetre RX (synchronize_tdma), le burst doit
+ * suivre pour que la TOA mesuree converge vers 23 (acquisition native, sans
+ * canner la TOA). qbits: 4 qbits = 1 bit = 1 echantillon @1SPS. */
+static int  g_bsp_tpu_offset = 0;
+static int  g_bsp_tpu_ref = 0x7fffffff;   /* premier offset observe = origine */
+void calypso_bsp_set_tpu_offset(int qbits) { g_bsp_tpu_offset = qbits; }
+
+/* [2026-09-17] Verrou TOA natif (CALYPSO_BSP_TOA_LOCK=1) : boucle fermee lente
+ * qui pilote le biais de placement du burst pour amener le TOA mesure par le DSP
+ * a 23 (« on-time »), SANS canner la sortie. Le firmware voit alors l'alignement
+ * et cesse de corriger. Integrateur d'1 echantillon/trame pour la stabilite. */
+static int g_toa_bias = 0;   /* echantillons, applique au placement DARAM */
+void calypso_bsp_toa_feedback(int toa)
+{
+    static int en = -1;
+    if (en < 0) {
+        const char *e = getenv("CALYPSO_BSP_TOA_LOCK"); en = (e && *e=='1') ? 1 : 0;
+        if (en) BSP_LOG("TOA_LOCK on : verrouillage natif du TOA sur 23 (biais placement)");
+    }
+    if (!en || toa <= 0) return;
+    int within = toa % 156;              /* position intra-trame (ntdma retire) */
+    int err = within - 23;               /* cible : 23 */
+    if (err > 80) err -= 156;            /* prendre le plus court chemin (wrap) */
+    if (err < -80) err += 156;
+    if (err == 0) return;
+    g_toa_bias -= (err > 0) ? 1 : -1;    /* integrateur lent : le burst plus tot si TOA trop grand */
+}
+
+
+int calypso_bsp_service(uint32_t current_fn)
+{
+    int n = 0;
+    /* 1) vider la socket UDP -> file interne (bsp_trxd_readable enqueue) */
+    while (bsp.trxd_fd >= 0 && n < 256) {
+        unsigned long long before = bsp.bursts_seen;
+        bsp_trxd_readable(NULL);
+        if (bsp.bursts_seen == before) break;   /* recvfrom < 8 : plus rien */
+        n++;
+    }
+    /* [2026-09-17] STREAM (CALYPSO_BSP_STREAM=1) : livre UN seul burst TS0 par trame,
+     * le plus ancien (ordre FN), au lieu de tout livrer. Le DSP voit alors un flux de
+     * trames CONSECUTIVES, comme sur silicium : la recherche FB du firmware trouve le
+     * FCCH a une position CONSTANTE, le TOA se stabilise, l'acquisition se verrouille
+     * sans caler la sortie. Decouple la fn absolue (BTS) de la fn du tick (QEMU) :
+     * seul l'ORDRE compte, et le SCH porte la vraie fn pour la synchro. */
+    static int stream = -1;
+    if (stream < 0) { const char *e = getenv("CALYPSO_BSP_STREAM"); stream = (e && *e=='1') ? 1 : 0;
+                      if (stream) BSP_LOG("STREAM on : 1 burst TS0/trame en ordre FN (cohérence horloge)"); }
+    if (stream) {
+        /* plus ancien slot TS0 valide (plus petite FN au sens circulaire) */
+        BspBurstQueue *qq = &bsp.q[0];
+        int best = -1; uint32_t best_fn = 0;
+        for (int i = 0; i < BSP_QUEUE_LEN; i++) {
+            if (!qq->slot[i].valid) continue;
+            if (best < 0 || bsp_fn_delta(qq->slot[i].fn, best_fn) < 0) { best = i; best_fn = qq->slot[i].fn; }
+        }
+        if (best >= 0) calypso_bsp_deliver_buffered(best_fn);  /* livre ce slot (match exact) */
+        return n;
+    }
+    /* 2) sinon : livrer les bursts de cette trame (DARAM + IT). */
+    calypso_bsp_deliver_buffered(current_fn);
+    return n;
+}
+
 static void bsp_drain_cb(void *opaque)
 {
     static int64_t last_target = 0;
@@ -1757,12 +1827,40 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
             if (_iqsh > 12) _iqsh = 12;
             if (_iqsh) BSP_LOG("IQ_SHIFT=%d (echantillons >>%d avant DARAM : test saturation)", _iqsh, _iqsh);
         }
+        /* [2026-09-17] CALYPSO_BSP_RX_LEAD : décale le burst dans la fenêtre DARAM
+         * pour caler la TOA rapportée par le DSP sur la valeur attendue du firmware
+         * (prim_fbsb.c: toa -= 23 ⇒ cible ~23). Sweep pour trouver la valeur. */
+        static int rx_lead = -0x7fffffff;
+        if (rx_lead == -0x7fffffff) {
+            const char *e = getenv("CALYPSO_BSP_RX_LEAD");
+            rx_lead = (e && *e) ? atoi(e) : 0;
+            if (bsp.daram_len > 0) { rx_lead %= (int)bsp.daram_len; if (rx_lead < 0) rx_lead += bsp.daram_len; }
+            if (rx_lead) BSP_LOG("RX_LEAD=%d (decalage du burst dans la fenetre DARAM)", rx_lead);
+        }
+        /* Suivi tpu_offset : lead effectif = rx_lead + (offset - reference)/div.
+         * Le signe/div sont ajustables (CALYPSO_BSP_TPU_DIV, defaut 4 ;
+         * CALYPSO_BSP_TPU_SIGN, defaut +1) pour caler la convergence TOA->23. */
+        static int tpu_div = 0, tpu_sign = 0, tpu_track = -1;
+        if (tpu_track < 0) {
+            const char *e = getenv("CALYPSO_BSP_TPU_TRACK"); tpu_track = (e && *e=='1') ? 1 : 0;  /* opt-in : experimental */
+            const char *d = getenv("CALYPSO_BSP_TPU_DIV");   tpu_div  = (d && *d) ? atoi(d) : 4; if (tpu_div==0) tpu_div=4;
+            const char *g = getenv("CALYPSO_BSP_TPU_SIGN");  tpu_sign = (g && *g=='-') ? -1 : 1;
+            if (tpu_track) BSP_LOG("TPU_TRACK on (div=%d sign=%d) : le burst suit tpu_offset", tpu_div, tpu_sign);
+        }
+        int lead = rx_lead + g_toa_bias;
+        if (tpu_track) {
+            if (g_bsp_tpu_ref == 0x7fffffff && g_bsp_tpu_offset != 0) g_bsp_tpu_ref = g_bsp_tpu_offset;
+            if (g_bsp_tpu_ref != 0x7fffffff)
+                lead += tpu_sign * (g_bsp_tpu_offset - g_bsp_tpu_ref) / tpu_div;
+        }
+        int wo = (int)woff + lead;
+        if (bsp.daram_len > 0) { wo %= (int)bsp.daram_len; if (wo < 0) wo += bsp.daram_len; }
         for (int i = 0; i < n; i++) {
-            uint16_t a = (uint16_t)(bsp.daram_addr + woff);
+            uint16_t a = (uint16_t)(bsp.daram_addr + wo);
             bsp.dsp->data[a] = (uint16_t)(int16_t)(_iqsh ? (iq[i] >> _iqsh) : iq[i]);
             bsp_daram_wr_bucket(a);
-            woff++;
-            if (woff >= bsp.daram_len) woff = 0;
+            wo++;
+            if (wo >= (int)bsp.daram_len) wo = 0;
         }
         /* [2026-07-27] DARAM-FNSTAMP : publie le fn et le nombre d'ecritures
          * pour que le dump c54x estampille CE QU'IL LIT (voir en-tete patch). */

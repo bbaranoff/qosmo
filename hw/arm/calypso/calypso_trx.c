@@ -135,9 +135,9 @@ void calypso_trx_autosync_fn(uint32_t sch_fn)
 }
 
 /* ── pont DSP externe ─────────────────────────────────────────────────── */
-static bool pont_send(CalypsoTRX *s, uint32_t type, uint32_t a, uint32_t b)
+static bool pont_send(CalypsoTRX *s, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 {
-    CalypsoPontMsg m = { type, a, b };
+    CalypsoPontMsg m = { type, a, b, c };
     if (s->pont_fd < 0) {
         return false;
     }
@@ -202,7 +202,7 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
         exit(1);
     }
     CalypsoPontMsg m;
-    if (!pont_send(s, PONT_HELLO, CALYPSO_API_WORDS, CALYPSO_PONT_MAGIC) ||
+    if (!pont_send(s, PONT_HELLO, CALYPSO_API_WORDS, CALYPSO_PONT_MAGIC, 0) ||
         !pont_recv(s, &m, 2000) || m.type != PONT_HELLO_OK ||
         m.a != CALYPSO_API_WORDS || m.b != CALYPSO_PONT_MAGIC) {
         fprintf(stderr, "[trx] pont DSP : poignee de main refusee par %s\n", sock);
@@ -330,7 +330,7 @@ void calypso_trx_dsp_reset_line(bool active)
          * parque en 0xb41c, prete pour les COPY_BLOCK de l'ARM. C'est le SEUL
          * moment ou l'on remet le C54x a zero - jamais sur une commande du
          * bootloader (qosmo-dsp : « NE PAS re-reset ... preserve bootloader cmd »). */
-        pont_send(s, PONT_RESET, 0, 0);
+        pont_send(s, PONT_RESET, 0, 0, 0);
         fprintf(stderr, "[trx] pont DSP : RESET_DSP relache par le firmware -> "
                 "PONT_RESET (fn=%u)\n", s->fn);
     }
@@ -581,7 +581,7 @@ static void pont_echange(CalypsoTRX *s)
             }
         }
     }
-    if (libre && pont_send(s, PONT_TICK, s->fn, s->dsp_page)) {
+    if (libre && pont_send(s, PONT_TICK, s->fn, s->dsp_page, s->tpu_regs[TPU_OFFSET / 2])) {
         s->pont_pending = true;
     }
 }
@@ -612,8 +612,38 @@ static void tdma_tick(void *opaque)
         timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
         return;
     }
-    uint32_t wfn = __atomic_load_n(&g_wall_fn, __ATOMIC_ACQUIRE);
-    s->fn = (wfn ? wfn : s->fn + 1) % GSM_HYPERFRAME;
+    /* [2026-09-17] LOCK-STEP DSP (CALYPSO_PONT_LOCKSTEP=1, defaut ON en mode pont) :
+     * n'avancer la trame (fn + IT TPU-frame au firmware) QUE si le DSP externe a fini
+     * la trame precedente. Sinon QEMU genere des trames plus vite que le DSP ne les
+     * traite, les ticks sont sautes, et le compteur de trame du firmware s'envole
+     * (fn_offset ~600k) : les trois horloges (BTS/QEMU/firmware) divergent et
+     * l'acquisition ne se verrouille jamais. En lock-step, firmware et DSP restent sur
+     * la MEME trame -> coherence d'horloge, TOA stable, verrouillage natif possible. */
+    if (s->pont && s->pont_fd >= 0 && s->pont_pending) {
+        static int ls = -1;
+        if (ls < 0) { const char *e = getenv("CALYPSO_PONT_LOCKSTEP"); ls = (e && *e=='1') ? 1 : 0; }
+        if (ls) {
+            CalypsoPontMsg m;
+            if (pont_recv(s, &m, 0) && m.type == PONT_DONE) {
+                s->pont_pending = false; s->pont_frames++;
+                if (m.a & PONT_DONE_API_IRQ) { s->pont_api_irqs++; qemu_irq_raise(s->irqs[CALYPSO_IRQ_API]); }
+            } else {
+                /* DSP pas encore pret : ne pas avancer, reessayer bientot */
+                timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 8);
+                return;
+            }
+        }
+    }
+    {
+        static int ls2 = -1;
+        if (ls2 < 0) { const char *e = getenv("CALYPSO_PONT_LOCKSTEP"); ls2 = (e && *e=='1') ? 1 : 0; }
+        if (s->pont && s->pont_fd >= 0 && ls2) {
+            s->fn = (s->fn + 1) % GSM_HYPERFRAME;   /* rythme DSP, pas l'horloge murale */
+        } else {
+            uint32_t wfn = __atomic_load_n(&g_wall_fn, __ATOMIC_ACQUIRE);
+            s->fn = (wfn ? wfn : s->fn + 1) % GSM_HYPERFRAME;
+        }
+    }
 
     calypso_tpu_sequencer_tick(s->fn);
     if (g_uart_modem) {

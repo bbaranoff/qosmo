@@ -38,6 +38,9 @@ void calypso_bsp_init(struct C54xState *dsp);
  *   iq       — interleaved int16 I,Q,I,Q,... in DSP-native (host) endianness
  *   n_int16  — number of int16 elements in iq[]  (= 2 * n_complex_samples)
  */
+void calypso_bsp_set_tpu_offset(int qbits);
+void calypso_bsp_toa_feedback(int toa);
+int  calypso_bsp_service(uint32_t current_fn);  /* draine 6702 + livre la trame courante (hote hors QEMU) */
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16);
 
