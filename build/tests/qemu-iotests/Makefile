@@ -1,1 +1,0 @@
-/opt/GSM/qosmo/tests/qemu-iotests/Makefile

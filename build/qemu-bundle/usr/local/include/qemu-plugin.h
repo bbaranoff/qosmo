@@ -1,1 +1,0 @@
-/opt/GSM/qosmo/include/qemu/qemu-plugin.h

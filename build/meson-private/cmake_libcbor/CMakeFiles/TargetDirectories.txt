@@ -1,2 +1,0 @@
-/opt/GSM/qosmo/build/meson-private/cmake_libcbor/CMakeFiles/edit_cache.dir
-/opt/GSM/qosmo/build/meson-private/cmake_libcbor/CMakeFiles/rebuild_cache.dir

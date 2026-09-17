@@ -1,1 +1,0 @@
-/opt/GSM/qosmo/build/meson-private/libfdt.pc

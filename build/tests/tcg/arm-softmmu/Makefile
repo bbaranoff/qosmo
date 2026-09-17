@@ -1,1 +1,0 @@
-/opt/GSM/qosmo/tests/tcg/Makefile.target

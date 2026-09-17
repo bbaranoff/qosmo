@@ -1,1 +1,0 @@
-/opt/GSM/qosmo/pc-bios/optionrom/Makefile
