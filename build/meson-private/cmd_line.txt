@@ -1,0 +1,10 @@
+[options]
+werror = false
+docs = disabled
+plugins = true
+l1_grgsm = enabled
+l1_dsp = disabled
+
+[properties]
+native_file = ['/opt/GSM/qosmo/build/config-meson.cross']
+

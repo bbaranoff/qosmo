@@ -1,0 +1,1 @@
+/opt/GSM/qosmo/subprojects/dtc/libfdt/libfdt.h
