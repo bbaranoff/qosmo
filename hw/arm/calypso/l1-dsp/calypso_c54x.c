@@ -3853,7 +3853,132 @@ int c54x_run(C54xState *s, int n_insns)
             sd_lhi = s->data[s->ar[5]];
             sd_llo = s->data[(uint16_t)(s->ar[5] + 1)];
         }
+        /* [2026-09-18] PISTE-PC : trace pas-a-pas d une PLAGE de PC, avec
+         * l opcode REEL vu par le coeur et les registres AVANT execution.
+         * Env : CALYPSO_PISTE_LO / CALYPSO_PISTE_HI / CALYPSO_PISTE_N (def 400).
+         * Motif : l etage qui reecrit le tampon de bits souples 0x2a00 sort
+         * 142 zeros sur 7 jobs SB sur 12 et des valeurs saines sur les 5 autres.
+         * Il faut voir l instruction et son etat, pas le deduire. Contrairement
+         * aux sondes de c54x_mem.c, le PC imprime ici est celui AVANT
+         * avancement : c est le vrai PC de l instruction. */
+        {
+            static int pi_init = 0; static long pi_lo = -1, pi_hi = -1, pi_max = 400, pi_n = 0;
+            if (!pi_init) { pi_init = 1;
+                const char *l = getenv("CALYPSO_PISTE_LO"), *h = getenv("CALYPSO_PISTE_HI"),
+                           *n = getenv("CALYPSO_PISTE_N");
+                if (l && *l) pi_lo = strtol(l, NULL, 0);
+                if (h && *h) pi_hi = strtol(h, NULL, 0); else pi_hi = pi_lo;
+                if (n && *n) pi_max = strtol(n, NULL, 0);
+            }
+            if (pi_lo >= 0 && s->pc >= (uint16_t)pi_lo && s->pc <= (uint16_t)pi_hi
+                && pi_n < pi_max) {
+                pi_n++;
+                fprintf(stderr, "[c54x] PISTE pc=0x%04x op=0x%04x A=0x%010llx B=0x%010llx "
+                        "T=0x%04x AR0=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x "
+                        "BRC=%u rpt=%u insn=%u mot_suivant=0x%04x\n",
+                        s->pc, exec_op, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
+                        (unsigned long long)(s->b & 0xFFFFFFFFFFULL), s->t,
+                        s->ar[0], s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->ar[6], s->ar[7],
+                        (unsigned)s->brc, (unsigned)s->rpt_count, (unsigned)s->insn_count,
+                        prog_fetch(s, (uint16_t)(s->pc + 1)));
+                /* mots POINTES par AR2..AR5 : lecture directe de data[] (ces
+                 * adresses sont en RAM interne, hors alias OVLY/MMR), pour voir
+                 * ce qu un mpy/mac dual-operand consomme reellement. */
+                { /* adressage DIRECT : DP, CPL, SP et les deux adresses
+                   * candidates avec leur contenu. Un `ld Smem,T` qui charge 0
+                   * peut lire la bonne case (vide) ou la mauvaise case : seule
+                   * l adresse resolue tranche. */
+                    uint16_t dpv = s->st0 & 0x1FF;
+                    uint16_t adp = (uint16_t)((dpv << 7) | (exec_op & 0x7F));
+                    uint16_t asp = (uint16_t)(s->sp + (exec_op & 0x7F));
+                    fprintf(stderr, "[c54x] PISTE   DP=0x%03x CPL=%d SP=%04x | direct@DP=0x%04x:%04x "
+                            "direct@SP=0x%04x:%04x | indirect=%s\n",
+                            dpv, (s->st1 & 0x4000) ? 1 : 0, s->sp,
+                            adp, s->data[adp], asp, s->data[asp],
+                            (exec_op & 0x80) ? "oui" : "non");
+                }
+                { /* dump optionnel d une plage data a chaque passage : voir
+                   * DIVERGER un job sain d un job qui sort des zeros. */
+                    static int pd_init = 0; static long pd_lo = -1, pd_hi = -1;
+                    if (!pd_init) { pd_init = 1;
+                        const char *l = getenv("CALYPSO_PISTE_DUMP_LO");
+                        const char *h = getenv("CALYPSO_PISTE_DUMP_HI");
+                        if (l && *l) pd_lo = strtol(l, NULL, 0);
+                        if (h && *h) pd_hi = strtol(h, NULL, 0); else pd_hi = pd_lo;
+                    }
+                    if (pd_lo >= 0) {
+                        for (long a = pd_lo; a <= pd_hi; a += 8) {
+                            fprintf(stderr, "[c54x] PISTE-RAM 0x%04lx:", a);
+                            for (long k = a; k < a + 8 && k <= pd_hi; k++)
+                                fprintf(stderr, " %04x", s->data[(uint16_t)k]);
+                            fprintf(stderr, "\n");
+                        }
+                    }
+                }
+                fprintf(stderr, "[c54x] PISTE   *AR2[%04x]=%04x *AR3[%04x]=%04x "
+                        "*AR4[%04x]=%04x *AR5[%04x]=%04x\n",
+                        s->ar[2], s->data[s->ar[2]], s->ar[3], s->data[s->ar[3]],
+                        s->ar[4], s->data[s->ar[4]], s->ar[5], s->data[s->ar[5]]);
+            }
+        }
+        uint16_t t_avant_piste = s->t; uint16_t pc_avant_piste = s->pc;
+        int64_t a_avant_piste = s->a, b_avant_piste = s->b;
         consumed = c54x_exec_one(s);
+        /* [2026-09-18] PISTE-T : journalise CHAQUE changement du registre T dans
+         * une fenetre d instructions (CALYPSO_T_LO / CALYPSO_T_HI, en insn).
+         * Motif : tous les mpy de la chaine SB calculent T*Smem avec T=0 alors
+         * que les operandes memoire sont sains ; il faut savoir qui a charge T
+         * et quand, pas le supposer. */
+        {
+            static int ti_init = 0; static long ti_lo = -1, ti_hi = -1;
+            if (!ti_init) { ti_init = 1;
+                const char *l = getenv("CALYPSO_T_LO"), *h = getenv("CALYPSO_T_HI");
+                if (l && *l) ti_lo = strtol(l, NULL, 0);
+                if (h && *h) ti_hi = strtol(h, NULL, 0);
+            }
+            int dans_fenetre = (ti_lo >= 0 && s->insn_count >= (unsigned)ti_lo
+                                && s->insn_count <= (unsigned)ti_hi);
+            if (dans_fenetre && s->t != t_avant_piste)
+                fprintf(stderr, "[c54x] PISTE-T pc=0x%04x op=0x%04x T: 0x%04x -> 0x%04x insn=%u\n",
+                        pc_avant_piste, exec_op, t_avant_piste, s->t, (unsigned)s->insn_count);
+            /* QUI ANNULE : transitions non-nul -> nul d un accumulateur. Le
+             * defaut se propage de proche en proche (« nul parce que son entree
+             * est nulle ») ; ce qui compte est la PREMIERE annulation. */
+            if (dans_fenetre && a_avant_piste != 0 && s->a == 0)
+                fprintf(stderr, "[c54x] PISTE-NUL pc=0x%04x op=0x%04x A: 0x%010llx -> 0 insn=%u\n",
+                        pc_avant_piste, exec_op,
+                        (unsigned long long)(a_avant_piste & 0xFFFFFFFFFFULL),
+                        (unsigned)s->insn_count);
+            if (dans_fenetre && b_avant_piste != 0 && s->b == 0)
+                fprintf(stderr, "[c54x] PISTE-NUL pc=0x%04x op=0x%04x B: 0x%010llx -> 0 insn=%u\n",
+                        pc_avant_piste, exec_op,
+                        (unsigned long long)(b_avant_piste & 0xFFFFFFFFFFULL),
+                        (unsigned)s->insn_count);
+        }
+        /* [2026-09-18] OVM (ST1 bit 9, mode saturation) : la ROM du DSP l'ACTIVE, et le
+         * coeur l'ignorait totalement — `sat32()` etait defini et utilise ZERO fois dans
+         * tout le fichier. Consequence : les resultats qui devraient etre ecretes a
+         * 32 bits croissent librement dans les 8 bits de garde. Dans un MLSE en virgule
+         * fixe, l'ecretage est ce qui BORNE les metriques de chemin ; sans lui elles
+         * divergent et la contribution relative des symboles de bord s'effondre. Mesure
+         * a l'appui : le profil d'influence couvre trois ordres de grandeur entre le
+         * milieu du burst (13452, 19534) et ses bords (2 a 30).
+         * Ecretage POST-INSTRUCTION, donc approximatif : le silicium sature par
+         * operation. C'est une sonde de decision, pas l'implementation finale.
+         * Gate CALYPSO_ISA_OVM, defaut 0 pour ne rien changer par surprise. */
+        {
+            static int ovm_gate = -1;
+            if (ovm_gate < 0) {
+                ovm_gate = calypso_gate("CALYPSO_ISA_OVM", 0);
+                if (ovm_gate)
+                    fprintf(stderr, "[c54x] ISA-OVM ACTIF : ecretage des accumulateurs a "
+                            "32 bits quand ST1.OVM est pose (approximation post-instruction)\n");
+            }
+            if (ovm_gate && (s->st1 & ST1_OVM)) {
+                s->a = sat32(s->a);
+                s->b = sat32(s->b);
+            }
+        }
         /* SP-COLLAPSE probe (RO, revival dsp 2026-06-22) : attrape l'instruction
          * EXACTE qui effondre SP sous 0x0800 (1ère + 30 suivantes) — le seed de
          * toute la cascade (boot-stub / spin 0xc6ac). */

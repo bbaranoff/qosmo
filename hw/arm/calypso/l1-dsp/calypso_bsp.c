@@ -1142,103 +1142,41 @@ static void bsp_replay_cb(void *opaque)
  * INT0n = "RIF receive interrupt" = bit 0 / vec 16 — que le modele n'emet nulle part,
  * alors que l'IMR mesuree (0x52ed) a justement le bit 0 DEMASQUE.
  *
- * Gate CALYPSO_BSP_VEC30 (defaut 0), CALYPSO_BSP_VEC30_ALSO_INT3 pour vec19. */
-static int calypso_bsp_vec30_on(void)
-{
-    static int c = -1;
-    if (c < 0) {
-        c = calypso_gate("CALYPSO_BSP_VEC30", 0);
-        if (c)
-            fprintf(stderr, "[bsp] BSP_VEC30=1 (CABLAGE FIDELE, CAL000 §5.1+§6+§3.7.1) : "
-                    "livraison RX routee de vec21/bit5 (= XINT/SPI transmit, stub RETE) "
-                    "vers vec30/bit14 (= INT10n/DMA, canal dedie RIF-RX -> FB 0x0158)\n");
-    }
-    return c;
-}
+ * [2026-09-18] Degate : plus de gate, vec30 est le cablage, pas une option. */
 
-static int calypso_bsp_vec30_int3_on(void)
-{
-    static int c = -1;
-    if (c < 0) {
-        c = calypso_gate("CALYPSO_BSP_VEC30_ALSO_INT3", 0);
-        if (c)
-            fprintf(stderr, "[bsp] BSP_VEC30_ALSO_INT3=1 : vec19/bit3 (STUB) aussi "
-                    "route vers vec30/bit14\n");
-    }
-    return c;
-}
 
-/* [2026-08-03] CALYPSO_BSP_RX_VEC=<n> — le vecteur de LIVRAISON RX, en clair.
- *
- * MESURE DU 03/08 (profil native_twl, run avec l'IT trame cablee) :
+/* [2026-08-03] MESURE (profil native_twl, IT trame cablee) :
  *     [bsp] DELIVER resume : vec21=24644 vec19=24857 vec30=0
- * Soit ~49 000 bursts RX annonces au DSP sur vec21 et vec19. Or CAL000 §5.1 :
- *     vec21 = XINT  = SPI TRANSMIT
- *     vec19 = TINT  = timer du DSP
- * Ni l'un ni l'autre n'a le moindre rapport avec la radio, et le ROM y a des
- * stubs RETE. Le correlateur n'est donc jamais prevenu qu'un burst est arrive.
- *
- * [2026-08-03] ⚠ CE PARAGRAPHE CITAIT « fb0_att=37, fb0_ret=0 » comme
- * confirmation. `fb0_ret` etait un compteur MORT (jamais incremente, donc
- * toujours 0) : il ne confirmait rien. Retire. Le reste du raisonnement tient
- * sur vec21/vec19/vec30, qui sont, eux, mesures.
- *
- * Les deux vecteurs que le §3.7.1 autorise pour le RIF, selon le mode :
- *   vec16 / bit 0  = INT0n  « RIF receive interrupt »  — mode XIO mot-a-mot
- *   vec30 / bit 14 = INT10n « DMA interrupt »          — mode DMA (§6 : canal
- *                    dedie RIF-RX ; « an end-DMA request is sent »)
- * Les DEUX sont demasques dans l'IMR mesuree (0x52ef : bit0=1, bit14=1), et le
- * modele n'emettait sur AUCUN des deux.
- *
- * Ce gate remplace le booleen BSP_VEC30 par un numero, pour pouvoir departager
- * les deux modes du §3.7.1 en un run chacun au lieu d'un balayage. Absent =
- * comportement historique strictement inchange (BSP_VEC30 continue de marcher).
- * bit = vec - 16 (formule de calypso_c54x.h, confirmee par la mesure vec28/bit12). */
-static int calypso_bsp_rx_vec(void)
-{
-    static int v = -2;
-    if (v == -2) {
-        const char *e = getenv("CALYPSO_BSP_RX_VEC");
-        v = (e && *e) ? (int)strtol(e, NULL, 0) : -1;
-        if (v >= 0 && (v < 16 || v >= 32)) {
-            fprintf(stderr, "[bsp] BSP_RX_VEC=%d hors plage 16..31 — ignore\n", v);
-            v = -1;
-        }
-        if (v >= 0)
-            fprintf(stderr, "[bsp] BSP_RX_VEC=%d (IMR bit %d) : livraison RX forcee "
-                    "sur ce vecteur. CAL000 §5.1/§3.7.1 : 16=INT0n RIF receive "
-                    "(mode XIO), 30=INT10n DMA (mode buffered, canal dedie RIF-RX). "
-                    "Les vecteurs historiques 21/19 sont SPI transmit et timer DSP.\n",
-                    v, v - 16);
-    }
-    return v;
-}
+ * ~49 000 bursts RX annonces sur vec21 (XINT = SPI transmit) et vec19 (TINT =
+ * timer DSP), deux stubs RETE sans rapport avec la radio : le correlateur n'a
+ * jamais ete prevenu qu'un burst etait arrive. Tranche le 18/09 en faveur de
+ * vec30 (cf. calypso_bsp_deliver). */
 
-/* Livraison RX : choisit le vecteur selon le gate, et compte ce qui part ou. */
+/* Livraison RX : fin de transfert DMA du canal RIF-RX.
+ *
+ * [2026-09-18] DEGATE. CAL000 §3.7.1 n'autorise que deux vecteurs pour le RIF,
+ * selon le mode, et les deux sont demasques dans l'IMR mesuree (0x50ef) :
+ *   vec16 / bit 0  = INT0n  « RIF receive »  — mode XIO, un mot a la fois
+ *   vec30 / bit 14 = INT10n « DMA »          — mode bufferise, canal dedie
+ *                    RIF-RX (§6 : « an end-DMA request is sent »)
+ * Le BSP depose un TAMPON en DARAM : c'est le mode bufferise, donc vec30.
+ *
+ * Ce qui precedait livrait sur vec28/bit12, l'IT TRAME du TPU — un fil qui
+ * annonce « nouvelle trame », pas « un burst est arrive ». Le commentaire du
+ * code le reconnaissait (« n'est PAS sa semantique correcte ») et laissait le
+ * depart a trancher via CALYPSO_BSP_RX_VEC=16 puis 30. Tranche par la mesure,
+ * sur le rejeu deterministe (c54x_exe --rejouer, cellule synthetique) :
+ *   vec28/12 (ancien defaut) : correlateur FB (0x770a) execute   0 fois
+ *   vec16/0                  : correlateur FB (0x770a) execute   0 fois
+ *   vec30/14                 : correlateur FB (0x770a) execute 110 fois
+ * Le DSP armait sa fenetre RX puis attendait l'IT de fin de reception : on lui
+ * envoyait une IT de trame, il n'a donc jamais su qu'un burst etait arrive.
+ * Les gates CALYPSO_BSP_RX_VEC / _VEC30 / _VEC30_ALSO_INT3 disparaissent avec
+ * le doute qu'elles servaient a lever. */
 static void calypso_bsp_deliver(C54xState *dsp, int vec, int bit)
 {
-    int src_vec = vec;
-    int forced = calypso_bsp_rx_vec();
-    if (forced >= 0) {
-        vec = forced;
-        bit = forced - 16;
-    } else if ((vec == 21 && calypso_bsp_vec30_on()) ||
-        (vec == 19 && calypso_bsp_vec30_int3_on())) {
-        vec = 30;
-        bit = 14;
-    }
-    {
-        static unsigned long long n21 = 0, n19 = 0, nre = 0;
-        if (vec != src_vec) nre++;          /* reroute (BSP_RX_VEC ou BSP_VEC30) */
-        else if (src_vec == 21) n21++;
-        else n19++;
-        if (((n21 + n19 + nre) % 500) == 1)
-            fprintf(stderr, "[bsp] DELIVER resume : vec21=%llu vec19=%llu "
-                    "reroute->vec%d=%llu\n",
-                    (unsigned long long)n21, (unsigned long long)n19,
-                    vec, (unsigned long long)nre);
-    }
-    c54x_interrupt_ex(dsp, vec, bit);
+    (void)vec; (void)bit;
+    c54x_interrupt_ex(dsp, C54X_IT_DMA_VEC, C54X_IT_DMA_BIT);
 }
 
 static size_t bsp_replay_load(const char *path)
@@ -1575,24 +1513,12 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
     /* Gate INT3 fire : skip si IFR.bit3 déjà set = DSP pas encore servi
      * le précédent. Évite stacking d'IRQs quand DSP traite plus lentement
      * que BSP delivery rate. */
-    /* [2026-09-03] ⚠️ CE FIL ANNONCE UN BURST RX, pas une nouvelle trame — le
-     * vecteur 28/12 (INT8n, IT trame TPU) n'est PAS sa semantique correcte.
-     * On l'y laisse parce que c'est EXACTEMENT ce que faisait le mode natif :
-     * l'ancien code livrait sur (19,3) et le remap de c54x_interrupt_ex, actif
-     * sous CALYPSO_FRAME_IT_NATIVE, le renvoyait sur (28,12) — d'ou le test
-     * anti-stacking qui portait deja sur le bit 12. Le remap etant supprime,
-     * livrer sur (19,3) tomberait desormais sur TINT (timer), un stub RETE : ce
-     * serait une REGRESSION par rapport au run ou d_fb_det est acquis 437 fois.
-     * Ecrire 28/12 en clair preserve donc le comportement mesure, sans indirection.
-     *
-     * LE BON VECTEUR RESTE A TRANCHER — CAL000 §3.7.1 en autorise deux pour le
-     * RIF, tous deux demasques dans l'IMR relevee (0x52ef) et emis par personne :
-     *   vec16 / bit 0  = INT0n  « RIF receive »   (mode XIO mot-a-mot)
-     *   vec30 / bit 14 = INT10n « DMA interrupt » (mode buffered, canal RIF-RX)
-     * Se departagent en un run chacun via CALYPSO_BSP_RX_VEC=16 puis 30. */
+    /* [2026-09-18] Ce fil annonce un BURST RX : fin de transfert DMA du canal
+     * RIF-RX, donc vec30/bit14 (INT10n). Il a longtemps ete livre sur vec28/12,
+     * l'IT trame du TPU, faute d'avoir tranche ; la mesure l'a fait. */
     if (bsp.dsp && bsp.dsp->running &&
-        !(bsp.dsp->ifr & (1 << C54X_IT_TPU_FRAME_BIT))) {
-        calypso_bsp_deliver(bsp.dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
+        !(bsp.dsp->ifr & (1 << C54X_IT_DMA_BIT))) {
+        calypso_bsp_deliver(bsp.dsp, C54X_IT_DMA_VEC, C54X_IT_DMA_BIT);
         if (bsp.dsp->idle) bsp.dsp->idle = false;
     }
 
@@ -2072,8 +1998,8 @@ void calypso_bsp_deliver_buffered(uint32_t current_fn)
          * rx_burst — 28/12 preserve le comportement natif mesure, le vecteur RX
          * correct (16 ou 30) reste a departager. */
         if (bsp.dsp && bsp.dsp->running &&
-            !(bsp.dsp->ifr & (1 << C54X_IT_TPU_FRAME_BIT))) {
-            calypso_bsp_deliver(bsp.dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
+            !(bsp.dsp->ifr & (1 << C54X_IT_DMA_BIT))) {
+            calypso_bsp_deliver(bsp.dsp, C54X_IT_DMA_VEC, C54X_IT_DMA_BIT);
             if (bsp.dsp->idle) bsp.dsp->idle = false;
         }
 

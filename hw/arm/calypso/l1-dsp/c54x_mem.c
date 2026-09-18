@@ -1610,6 +1610,8 @@ static void dio_note(C54xState *s, const char *rw, uint16_t addr, uint16_t val)
 
 static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
 {
+    { static long _dwl_n = 0; if (getenv("CALYPSO_DWL_PROVE") && (_dwl_n++ % 100000) == 0)
+        fprintf(stderr, "[c54x] DWL-PROVE appel #%ld addr=0x%04x pc=0x%04x\n", _dwl_n, addr, s->pc); }
     {   /* ─────────────────────────────────────────────────────────────────────
          * [2026-08-03] FBCNT-WATCH — CALYPSO_FBROUTE=1 (meme gate que FBROUTE,
          * dont c'est la suite directe). LECTURE SEULE, plafonnee.
@@ -2627,6 +2629,44 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     (unsigned)s->insn_count);
                 break;
             }
+        }
+    }
+
+    /* [2026-09-18] WATCH-WR-PLAGE : journal chronologique de TOUTE ecriture
+     * dans une plage data [CALYPSO_WATCH_WR_LO, CALYPSO_WATCH_WR_HI], plafonne
+     * a CALYPSO_WATCH_WR_N lignes (defaut 600). Motif : etablir par la MESURE
+     * l ordre des ecritures du tampon de bits souples 0x2a00-0x2a8d (qui ecrit
+     * quoi, dans quel ordre, et si des zeros arrivent APRES les valeurs), au
+     * lieu de le deduire d un comptage agrege.
+     * Regle du PC (doc/SONDES.md) : le dispatcheur a deja avance le PC quand la
+     * sonde l observe, donc on imprime pc=<vu> et ecr=<vu-1> = ecrivain probable.
+     * Sortie inconditionnelle sur stderr (pas de C54_DBG) pour rester lisible
+     * meme sans CALYPSO_DEBUG ; inerte tant que LO/HI ne sont pas poses. */
+    {
+        static int wrp_init = 0;
+        static long wrp_lo = -1, wrp_hi = -1, wrp_max = 600;
+        static long wrp_seen = 0;
+        if (!wrp_init) {
+            wrp_init = 1;
+            const char *lo = getenv("CALYPSO_WATCH_WR_LO");
+            const char *hi = getenv("CALYPSO_WATCH_WR_HI");
+            const char *nn = getenv("CALYPSO_WATCH_WR_N");
+            if (lo && *lo) wrp_lo = strtol(lo, NULL, 0);
+            if (hi && *hi) wrp_hi = strtol(hi, NULL, 0);
+            if (nn && *nn) wrp_max = strtol(nn, NULL, 0);
+            if (wrp_lo >= 0 && wrp_hi < 0) wrp_hi = wrp_lo;
+        }
+        if (wrp_lo >= 0 && addr >= (uint16_t)wrp_lo && addr <= (uint16_t)wrp_hi) {
+            wrp_seen++;
+            if (wrp_seen <= wrp_max)
+                fprintf(stderr, "[c54x] WR-PLAGE #%ld data[0x%04x] idx=%d <- 0x%04x "
+                        "(was 0x%04x) pc=0x%04x ecr=0x%04x insn=%u\n",
+                        wrp_seen, addr, (int)(addr - (uint16_t)wrp_lo), val,
+                        s->data[addr], s->pc, (uint16_t)(s->pc - 1),
+                        (unsigned)s->insn_count);
+            else if (wrp_seen == wrp_max + 1)
+                fprintf(stderr, "[c54x] WR-PLAGE ... plafond %ld atteint, suite muette\n",
+                        wrp_max);
         }
     }
 
