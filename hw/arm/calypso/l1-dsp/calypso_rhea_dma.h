@@ -36,6 +36,8 @@ void     calypso_rhea_dma_rx_request(struct C54xState *s);
  * c'est la LECTURE du registre qui l'efface (CAL207 §11.3.5). Sans ca le modele
  * traite l'IT comme un FRONT et la perd des qu'elle arrive avec INTM=1 — ce qui
  * est le cas 15 fois sur 15 dans les runs mesures. */
+uint16_t calypso_rhea_dma_get_daram(void);
+uint16_t calypso_rhea_dma_get_len_words(void);
 bool     calypso_rhea_dma_irq_level(void);
 
 #endif /* CALYPSO_RHEA_DMA_H */

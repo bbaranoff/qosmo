@@ -62,6 +62,7 @@ bool calypso_bsp_tx_rach_burst(uint32_t fn, uint8_t bits[148]);
 bool calypso_bsp_send_rach_ra(uint8_t ra, uint8_t bsic, uint32_t fn, uint8_t tn);  /* [PORT LU] RACH UL depuis d_rach */
 
 uint16_t calypso_bsp_get_daram_addr(void);
+uint32_t calypso_bsp_get_last_fn(void);
 uint16_t calypso_bsp_get_daram_len(void);
 uint8_t  calypso_bsp_get_last_att(void);
 

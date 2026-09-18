@@ -373,6 +373,28 @@ static void rhea_abort_impl(const char *why)
 
 /* [2026-08-04] Niveau de INT10n : vrai tant qu'un canal garde IRQ_STATE.
  * Voir l'en-tete pour le pourquoi (CAL000 §5.1 : ligne LEVEL). */
+/* [2026-09-17] Adresse DARAM reellement programmee par la ROM dans DMA2 (canal RX).
+ * AAD est en OCTETS depuis la base de la fenetre API ; le mot DSP vaut
+ * 0x800 + (AAD & 0xFFF)/2 (meme conversion que le transfert lui-meme).
+ * Rend 0 si le canal n'est pas arme. Sert au BSP pour deposer le burst LA OU le
+ * DSP va le lire, au lieu d'une constante figee. */
+uint16_t calypso_rhea_dma_get_daram(void)
+{
+    if (!(rd.ch[1].ctrl & CTRL_ENABLE) && rd.ch[1].aad == 0) return 0;
+    if (rd.ch[1].aad == 0) return 0;
+    return (uint16_t)(0x800u + ((rd.ch[1].aad & 0x0FFFu) / 2u));
+}
+
+/* [2026-09-17] Longueur de page REELLEMENT programmee par le DSP, en mots.
+ * ALGTH est en octets (cf. max_words plus bas : algth/2). Le BSP s'en sert pour
+ * dimensionner le depot du burst au lieu d'un plafond fige a 296 mots, qui
+ * TRONQUAIT la fenetre SB de 380 mots et amputait le second bloc de donnees. */
+uint16_t calypso_rhea_dma_get_len_words(void)
+{
+    if (rd.ch[1].algth == 0) return 0;
+    return (uint16_t)(rd.ch[1].algth / 2u);
+}
+
 bool calypso_rhea_dma_irq_level(void)
 {
     if (!rhea_dma_on() || !rd.init)

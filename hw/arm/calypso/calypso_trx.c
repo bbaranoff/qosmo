@@ -10,6 +10,9 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
 #include "hw/arm/calypso/calypso_trx.h"
+/* l1-dsp/ n'est lie que sous --enable-l1-dsp : symbole FAIBLE, teste avant appel,
+ * pour que ce fichier reste commun aux deux L1 (cf. ilot l1-dsp). */
+extern void calypso_twl3025_set_afc_dac(int16_t dac_value) __attribute__((weak));
 #include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/calypso_timer.h"
 #include "hw/arm/calypso/calypso_sim.h"
@@ -273,6 +276,19 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
         s->api_ram[off / 2 + 1] = (uint16_t)(value >> 16);
     } else {
         ((uint8_t *)s->api_ram)[off] = (uint8_t)value;
+    }
+    /* [2026-09-17] RELAIS AFC — MANQUANT dans qosmo, present dans qemu-src.
+     * afc_load_dsp() du firmware ecrit dsp_api.db_w->d_afc (mot 15 de la page W :
+     * page0 = octet 0x001E, page1 = 0x0046). Sur silicium le DSP le serialise
+     * vers le TWL3025 par le TSP. Ici personne ne le relayait :
+     * calypso_twl3025_set_afc_dac() n'etait appele NULLE PART, donc la rotation
+     * des echantillons ne bougeait jamais et l'erreur de frequence mesuree par le
+     * detecteur FB ne convergeait pas -> le firmware n'atteignait jamais le seuil
+     * SB (800 Hz) et rejouait FB indefiniment. Mesure (rejeu deterministe) :
+     * sans ce relais df ~ milliers de Hz ; avec, df tombe sous 100 Hz et les 224
+     * tentatives SB ont lieu. */
+    if ((off == 0x001E || off == 0x0046) && size == 2 && calypso_twl3025_set_afc_dac) {
+        calypso_twl3025_set_afc_dac((int16_t)(uint16_t)value);
     }
 
     /* [2026-09-16] La fenetre entiere, pour les L1 qui la decodent (le C54x).

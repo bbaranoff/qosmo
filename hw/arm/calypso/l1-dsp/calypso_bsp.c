@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include "qemu/timer.h"
 #include "calypso_bsp.h"
+#include "calypso_rhea_dma.h"
 #include "calypso_c54x.h"
 #include "hw/arm/calypso/calypso_iota.h"
 #include "hw/arm/calypso/calypso_invariants.h"
@@ -523,6 +524,7 @@ static uint16_t parse_uint_env(const char *name, uint16_t def)
 }
 
 uint16_t calypso_bsp_get_daram_addr(void) { return bsp.daram_addr; }
+uint32_t calypso_bsp_get_last_fn(void) { return calypso_daram_last_fn; }
 uint16_t calypso_bsp_get_daram_len(void)  { return bsp.daram_len; }
 uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 
@@ -1477,6 +1479,45 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
     }
     if (n_int16 <= 0 || iq == NULL) return;
 
+    /* [2026-09-17] SUIVRE L'AAD DU DMA (CALYPSO_BSP_AAD_FOLLOW, defaut 1).
+     * bsp.daram_addr est une constante d'env (0x2a00) qui n'a jamais ete
+     * programmee depuis l'adresse que la ROM donne a son DMA : le burst
+     * atterrissait donc ailleurs que la ou la tache en cours va le lire
+     * (0x0cce pour FB comme pour SB). On depose desormais a l'adresse reellement
+     * programmee quand elle est connue. */
+    {
+        static int follow = -1;
+        if (follow < 0) { const char *e = getenv("CALYPSO_BSP_AAD_FOLLOW"); follow = (e && *e=='0') ? 0 : 1; }
+        if (follow) {
+            uint16_t aad = calypso_rhea_dma_get_daram();
+            if (aad && aad != bsp.daram_addr) {
+                static uint16_t prev; static unsigned nl;
+                if (aad != prev && nl < 8) { BSP_LOG("AAD_FOLLOW : depot du burst en 0x%04x (etait 0x%04x)", aad, bsp.daram_addr); prev = aad; nl++; }
+                bsp.daram_addr = aad;
+            }
+            /* [2026-09-17] ET LA LONGUEUR. bsp.daram_len valait 296 en dur, ce qui
+             * TRONQUAIT la fenetre SB : elle fait 380 mots (190 complexes), si bien
+             * que le second bloc de 39 bits de donnees de la SCH n'etait jamais
+             * transfere. Mesure : le tampon du DSP coincidait avec les echantillons
+             * livres sur exactement 296 mots puis divergeait. On suit desormais la
+             * longueur de page que le DSP programme lui-meme (ALGTH).
+             * CALYPSO_BSP_LEN_FOLLOW=0 restaure le plafond fige. */
+            static int lfollow = -1;
+            if (lfollow < 0) { const char *e = getenv("CALYPSO_BSP_LEN_FOLLOW"); lfollow = (e && *e=='0') ? 0 : 1; }
+            if (lfollow) {
+                uint16_t lw = calypso_rhea_dma_get_len_words();
+                if (lw && lw != bsp.daram_len && lw <= 2048) {
+                    static uint16_t prevl; static unsigned nll;
+                    if (lw != prevl && nll < 8) {
+                        BSP_LOG("LEN_FOLLOW : fenetre de %u mots (etait %u) — "
+                                "296 tronquait la SB qui en demande 380", lw, bsp.daram_len);
+                        prevl = lw; nll++;
+                    }
+                    bsp.daram_len = lw;
+                }
+            }
+        }
+    }
     if (bsp.daram_addr == 0) {
         if (bsp.bursts_seen <= 5) {
             BSP_LOG("rx_burst fn=%u tn=%u n=%d (target unset)",

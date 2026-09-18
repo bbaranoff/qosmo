@@ -8,6 +8,11 @@ osmocoding = dependency('libosmocoding', required: true)
 arm_ss.add(when: 'CONFIG_CALYPSO', if_true: [
   files(
     'calypso_c54x.c',
+    'c54x_exec.c',
+    'c54x_decode.c',
+    'c54x_mem.c',
+    'c54x_irq.c',
+    'c54x_probes.c',
     'calypso_arm2dsp.c',
     'calypso_mailbox.c',
     'calypso_fbsb.c',
