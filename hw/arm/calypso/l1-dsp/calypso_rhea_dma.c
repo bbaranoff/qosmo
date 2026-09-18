@@ -322,7 +322,7 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * [2026-08-03] LE TRANSFERT — CALYPSO_RHEA_DMA_XFER=1, defaut 0.
+ * [2026-08-03] LE TRANSFERT — degate le 18/09, plus de gate (voir plus bas).
  *
  * POURQUOI MAINTENANT. Le TODO §E posait la condition : « implementer SEULEMENT
  * si A debloque, il n'y aurait rien a transferer avant ». C'est fait — `0xa5cd`
@@ -345,22 +345,17 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
  *     n'est pas modelise. Si le firmware s'en sert, ca se verra comme un
  *     ecrasement — a implementer alors, pas par anticipation.
  *
- * ⚠️ CHANGEMENT DE NATURE, d'ou le gate a 0 par defaut : ce module cesse d'etre
- * un instrument de lecture pour devenir une piece de materiel. Tant que le gate
- * est a 0, le comportement d'avant le 03/08 est strictement conserve.
+ * [2026-09-18] DEGATE. Le gate valait 0 « pour conserver strictement le
+ * comportement d'avant le 03/08 » — une precaution de non-regression, pas un
+ * doute sur la fidelite : quand il est arme, le controleur vide le RIF vers la
+ * memoire API, ce que fait le silicium. Sans transfert, le DSP correle sur un
+ * tampon que personne ne remplit. Mesure sur le rejeu deterministe, ce gate
+ * etant le SEUL change (1200 trames, cellule synthetique) :
+ *     inactif (ancien defaut) : FB acceptees   0, SB tentees   0, CRC OK  0
+ *     actif                   : FB acceptees 119, SB tentees 115, CRC OK  2
+ * Les trois autres drapeaux du run (BSP_DARAM_LEN, REJEU_SB_FORCE,
+ * REJEU_SCH_PARTOUT) ne changent rien isolement : c'est bien le transfert.
  * ═══════════════════════════════════════════════════════════════════════════ */
-static bool rhea_dma_xfer_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        on = calypso_gate("CALYPSO_RHEA_DMA_XFER", 0);
-        fprintf(stderr, "[rhea-dma] TRANSFERT %s (CALYPSO_RHEA_DMA_XFER=%d) — %s\n",
-                on ? "ACTIF" : "inactif", on,
-                on ? "le controleur vide le RIF vers la memoire API"
-                   : "instrument de lecture seul, aucun transfert (defaut)");
-    }
-    return on != 0;
-}
 
 static void rhea_abort_impl(const char *why)
 {
@@ -407,7 +402,7 @@ bool calypso_rhea_dma_irq_level(void)
 
 void calypso_rhea_dma_rx_request(C54xState *s)
 {
-    if (!rhea_dma_on() || !rhea_dma_xfer_on())
+    if (!rhea_dma_on())
         return;
     rhea_dma_init();
 
