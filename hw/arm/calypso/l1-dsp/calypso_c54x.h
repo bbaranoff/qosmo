@@ -103,75 +103,59 @@
 #define C54X_INT_RESET   0
 #define C54X_INT_NMI     1
 /* ============================================================================
- * TABLE DES INTERRUPTIONS DU DSP CALYPSO — SOURCE : CAL000 §5.1 (ti-calypso1.pdf,
- * « DSP INTERRUPTS », p.24). Ver 1.3, HERCROM400G2.
+ * CALYPSO DSP INTERRUPT TABLE. Authority: CAL207 15.1 "DSP interrupts Mapping",
+ * which gives each vector's hex Location; vec = Location / 4. CAL000 5.1: "The
+ * DSP subchip owns 17 interrupt lines with 11 of which INT0n to INT10n are
+ * dedicated for external peripherals."
  *
- * [2026-08-03] CE BLOC REMPLACE LA TABLE SPRU131 QUI ÉTAIT ICI. C'ÉTAIT L'ERREUR
- * SOURCE DE TOUTE LA CASCADE : SPRU131 décrit le TMS320C54x GÉNÉRIQUE, alors que
- * le sous-chip DSP du Calypso (S28C128) a son propre mapping de périphériques.
- * Les deux tables divergent à partir du bit 3 : le C54x générique a QUATRE lignes
- * externes (INT0..INT3) avant TINT, le Calypso n'en a que TROIS (INT0n..INT2n).
- * D'où un décalage de 1 sur tout le reste, et des noms faux (BRINT0/BXINT0/DMAC0
- * n'existent pas sur Calypso).
+ * Do NOT substitute the generic TMS320C54x table from SPRU131: the Calypso DSP
+ * subchip (S28C128) has its own peripheral mapping. The generic part has four
+ * external lines (INT0..INT3) before TINT, Calypso has three (INT0n..INT2n), so
+ * everything from bit 3 on shifts by one, and BRINT0/BXINT0/DMAC0 do not exist
+ * here at all.
  *
- * §5.1 : « The DSP subchip owns 17 interrupt lines with 11 of which INT0n to
- * INT10n are dedicated for external peripherals. »
- *
- * [2026-08-03, DEUXIÈME CORRECTION] La première version de ce bloc suivait l'ORDRE
- * DE LA LISTE EN PROSE de CAL000 §5.1, faute de mieux. Cette liste est FAUSSE à
- * partir du bit 6 : elle plaçait AINT en bit 12. La table qui fait autorité est
- * CAL207 §15.1, « DSP interrupts Mapping », qui donne l'EMPLACEMENT EN HEXA de
- * chaque vecteur — pas un ordre à interpréter. vec = Location / 4.
- *
- *  bit  vec  Loc.  ligne     source (CAL207 §15.1)              sens
- *  ---  ---  ----  --------  ---------------------------------  ------
- *   0    16  0x40  INT0n     RIF receive interrupt              niveau
- *   1    17  0x44  INT1n     RIF transmit interrupt             niveau
- *   2    18  0x48  INT2n     UART interrupt                     niveau
- *   3    19  0x4C  TINT      Timer interrupts
+ *  bit  vec  Loc.  line      source (CAL207 15.1)               trigger
+ *  ---  ---  ----  --------  ---------------------------------  -------
+ *   0    16  0x40  INT0n     RIF receive interrupt              level
+ *   1    17  0x44  INT1n     RIF transmit interrupt             level
+ *   2    18  0x48  INT2n     UART interrupt                     level
+ *   3    19  0x4C  TINT      DSP timer
  *   4    20  0x50  RINT      SPI receive interrupt
  *   5    21  0x54  XINT      SPI transmit interrupt
- *   6    22  0x58  INT4n     MCSI transmit interrupt            niveau
- *   7    23  0x5C  INT5n     MCSI frame duration error          niveau
- *   8    24  0x60  INT3n     MCSI receive interrupt             niveau
- *   9    25  0x64  AINT      API interrupts (ARM ↔ DSP)
- *  10    26  0x68  INT6n     MCSI DAI interrupt                 niveau
- *  11    27  0x6C  INT7n     CYPHER interrupts                  FRONT
- *  12    28  0x70  INT8n     TPU FRAME interrupt                FRONT
- *  13    29  0x74  INT9n     TPU programmable interrupt         FRONT
- *  14    30  0x78  INT10n    DMA interrupt                      niveau
- *        1   0x04  nMIN      Abort on Rhea bus OR redirection INT4n (= NMI)
+ *   6    22  0x58  INT4n     MCSI transmit interrupt            level
+ *   7    23  0x5C  INT5n     MCSI frame duration error          level
+ *   8    24  0x60  INT3n     MCSI receive interrupt             level
+ *   9    25  0x64  AINT      API interrupt (ARM <-> DSP)
+ *  10    26  0x68  INT6n     MCSI DAI interrupt                 level
+ *  11    27  0x6C  INT7n     CYPHER interrupt                   edge
+ *  12    28  0x70  INT8n     TPU FRAME interrupt                edge
+ *  13    29  0x74  INT9n     TPU programmable interrupt         edge
+ *  14    30  0x78  INT10n    DMA interrupt                      level
+ *        1   0x04  nMIN      Rhea bus abort, or INT4n redirect (= NMI)
  *
- * CE QUI CHANGE PAR RAPPORT À LA LISTE EN PROSE : INT3n/INT4n/INT5n sont permutés,
- * **AINT est en bit 9 (pas 12)**, INT6n en bit 10, INT7n en bit 11, et l'IT TRAME
- * du TPU (INT8n) est en **bit 12 / vec 28**.
+ * The prose list in CAL000 5.1 disagrees from bit 6 on (it places AINT at bit
+ * 12). The CAL207 Location column wins: it is an address, not an order to be
+ * interpreted.
  *
- * VÉRIFIÉ PAR LA MESURE, et c'est ce qui rend cette table crédible : l'IMR du ROM
- * vaut 0x52ef = bits 0,1,2,3,5,6,7,9,12,14, soit RIF rx + RIF tx + UART + timer +
- * SPI tx + MCSI tx/err + **AINT** + **IT trame TPU** + DMA. Les bits laissés
- * masqués sont CYPHER (11), MCSI rx (8), TPU programmable (13) et SPI rx (4) —
- * exactement ce qu'un L1 GSM n'utilise pas à ce stade. Sous l'ancienne lecture, le
- * bit 11 « IT trame » n'était JAMAIS ouvert alors qu'osmocom ne signale que par
- * lui : l'incohérence venait de la table, pas du firmware.
+ * Measurements backing this table:
+ *  - ROM IMR reads 0x52ef (bits 0,1,2,3,5,6,7,9,12,14; 0x52ed on other runs,
+ *    the same minus bit 1) = RIF rx/tx, UART, TINT, SPI tx, MCSI tx/err, AINT,
+ *    TPU frame, DMA. The bits left masked are CYPHER (11), MCSI rx (8), TPU
+ *    programmable (13) and SPI rx (4) - exactly what a GSM L1 does not use.
+ *  - The ROM also does IMR |= 0x3000 = bits 12+13 = both TPU lines.
+ *  - The firmware writes 0x0380 to CNTRL_REG (XIO:FA00), which selects edge vs
+ *    level per channel (CAL207 15.2.1): bits 7, 8, 9 edge, matching exactly the
+ *    three lines CAL207 15.1 marks as edge (INT7n/INT8n/INT9n). Channel N is
+ *    therefore INTNn.
+ *  - vec 20 (RINT) and vec 21 (XINT) are SPI, unused by a GSM L1, and the ROM
+ *    holds a bare RETE stub at both.
  *
- * CONFIRMATION CROISÉE (§15.2.1) : le firmware écrit 0x0380 dans CNTRL_REG
- * (XIO:FA00), qui assigne edge/niveau par canal — bits 7, 8, 9 → canaux 7, 8, 9
- * en FRONT. Or §15.1 marque exactement INT7n, INT8n et INT9n comme « edge ». Le
- * canal N est donc bien INTNn.
- *
- * Formule inchangée et confirmée : vec = imr_bit + 16.
- * Note §5.1 sur INT9n : « a facility offered to the DSP programmer in order to
+ * CAL000 5.1 on INT9n: "a facility offered to the DSP programmer in order to
  * allow the generation of a DSP interrupt at a dedicated time with a quarter of
  * GSM bit accuracy. The interrupt is set in a scenario by using a time-stamped
- * instruction. » → c'est exactement le MOVE TPUI_DSP_INT_PG du séquenceur TPU.
+ * instruction." That is the TPU sequencer's MOVE TPUI_DSP_INT_PG.
  *
- * RECOUPEMENTS DE MESURE (ce qui rend la table crédible, pas seulement lue) :
- *   • vec21 = XINT/SPI TX → périphérique inutilisé en L1 GSM, et le ROM y a bien
- *     un stub RETE ; idem vec20 = RINT/SPI RX.
- *   • vec28 = AINT et vec30 = INT10n/DMA : deux slots déjà mesurés dans le ROM.
- *   • IMR mesurée 0x52ed → bits 0,2,3,5,6,7,9,12,14 = RIF RX, UART, TINT, SPI TX,
- *     MCSI RX/TX, MCSI DAI, AINT, DMA. Un L1 GSM plausible.
- *   • le ROM fait IMR |= 0x3000 = bits 12+13 = AINT + TPU programmable.
+ * Formula: vec = imr_bit + 16.
  * ==========================================================================*/
 #define C54X_IT_RIF_RX_VEC     16   /* INT0n  RIF receive              */
 #define C54X_IT_RIF_RX_BIT      0
@@ -191,7 +175,7 @@
 #define C54X_IT_MCSI_ERR_BIT    7
 #define C54X_IT_MCSI_RX_VEC    24   /* INT3n  MCSI receive      (0x60) */
 #define C54X_IT_MCSI_RX_BIT     8
-#define C54X_IT_API_VEC        25   /* AINT   API (ARM ↔ DSP)   (0x64) */
+#define C54X_IT_API_VEC        25   /* AINT   API (ARM<->DSP)   (0x64) */
 #define C54X_IT_API_BIT         9
 #define C54X_IT_MCSI_DAI_VEC   26   /* INT6n  MCSI DAI          (0x68) */
 #define C54X_IT_MCSI_DAI_BIT   10
@@ -204,19 +188,6 @@
 #define C54X_IT_DMA_VEC        30   /* INT10n DMA               (0x78) */
 #define C54X_IT_DMA_BIT        14
 
-/* [2026-09-03] SAS VIDÉ. `C54X_INT_FRAME_VEC/BIT` (19/3) est SUPPRIMÉ, et avec
- * lui le sas `CALYPSO_IT_TABLE_DOC` et le remap d'exécution 19/3 -> 28/12 qui
- * vivait dans `c54x_interrupt_ex()` sous les gates `CALYPSO_DSP_FRAME_VEC28` /
- * `CALYPSO_FRAME_IT_NATIVE`. Les émetteurs d'IT trame utilisent désormais
- * `C54X_IT_TPU_FRAME_VEC/BIT` (28/12) À LA SOURCE — ce que demandait
- * l'annotation @BEQUILLE du remap : « retirer quand la ligne frame est câblée
- * sur le bon vecteur à la source ».
- *
- * Pourquoi 19/3 était faux : c'est TINT, le timer du DSP, dont le ROM n'a qu'un
- * stub `RETE`. L'IT trame du TPU est INT8n = bit 12 / vec 28 (CAL207 §15.1,
- * `vec = Location/4`), recoupée par l'IMR mesurée `0x52ed` qui n'a de sens que
- * sous cette table. (Le commentaire legacy retiré ici disait « bit 11 = vec 27 » :
- * il était lui-même faux, la table ci-dessus fait foi.) */
 #define C54X_NUM_INTS        16
 
 typedef struct C54xState {
@@ -270,7 +241,8 @@ typedef struct C54xState {
     uint16_t rpt_count;  /* remaining RPT iterations */
     uint16_t rpt_pc;     /* PC of repeated instruction */
     bool     rpt_active;
-    bool     rpt_fresh;   /* RPT vient d'etre arme : 1ere lecture READA/MVPD repart de la base, pas du mvpd_src stale (fix 2026-06-24) */
+    bool     rpt_fresh;   /* RPT just armed: the first READA/MVPD read starts
+                          * from the base address, not from a stale mvpd_src. */
     uint16_t par;        /* Program Address Register (for READA/WRITA/MACD/MACP) */
     bool     par_set;
     bool     lk_used;    /* resolve_smem consumed extra word for lk */
@@ -392,23 +364,23 @@ int  c54x_load_section(C54xState *s, const char *path,
  * Returns number of words loaded, or -1 on error. */
 int  c54x_load_registers(C54xState *s, const char *path);
 
-/* [c54x-earlyboot] Boot du c54x a machine-init, AVANT que le vCPU ARM tourne.
- * L'ARM poste sa commande bootloader (data[0x0fff] = cmd, data[0x0ffe] = entry)
- * des fn=0 ; si le DSP ne boote qu'apres, son init-IDLE a 0xb419 (ST #1,*0xfff)
- * ecrase cette commande et le DSP spin eternellement a 0xb41c. En bootant ici,
- * il pose son IDLE et se parke AVANT l'ecriture ARM : la commande survit.
- * Aucune valeur de mailbox n'est forcee — seul le QUAND du boot est impose.
- * Gate : CALYPSO_DSP_RUN_C54X=1. */
+/* [c54x-earlyboot] Boot the C54x at machine-init time, BEFORE the ARM vCPU
+ * runs. ORDER IS LOAD-BEARING: the ARM posts its bootloader command
+ * (data[0x0fff] = cmd, data[0x0ffe] = entry) from fn=0, and the DSP's own
+ * init-IDLE at 0xb419 (ST #1,*0xfff) overwrites that command if the DSP boots
+ * afterwards, leaving it spinning forever at 0xb41c. Booting here parks the DSP
+ * on its IDLE before the ARM write, so the command survives. No mailbox value
+ * is forced; only the timing of the boot is. Gate: CALYPSO_DSP_RUN_C54X=1. */
 void c54x_early_boot(C54xState *s);
 
-/* Vrai si c54x_early_boot() a effectivement parke le DSP. Gate le re-reset du
- * c54x cote calypso_trx.c, qui re-jouerait la copie PROM->DARAM et ecraserait
- * la commande bootloader preservee ci-dessus. */
+/* True if c54x_early_boot() actually parked the DSP. Gates the C54x re-reset in
+ * calypso_trx.c, which would replay the PROM->DARAM copy and clobber the
+ * bootloader command preserved above. */
 bool c54x_early_booted(void);
 
-/* Mission courante du DSP (d_task_md) lue dans l'API RAM : FB=5 SB=6 TCH_FB=8
- * TCH_SB=9, 0 = aucune. Page 0 = data[0x0804], page 1 = data[0x0818].
- * Sert a gater les wires inter-blocs (BSP BRINT0) sur la mission FB/SB. */
+/* Current DSP mission (d_task_md) read from API RAM: FB=5 SB=6 TCH_FB=8
+ * TCH_SB=9, 0 = none. Page 0 = data[0x0804], page 1 = data[0x0818]. Used to
+ * gate the inter-block wires (BSP BRINT0) on the FB/SB mission. */
 uint16_t c54x_task_md(C54xState *s);
 
 #endif /* CALYPSO_C54X_H */

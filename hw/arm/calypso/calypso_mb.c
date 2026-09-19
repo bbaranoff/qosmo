@@ -103,10 +103,9 @@ static void calypso_machine_init(MachineState *machine)
 static void calypso_machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
-    /* [2026-09-16] La description annoncait « couche 1 gr-gsm » - heritee de
-     * qosmo-grgsm, elle etait fausse des que la base tournait seule ou sous
-     * qosmo-dsp. Elle nomme desormais la L1 reellement enregistree, ou
-     * « aucune » quand qosmo tourne nu (voir calypso_l1_ops.h). */
+    /* The description names the L1 actually registered, or "none" when qosmo
+     * runs bare (see calypso_l1_ops.h): hard-coding one L1 here is wrong as
+     * soon as the machine runs under another. */
     static char desc[96];
     snprintf(desc, sizeof(desc),
              "TI Calypso baseband (firmware osmocom-bb, couche 1 : %s)",

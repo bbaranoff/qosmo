@@ -56,10 +56,10 @@
 #define TCH_UL_SLOTS        16
 #define TCH_UL_SLOT_SZ      64
 #define KC_PUBLISH_EVERY    22
-/* Delai (en appels de publish_kc, soit ~100 ms chacun) avant d'annoncer un
- * passage en clair. Le firmware efface d_a5mode a chaque DM_REL_REQ, y compris
- * pendant un Assignment Command ou la Kc est rechargee juste apres ; la BTS,
- * elle, ne cesse jamais de chiffrer. */
+/* Delay, in publish_kc() calls (~100 ms each), before announcing a switch to
+ * cleartext. The firmware clears d_a5mode on every DM_REL_REQ, including during
+ * an Assignment Command where the Kc is reloaded right after, while the BTS
+ * never stops ciphering. */
 #define KC_CLEAR_GRACE      5
 #define KC_RECLEN           32
 
@@ -1107,7 +1107,8 @@ static void publish_kc(void)
         return;
     }
     if (!algo && have_last && last[4]) {
-        /* Chiffre -> clair : on attend de voir si la Kc revient (assignation). */
+        /* Ciphered -> clear: wait and see whether the Kc comes back
+         * (assignment in progress). */
         if (++clear_pending < KC_CLEAR_GRACE) {
             return;
         }

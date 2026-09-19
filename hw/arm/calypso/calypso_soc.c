@@ -76,9 +76,9 @@ static void cntl_write(void *opaque, hwaddr offset, uint64_t value, unsigned siz
 {
     CalypsoSoCState *s = CALYPSO_SOC(opaque);
     if (offset == 4) {
-        /* CNTL_RST : le firmware y assert puis relache RESET_DSP (bit 1) dans
-         * dsp_pre_boot(). Sur silicium c'est ce qui relance la ROM de boot du
-         * DSP, qui pose alors IDLE dans BL_CMD_STATUS. */
+        /* CNTL_RST: dsp_pre_boot() asserts then releases RESET_DSP (bit 1).
+         * On silicon that restarts the DSP boot ROM, which then writes IDLE
+         * into BL_CMD_STATUS. */
         s->cntl_rst = (uint16_t)value;
         calypso_trx_dsp_reset_line((value & 0x2) != 0);
         return;

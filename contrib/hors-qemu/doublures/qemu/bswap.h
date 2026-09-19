@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Doublure de qemu/bswap.h : les seuls acces utilises par la L1 gr-gsm.
- * [2026-09-16] Le vrai en-tete entraine host-utils puis rcu et ramlist. */
+/* Stub for qemu/bswap.h: only the accessors the gr-gsm L1 actually uses.
+ * The real header drags in host-utils, then rcu and ramlist. */
 #ifndef QOSMO_DOUBLURE_BSWAP_H
 #define QOSMO_DOUBLURE_BSWAP_H
 #include <stdint.h>
@@ -23,7 +23,7 @@ static inline void stl_le_p(void *p, uint32_t v) { memcpy(p, &v, 4); }
 #define be32_to_cpu(x) __builtin_bswap32(x)
 #define cpu_to_be16(x) __builtin_bswap16(x)
 #define cpu_to_be32(x) __builtin_bswap32(x)
-/* Little-endian natif sur x86/ARM : conversions neutres. */
+/* Native little-endian on x86/ARM: these conversions are no-ops. */
 #define le16_to_cpu(x) ((uint16_t)(x))
 #define le32_to_cpu(x) ((uint32_t)(x))
 #define le64_to_cpu(x) ((uint64_t)(x))

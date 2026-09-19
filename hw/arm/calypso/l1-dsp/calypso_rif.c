@@ -1,75 +1,64 @@
 /*
- * calypso_rif.c — Radio InterFace (RIF) du Calypso, vue DSP (espace XIO).
+ * calypso_rif.c - Calypso Radio InterFace (RIF), DSP side (XIO space).
  *
- * POURQUOI CE FICHIER EXISTE (2026-08-03).
- * ----------------------------------------
- * Mesure sur un run native_twl : le DSP prend bien son interruption de reception
- * (`PC=0x00c0`, 16 330 entrees), puis n'en sort rien — `fb0_att=37`, `A_CD-WR=0`.
- * ([2026-08-03] `fb0_ret=0` etait aussi cite ici : compteur MORT, jamais
- * incremente, retire — il n'etayait rien.)
- * La sonde PORTR-ANY donne la raison, et elle est unanime :
+ * Every PORTR instruction of the DSP firmware reads XIO:0003 (SPCR): the
+ * PORTR-ANY probe reports `PA=0x0003 addr=0x000e PC=0xa675` on 30 samples out
+ * of 30. Without a RIF model PORTR is a no-op (outside PA=0xF430/0x0034 under
+ * gate CALYPSO_FIX_PORTR, default 0, which this firmware never uses), so the
+ * receive handler tests a stale word and returns: the DSP does take its RX
+ * interrupt (PC=0x00c0, 16330 entries) but produces nothing (fb0_att=37,
+ * A_CD-WR=0).
  *
- *     PORTR-ANY PA=0x0003 addr=0x000e PC=0xa675      <- 30 releves sur 30
+ * SILICON (CAL207 §12.1, Table 19):
  *
- * TOUTES les instructions PORTR du firmware DSP lisent `XIO:0003`. Or `PORTR`
- * etait un NO-OP dans le modele : hors `PA=0xF430/0x0034` sous le gate
- * CALYPSO_FIX_PORTR (defaut 0, et le firmware n'utilise jamais ces PA-la), le
- * code faisait `(void)pa; (void)addr;` — il n'ecrivait meme pas la destination.
- * Le handler testait donc un mot perime et repartait. Le RIF n'etait pas
- * modelise du tout cote DSP.
- *
- * CE QUE DIT LE SILICIUM (CAL207 §12.1, Table 19) :
- *
- *   Registre  XIO      ARM         Acces      Reset
- *   DXR       0x0000   FFFF:7000   16b R/W    indefini
- *   DRR       0x0001   FFFF:7002   16b R      indefini
+ *   Register  XIO      ARM         Access     Reset
+ *   DXR       0x0000   FFFF:7000   16b R/W    undefined
+ *   DRR       0x0001   FFFF:7002   16b R      undefined
  *   SPCX      0x0002   n.a.        15b        000 0101 1001 1110 = 0x059E
  *   SPCR      0x0003   n.a.        15b        011 1100 1010 0010 = 0x3CA2
  *
- * SPCR (§12.6) — la valeur de reset annoncee a ete reverifiee champ par champ
- * et tombe exactement sur 0x3CA2, ce qui valide la lecture :
+ * SPCR (§12.6), field by field; the fields add up to exactly the documented
+ * reset value 0x3CA2, which confirms the reading:
  *
- *   0  DLB          0   boucle locale numerique
- *   1  RRST         1   reset du recepteur (0 -> efface RSRFULL et RRDY)
- *   2  RRDY         0   « Unused » selon §12.6 — mais §12.3 dit « DRR is updated
- *                       when RSR is ready to be read and RRDY=1 ». Le document se
- *                       contredit ; cf. CALYPSO_RIF_RRDY_UNUSED plus bas.
- *   3  RSRFULL      0   un mot est dans RSR et DRR n'a pas encore ete lu.
- *                       NOTE du doc : PAS remis a zero par une lecture de DRR —
- *                       « This allows keeping trace of a reception problem ».
- *   4  ALMOST_FULL  0   1 = FIFO de reception non vide (au seuil THRESHOLD)
- *   5  FIFO_EMPTY   1   FIFO vide. Le texte du doc dit « 0 = receive FIFO is
- *                       empty », mais la valeur de reset est 1 ET la FIFO est
- *                       vide au reset : la prose est inversee, on suit le reset.
- *   6  FIFO_FULL    0   FIFO pleine
- *   9:7 THRESHOLD 001   seuil du drapeau « FIFO non vide », maximum 4
- *   10 XINT_MASK    1   1 = interruption d'emission masquee
- *   11 RINT_MASK    1   1 = interruption de RECEPTION masquee
- *   12 XDMA_MASK    1   1 = requete DMA d'emission masquee
- *   13 RDMA_MASK    1   1 = requete DMA de RECEPTION masquee
- *   14 CLKLB        0   horloges TX/RX issues de la meme source interne
+ *   0  DLB          0   digital local loopback
+ *   1  RRST         1   receiver reset (0 -> clears RSRFULL and RRDY)
+ *   2  RRDY         0   "Unused" per §12.6, yet §12.3 says "DRR is updated
+ *                       when RSR is ready to be read and RRDY=1". The document
+ *                       contradicts itself; see CALYPSO_RIF_RRDY_UNUSED below.
+ *   3  RSRFULL      0   a word sits in RSR and DRR has not been read yet. Per
+ *                       the doc it is NOT cleared by a DRR read: "This allows
+ *                       keeping trace of a reception problem".
+ *   4  ALMOST_FULL  0   1 = receive FIFO non empty (at THRESHOLD)
+ *   5  FIFO_EMPTY   1   FIFO empty. The prose says "0 = receive FIFO is
+ *                       empty", but the reset value is 1 AND the FIFO is empty
+ *                       at reset: the prose is inverted, follow the reset.
+ *   6  FIFO_FULL    0   FIFO full
+ *   9:7 THRESHOLD 001   threshold of the "FIFO non empty" flag, maximum 4
+ *   10 XINT_MASK    1   1 = transmit interrupt masked
+ *   11 RINT_MASK    1   1 = RECEIVE interrupt masked
+ *   12 XDMA_MASK    1   1 = transmit DMA request masked
+ *   13 RDMA_MASK    1   1 = RECEIVE DMA request masked
+ *   14 CLKLB        0   TX/RX clocks from the same internal source
  *
- * CE QUE CA REGLE, ET QU'ON N'A DONC PLUS A DEVINER.
- * Le §3.7.1 dit que le DSP echange avec le RIF « soit par XIO (mot a mot, une
- * interruption est envoyee au DSP), soit par l'API en mode DMA (une requete DMA
- * et une requete end-DMA sont envoyees a l'ARM) ». Lequel des deux ? Ce n'est pas
- * a nous d'en decider : ce sont RINT_MASK (bit 11) et RDMA_MASK (bit 13) qui le
- * disent, et c'est le FIRMWARE qui les programme. Les deux sont masques au reset —
- * quelqu'un doit les ouvrir. On respecte ce choix ici au lieu de le decreter par
- * un gate, ce que faisaient CALYPSO_BSP_VEC30 / CALYPSO_BSP_RX_VEC.
+ * §3.7.1 has the DSP exchange with the RIF "either through XIO (word by word,
+ * an interrupt is sent to the DSP), or through the API in DMA mode (a DMA
+ * request and an end-DMA request are sent to the ARM)". Which of the two is
+ * not this model's call: RINT_MASK (bit 11) and RDMA_MASK (bit 13) decide it,
+ * and the FIRMWARE programs them. Both are masked at reset, so something must
+ * open them; that choice is obeyed here instead of being forced by a gate.
  *
- * Vecteur d'interruption de reception : INT0n = IMR bit 0 = vec 16 (CAL000 §5.1).
- * L'IMR mesuree sur ce firmware (0x52ef) a bien le bit 0 ouvert.
+ * RX interrupt vector: INT0n = IMR bit 0 = vector 16 (CAL000 §5.1). The IMR
+ * measured on this firmware (0x52ef) does have bit 0 open.
  *
- * CE QUI N'EST PAS MODELISE ICI, ET ASSUME :
- *   - l'alias ARM FFFF:7000 / FFFF:7002 (DXR/DRR vus du MCU) : le firmware
- *     osmocom n'y touche pas, on ne le cable pas.
- *   - l'emission (DXR/SPCX) : les ecritures sont acceptees et comptees, rien
- *     n'est transmis. Le TX passe aujourd'hui par le TPU/TSP.
- *   - XSR/RSR ne sont pas accessibles (§12.4) : on ne les expose pas.
- *   - la profondeur exacte de la FIFO n'est pas donnee par le doc ; THRESHOLD
- *     etant plafonne a 4, on prend 4. Le burst complet attend dans un tampon
- *     d'etage et alimente la FIFO au fil des lectures de DRR.
+ * NOT modelled here, and assumed:
+ *   - the ARM aliases FFFF:7000 / FFFF:7002 (DXR/DRR seen from the MCU): the
+ *     osmocom firmware does not touch them, so they are not wired.
+ *   - transmission (DXR/SPCX): writes are accepted and counted, nothing is
+ *     sent. TX goes through the TPU/TSP today.
+ *   - XSR/RSR are not accessible (§12.4) and are not exposed.
+ *   - the exact FIFO depth, which the doc does not give; THRESHOLD is capped
+ *     at 4, so 4 is used. A full burst waits in a staging buffer and feeds the
+ *     FIFO as DRR is read.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -83,7 +72,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* --- champs de SPCR (§12.6) --- */
+/* --- SPCR fields (§12.6) --- */
 #define SPCR_DLB          (1u << 0)
 #define SPCR_RRST         (1u << 1)
 #define SPCR_RRDY         (1u << 2)
@@ -99,39 +88,39 @@
 #define SPCR_RDMA_MASK    (1u << 13)
 #define SPCR_CLKLB        (1u << 14)
 
-/* bits R/W conserves tels quels a l'ecriture ; le reste est de l'etat materiel
- * recalcule a la lecture. */
+/* R/W bits are kept verbatim on write; the rest is hardware state recomputed
+ * on read. */
 #define SPCR_RW_MASK  (SPCR_DLB | SPCR_RRST | SPCR_THRESHOLD_M | SPCR_XINT_MASK \
                        | SPCR_RINT_MASK | SPCR_XDMA_MASK | SPCR_RDMA_MASK | SPCR_CLKLB)
 
 #define SPCR_RESET   0x3CA2
 #define SPCX_RESET   0x059E
 
-#define RIF_FIFO_DEPTH  4        /* THRESHOLD plafonne a 4 (§12.6) */
-#define RIF_STAGE_MAX   2048     /* meme borne que bsp_buf */
+#define RIF_FIFO_DEPTH  4        /* THRESHOLD is capped at 4 (§12.6) */
+#define RIF_STAGE_MAX   2048     /* same bound as bsp_buf */
 
 static struct {
     bool     init;
-    uint16_t spcr;               /* champs R/W uniquement */
+    uint16_t spcr;               /* R/W fields only */
     uint16_t spcx;
     uint16_t dxr;
 
     uint16_t fifo[RIF_FIFO_DEPTH];
     int      fifo_n;
 
-    uint16_t stage[RIF_STAGE_MAX];   /* le burst en attente d'entrer en FIFO */
+    uint16_t stage[RIF_STAGE_MAX];   /* burst waiting to enter the FIFO */
     int      stage_n;
     int      stage_pos;
 
-    bool     rsrfull;            /* mot shifte alors que DRR pas encore lu */
-    uint16_t drr;                /* dernier mot sorti de la FIFO */
+    bool     rsrfull;            /* word shifted in while DRR was unread */
+    uint16_t drr;                /* last word popped from the FIFO */
     bool     drr_valid;
 
     unsigned n_burst, n_drr_rd, n_spcr_rd, n_spcr_wr, n_int, n_dma, n_overrun;
 
-    /* [2026-08-04] BEQUILLE RIF_BACKPRESSURE : bursts refuses faute de place,
-     * et bursts imposes par la soupape anti-blocage. `bp_run` = refus
-     * consecutifs en cours. */
+    /* [2026-08-04] @BEQUILLE RIF_BACKPRESSURE: bursts refused for lack of
+     * room, and bursts forced through by the anti-stall valve. `bp_run` =
+     * consecutive refusals in progress. */
     unsigned n_bp_skip, n_bp_force, bp_run;
 } rif;
 
@@ -148,39 +137,37 @@ bool calypso_rif_on(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * @BEQUILLE — RIF_BACKPRESSURE  (CALYPSO_RIF_BACKPRESSURE, defaut 0)
+ * @BEQUILLE — RIF_BACKPRESSURE  (CALYPSO_RIF_BACKPRESSURE, default 0)
  *
- *   (1) C'EST UNE BEQUILLE. Le silicium n'a pas de contre-pression : quand un
- *       burst arrive et que le precedent n'est pas lu, le recepteur ECRASE et
- *       pose RSRFULL (§12.6). Refuser la livraison est une DEVIATION du
- *       materiel, pas une correction de modele.
+ *   (1) THIS IS A CRUTCH. The silicon has no back-pressure: when a burst
+ *       arrives while the previous one is unread, the receiver OVERWRITES it
+ *       and sets RSRFULL (§12.6). Refusing delivery is a DEVIATION from the
+ *       hardware, not a model fix.
  *
- *   (2) CE QU'ELLE MASQUE : l'interpreteur c54x est ~96x trop lent
- *       (cf. natif-mur-vitesse-interpreteur-c54x). Mesure du 04/08 sur un run
- *       native_twl : 73 500 bursts pousses pour 54 492 overruns — 74 % des
- *       bursts ecrasent un predecesseur non consomme, et le DSP ne draine que
- *       ~4 mots (RIF_FIFO_DEPTH) sur les 296 avant l'ecrasement suivant. Le
- *       DMA transporte donc des zeros, `a_cd` est publie vide, et un SI ne
- *       sort que quand le hasard aligne remplissage/drainage/RRST. Tant que
- *       cette gate est a 1, on ne mesure PLUS le vrai debit du DSP : on
- *       observe un banc ralenti a sa main.
+ *   (2) WHAT IT MASKS: the c54x interpreter is ~96x too slow. Measured
+ *       [2026-08-04] on a native_twl run: 73500 bursts pushed for 54492
+ *       overruns — 74% of the bursts overwrite an unconsumed predecessor, and
+ *       the DSP drains only ~4 words (RIF_FIFO_DEPTH) out of 296 before the
+ *       next overwrite. The DMA therefore carries zeros, `a_cd` is published
+ *       empty, and an SI only comes out when fill/drain/RRST happen to line
+ *       up. While this gate is 1 the figure measured is NOT the real DSP
+ *       throughput, only that of a bench slowed down to suit it.
  *
- *   (3) QUAND LA RETIRER : des que le DSP consomme un burst entier dans le
- *       temps d'une trame — c'est-a-dire quand l'interpreteur est assez
- *       rapide (JIT, ou budget par trame revu). Juge : `overrun` doit tomber
- *       proche de 0 avec la gate a 0. Si `n_bp_force` est non nul, le DSP ne
- *       consomme toujours pas et la soupape a du forcer : la bequille ne
- *       suffit pas, ce n'est pas un progres.
+ *   (3) WHEN TO REMOVE IT: as soon as the DSP consumes a whole burst within
+ *       one frame, that is, once the interpreter is fast enough (JIT, or a
+ *       revised per-frame budget). Criterion: `overrun` must fall close to 0
+ *       with the gate at 0. A non-zero `n_bp_force` means the DSP still does
+ *       not consume and the valve had to force: the crutch is not enough, and
+ *       that is not progress.
  *
- * PORTEE RESTREINTE (corrige le 04/08 apres mesure) : la contre-pression ne
- * s'applique QUE si un chemin de drainage est arme (RDMA ou RINT demasque).
- * Recepteur non arme = rien ne videra jamais l'etage : refuser reviendrait a
- * jeter des bursts frais pour proteger un burst mort. Dans ce cas on ecrase,
- * comme le materiel.
+ * RESTRICTED SCOPE: back-pressure applies ONLY when a drain path is armed
+ * (RDMA or RINT unmasked). With an unarmed receiver nothing will ever empty
+ * the staging buffer, so refusing would discard fresh bursts to protect a dead
+ * one; in that case overwrite, like the hardware.
  *
- * SOUPAPE ANTI-BLOCAGE : sans elle, un DSP qui cesse de lire figerait la
- * reception pour toujours. Apres CALYPSO_RIF_BP_MAX_SKIP refus consecutifs
- * (defaut 200), on impose le burst suivant et on le journalise.
+ * ANTI-STALL VALVE: without it, a DSP that stops reading would freeze
+ * reception forever. After CALYPSO_RIF_BP_MAX_SKIP consecutive refusals
+ * (default 200) the next burst is forced through and logged.
  * ═══════════════════════════════════════════════════════════════════════════ */
 static bool rif_backpressure_on(void)
 {
@@ -197,8 +184,8 @@ static bool rif_backpressure_on(void)
     return on != 0;
 }
 
-/* Valeur NUMERIQUE : `calypso_gate` ne rend que 0/1, il ne convient pas ici.
- * Idiome getenv+atoi, comme les autres seuils du modele. */
+/* NUMERIC value: `calypso_gate` only returns 0/1, so it does not fit here.
+ * getenv+atoi idiom, like the other thresholds of this model. */
 static unsigned rif_bp_max_skip(void)
 {
     static int v = -1;
@@ -206,14 +193,14 @@ static unsigned rif_bp_max_skip(void)
         const char *e = getenv("CALYPSO_RIF_BP_MAX_SKIP");
         v = e ? atoi(e) : 200;
         if (v <= 0)
-            v = 200;   /* une soupape a 0 serait un blocage garanti */
+            v = 200;   /* a valve at 0 would be a guaranteed stall */
     }
     return (unsigned)v;
 }
 
-/* §12.6 note bit2 « Unused », §12.3 s'en sert. On expose RRDY = « une donnee est
- * disponible », qui est la seule lecture qui rende le §12.3 coherent, et on laisse
- * un interrupteur pour revenir a la lettre du §12.6 si un run le demande. */
+/* §12.6 marks bit 2 "Unused" while §12.3 relies on it. RRDY is exposed as "data
+ * is available", the only reading that makes §12.3 consistent; the gate restores
+ * the letter of §12.6 if a run needs it. */
 static bool rif_rrdy_unused(void)
 {
     static int u = -1;
@@ -243,14 +230,14 @@ static int rif_threshold(void)
     return t;
 }
 
-/* Fait couler le tampon d'etage vers la FIFO tant qu'il reste de la place. */
+/* Pour the staging buffer into the FIFO while there is room. */
 static void rif_refill(void)
 {
     while (rif.fifo_n < RIF_FIFO_DEPTH && rif.stage_pos < rif.stage_n)
         rif.fifo[rif.fifo_n++] = rif.stage[rif.stage_pos++];
 }
 
-/* Etat materiel recompose a chaque lecture de SPCR. */
+/* Hardware state recomposed on every SPCR read. */
 static uint16_t rif_spcr_read(void)
 {
     uint16_t v = rif.spcr & SPCR_RW_MASK;
@@ -285,9 +272,9 @@ bool calypso_rif_portr(C54xState *s, uint16_t pa, uint16_t *out)
             rif.drr_valid = true;
             rif_refill();
         }
-        /* Si la FIFO est vide, DRR conserve sa derniere valeur : le doc ne
-         * definit pas de valeur de lecture a vide (« Undefined » au reset), et
-         * inventer un 0 fabriquerait un echantillon. */
+        /* On an empty FIFO, DRR keeps its last value: the doc defines no
+         * read-empty value ("Undefined" at reset), and returning 0 would
+         * fabricate a sample. */
         *out = rif.drr;
         if (rif.n_drr_rd++ < 20)
             fprintf(stderr, "[rif] DRR read #%u = 0x%04x (fifo=%d etage=%d/%d) "
@@ -311,7 +298,7 @@ bool calypso_rif_portr(C54xState *s, uint16_t pa, uint16_t *out)
         return true;
 
     case RIF_XIO_DXR:
-        *out = rif.dxr;   /* R/W selon §12.2 */
+        *out = rif.dxr;   /* R/W per §12.2 */
         return true;
 
     default:
@@ -329,8 +316,8 @@ bool calypso_rif_portw(C54xState *s, uint16_t pa, uint16_t val)
     case RIF_XIO_SPCR: {
         uint16_t before = rif.spcr;
         rif.spcr = val & SPCR_RW_MASK;
-        /* §12.6 : « Writing a zero to RRST clears the RSRFULL bit and RRDY bit ».
-         * On vide aussi la FIFO : le recepteur est en reset. */
+        /* §12.6: "Writing a zero to RRST clears the RSRFULL bit and RRDY bit".
+         * The FIFO is flushed too: the receiver is in reset. */
         if ((before & SPCR_RRST) && !(val & SPCR_RRST)) {
             rif.rsrfull = false;
             rif.fifo_n = 0;
@@ -350,12 +337,12 @@ bool calypso_rif_portw(C54xState *s, uint16_t pa, uint16_t val)
         return true;
 
     case RIF_XIO_DXR:
-        /* Emission non modelisee (cf. en-tete) : on accepte et on compte. */
+        /* TX is not modelled (see header): accept and count. */
         rif.dxr = val;
         return true;
 
     case RIF_XIO_DRR:
-        /* §12.3 : « DRR cannot be written via the RHEA interface. » */
+        /* §12.3: "DRR cannot be written via the RHEA interface." */
         return true;
 
     default:
@@ -372,16 +359,16 @@ int calypso_rif_drain(uint16_t *dst, int max)
     int got = 0;
     while (got < max) {
         if (rif.fifo_n == 0) {
-            rif_refill();          /* meme realimentation que la lecture de DRR */
+            rif_refill();          /* same refill as a DRR read */
             if (rif.fifo_n == 0)
-                break;             /* recepteur vide : on rend ce qu'on a */
+                break;             /* receiver empty: return what we have */
         }
         dst[got++] = rif.fifo[0];
         memmove(&rif.fifo[0], &rif.fifo[1],
                 (size_t)(rif.fifo_n - 1) * sizeof(uint16_t));
         rif.fifo_n--;
     }
-    /* Le recepteur s'est vide : RSRFULL n'a plus lieu d'etre (§12.6). */
+    /* Receiver drained: RSRFULL no longer applies (§12.6). */
     if (got && rif.fifo_n == 0 && rif.stage_pos >= rif.stage_n)
         rif.rsrfull = false;
     return got;
@@ -396,8 +383,8 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     if (n > RIF_STAGE_MAX)
         n = RIF_STAGE_MAX;
 
-    /* Le burst precedent n'a pas ete entierement consomme : c'est un debordement
-     * reel du recepteur, on le compte au lieu de le taire. */
+    /* The previous burst was not fully consumed: a real receiver overrun,
+     * counted rather than hidden. */
     if (rif.stage_pos < rif.stage_n) {
         rif.rsrfull = true;
         if (rif.n_overrun++ < 10)
@@ -405,18 +392,18 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
                     "(RSRFULL pose, cf. §12.6 : le bit garde la trace du probleme)\n",
                     rif.n_overrun, rif.stage_n - rif.stage_pos);
 
-        /* @BEQUILLE RIF_BACKPRESSURE — voir rif_backpressure_on() plus haut.
-         * On REFUSE le nouveau burst au lieu d'ecraser, pour que le DSP ait le
-         * temps de consommer les 296 mots au lieu des ~4 qu'il draine sinon.
-         * RSRFULL reste pose : le firmware garde la trace du probleme. */
-        /* [2026-08-04, correction du jour meme] N'appliquer la contre-pression
-         * QUE si un chemin de drainage est arme. Mesure : `RDMA_MASK=1` sur 36
-         * des 52 lignes `[rif] burst #` echantillonnees — le recepteur n'est pas
-         * arme la moitie du temps. Refuser un burst dans ce cas est NUISIBLE :
-         * l'etage perime ne sera jamais draine, on jette donc des bursts frais
-         * jusqu'a ce que la soupape force (mesure : 38 BP-FORCE, et un
-         * `292/296 mots encore a lire` inchange apres 200 refus). Quand rien
-         * n'est arme, le comportement materiel — ecraser — est le bon. */
+        /* @BEQUILLE RIF_BACKPRESSURE — see rif_backpressure_on() above.
+         * REFUSE the new burst instead of overwriting, so the DSP has time to
+         * consume the 296 words instead of the ~4 it otherwise drains. RSRFULL
+         * stays set: the firmware keeps the trace of the problem.
+         * [2026-08-04] Apply back-pressure ONLY when a drain path is armed.
+         * Measured: `RDMA_MASK=1` on 36 of the 52 sampled `[rif] burst #`
+         * lines, so the receiver is unarmed half of the time. Refusing a burst
+         * then is HARMFUL: the stale staging buffer is never drained, so fresh
+         * bursts are dropped until the valve forces one through (measured: 38
+         * BP-FORCE, with `292/296 mots encore a lire` unchanged after 200
+         * refusals). With nothing armed, the hardware behaviour — overwrite —
+         * is the right one. */
         bool drain_arme = !(rif.spcr & SPCR_RDMA_MASK) ||
                           !(rif.spcr & SPCR_RINT_MASK);
         if (rif_backpressure_on() && drain_arme) {
@@ -427,10 +414,11 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
                             "du precedent encore a lire (refus consecutifs %u/%u)\n",
                             rif.n_bp_skip, rif.stage_n - rif.stage_pos,
                             rif.stage_n, rif.bp_run, rif_bp_max_skip());
-                return;          /* pas de livraison, donc pas de notification */
+                return;          /* no delivery, hence no notification */
             }
-            /* Soupape : le DSP ne consomme plus, on impose le burst pour ne pas
-             * figer la reception. Un compteur non nul ici DEMENT le progres. */
+            /* Valve: the DSP has stopped consuming, so force the burst
+             * through rather than freeze reception. A non-zero counter here
+             * CONTRADICTS any claim of progress. */
             rif.n_bp_force++;
             fprintf(stderr, "[rif] BP-FORCE #%u : %u refus consecutifs atteints "
                     "(CALYPSO_RIF_BP_MAX_SKIP), burst impose — le DSP ne draine "
@@ -447,7 +435,7 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     rif_refill();
     rif.n_burst++;
 
-    /* §12.6 bits 11/13 : c'est le FIRMWARE qui a choisi le mode, pas nous. */
+    /* §12.6 bits 11/13: the FIRMWARE picked the mode, not this model. */
     bool rint = !(rif.spcr & SPCR_RINT_MASK);
     bool rdma = !(rif.spcr & SPCR_RDMA_MASK);
 
@@ -457,10 +445,8 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     }
     if (rdma) {
         rif.n_dma++;
-        /* [2026-08-03] La requete de fin de DMA du §3.7.1 a enfin un destinataire.
-         * Jusqu'ici on comptait la requete sans la servir : le controleur RHEA
-         * journalisait sans transferer. Sans effet si CALYPSO_RHEA_DMA_XFER=0
-         * (defaut) — le comportement d'avant est strictement conserve. */
+        /* The end-of-DMA request of §3.7.1 is served, not just counted. No
+         * effect while CALYPSO_RHEA_DMA_XFER=0 (default). */
         calypso_rhea_dma_rx_request(s);
     }
 

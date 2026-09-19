@@ -1,39 +1,31 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * c54x_internal.h — en-tete interne du coeur C54x.
+ * c54x_internal.h - internal header of the C54x core.
  *
- * [2026-09-18] calypso_c54x.c faisait 21475 lignes : plus personne n'y
- * retrouvait quoi que ce soit. Le coeur est decoupe par role :
- *   calypso_c54x.c  init / reset / boucle c54x_run / API publique
- *   c54x_exec.c     c54x_exec_one et les familles d'instructions
- *   c54x_decode.c   resolution des operandes (Smem/Lmem/Xmem), conditions
- *   c54x_mem.c      memoire donnee et programme, overlay, verrous
- *   c54x_irq.c      IFR/IMR, IT trame, interruptions
- *   c54x_probes.c   sondes et traces (diagnostic seul)
+ * [2026-09-18] calypso_c54x.c had grown to 21475 lines and nobody could find
+ * anything in it. The core is now split by role:
+ *   calypso_c54x.c  init / reset / c54x_run loop / public API
+ *   c54x_exec.c     c54x_exec_one and the instruction families
+ *   c54x_decode.c   operand resolution (Smem/Lmem/Xmem), conditions
+ *   c54x_mem.c      data and program memory, overlay, locks
+ *   c54x_irq.c      IFR/IMR, frame interrupt, interrupt dispatch
+ *   c54x_probes.c   probes and traces (diagnostics only)
  *
- * Cet en-tete porte ce que ces fichiers partagent : inclusions, constantes,
- * types et etats globaux du coeur. Il est STRICTEMENT interne.
+ * This header carries what those files share: includes, constants, types and
+ * core global state. It is STRICTLY internal.
  *
- * Les structures anonymes de portee fichier ont recu un nom (c54x_<var>_s) :
- * deux definitions anonymes sont des types DIFFERENTS d'une unite a l'autre,
- * ce qui interdit de les partager.
+ * File-scope anonymous structs were given names (c54x_<var>_s): two anonymous
+ * definitions are DIFFERENT types from one translation unit to the next, which
+ * makes them impossible to share.
  */
 #ifndef CALYPSO_C54X_INTERNAL_H
 #define CALYPSO_C54X_INTERNAL_H
 
-/*
- * calypso_c54x.c — TMS320C54x DSP emulator for Calypso
- *
- * Minimal C54x core: enough to run the Calypso DSP ROM for GSM
- * signal processing (Viterbi, deinterleaving, burst decode).
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
- */
 
 #include "calypso_c54x.h"
 #include "calypso_rif.h"
 #include "calypso_rhea_dma.h"
-#include "hw/arm/calypso/calypso_xio.h"   /* arbitrage SAM/HOM */
+#include "hw/arm/calypso/calypso_xio.h"   /* SAM/HOM arbitration */
 #include "calypso_mailbox.h"
 #include "calypso_dma.h"
 #include "calypso_arm2dsp.h"
@@ -44,20 +36,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>   /* DARAM-SANITY : coherence/dphi du buffer corr */
-/* [2026-07-27] DARAM-FNSTAMP : publiees par calypso_bsp.c. */
+#include <math.h>   /* DARAM-SANITY: coherence/dphi of the corr buffer */
+/* DARAM-FNSTAMP counters, defined in calypso_bsp.c. */
 extern unsigned calypso_daram_last_fn;
 extern unsigned calypso_daram_wr_count;
 
-extern int calypso_rxfb_fired;   /* [probe golive] defini dans calypso_bsp.c */
+extern int calypso_rxfb_fired;   /* [probe golive] defined in calypso_bsp.c */
 
 static int g_boot_trace = 0;
-/* VEC28-STACK-TRACE (2026-07-03, gated CALYPSO_TRACE_VEC28_STACK, READ-ONLY diagnostic,
- * addendum 23). Traces the software stack from vec28 interrupt entry (2-word PC+XPC push
- * by c54x_interrupt_ex) through every RET-family instruction until SP returns to the
- * pre-interrupt level, to confirm whether a 1-word RET/RCD/RETED pop consumes the orphaned
- * XPC word (expected 0x0000) as if it were a return PC -- the suspected mechanism of the
- * PC=0x0000 derail (Addendum 22/23). No DSP state is modified, only observed. */
+/* VEC28-STACK-TRACE, gated by CALYPSO_TRACE_VEC28_STACK. READ-ONLY diagnostic:
+ * traces the software stack from a vec28 interrupt entry (2-word PC+XPC push by
+ * c54x_interrupt_ex) through every RET-family instruction until SP returns to
+ * its pre-interrupt level, to show whether a 1-word RET/RCD/RETED pop consumes
+ * the orphaned XPC word (expected 0x0000) as if it were a return PC. Observes
+ * only; no DSP state is modified. */
 static int g_vec28_trace_en = -1;
 static bool g_vec28_tracing = false;
 static uint16_t g_vec28_sp_entry = 0;
@@ -65,8 +57,8 @@ static unsigned g_vec28_trace_pops = 0;
 
 #include "hw/arm/calypso/calypso_debug.h"
 
-/* Legacy C54_LOG : gated par CALYPSO_DEBUG containing "C54X" or "ALL".
- * Pour gating fin par probe, utiliser C54_DBG("PROBE_NAME", fmt, ...). */
+/* Legacy C54_LOG: gated by CALYPSO_DEBUG containing "C54X" or "ALL".
+ * For per-probe gating use C54_DBG("PROBE_NAME", fmt, ...). */
 #define C54_LOG(fmt, ...) \
     do { if (calypso_debug_enabled("C54X")) \
         fprintf(stderr, "[c54x] " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -113,7 +105,7 @@ static inline int asm_shift(C54xState *s)
     return v;
 }
 
-/* ---- constantes et types partages (ordre d'origine conserve) ---- */
+/* ---- shared constants and types (original order preserved) ---- */
 #define C54_LOG(fmt, ...) \
     do { if (calypso_debug_enabled("C54X")) \
         fprintf(stderr, "[c54x] " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -152,7 +144,7 @@ typedef struct {
 #define MVPD_RANGE_HI    0x2800
 #define MVPD_BUCKETS_N   (((MVPD_RANGE_HI - MVPD_RANGE_LO) + MVPD_BUCKET_SZ - 1) / MVPD_BUCKET_SZ)
 #define CORR_PC_LO 0x8d00
-#define CORR_PC_HI 0x9000   /* exclusif */
+#define CORR_PC_HI 0x9000   /* exclusive */
 #define CORR_READ_HIST_MAX 128
 typedef struct { uint16_t addr; uint32_t count; } CorrReadEntry;
 #define STUCK_HIST_SIZE 64
@@ -199,11 +191,11 @@ typedef struct {
     uint16_t pc;
     uint16_t op_last;
     uint32_t dec_count;
-    int32_t  delta_sum;   /* négatif = drain net */
+    int32_t  delta_sum;   /* negative = net drain */
 } SpDecEntry;
 #define SP_HIST_MAX 512
-#define SP_RING_SZ 4096  /* must be power of 2 — bumped 512→4096 for
-                          * coverage des 1000s d'insns avant le spiral */
+#define SP_RING_SZ 4096  /* must be a power of two; 4096 covers the thousands
+                          * of instructions preceding the SP spiral */
 typedef struct {
     unsigned insn;
     uint16_t pc;
@@ -212,24 +204,24 @@ typedef struct {
     uint16_t _pad;
 } SpRingEntry;
 
-/* ---- structures nommees pour les etats globaux ---- */
+/* ---- named structures for the core global state ---- */
 struct c54x_g_fb_det_timing_s {
-    /* Timing trackers (mis à jour dans data_write côté 0x2bc0..0x2bff) */
+    /* Timing trackers, updated in data_write over 0x2bc0..0x2bff */
     uint64_t last_compute_insn;
     uint16_t last_compute_addr;
     uint64_t last_clear_insn;
     uint16_t last_clear_addr;
     uint64_t last_pattern_insn;
     uint16_t last_pattern_addr;
-    /* Stats au moment du fire 0x8f51 */
+    /* Stats captured when 0x8f51 fires */
     uint64_t fb_det_total;
     uint64_t fb_det_ar4_in_zone;
     uint64_t fb_det_ar4_outside;
     uint64_t fb_det_dar4_zero;
     uint64_t fb_det_dar4_sentinel;
     uint64_t fb_det_dar4_other;
-    /* Sweep tracking : un sweep = 50 fires 0x8f51 consécutifs avec AR3
-     * progressant 0..0x3A3 stride+19. Wrap (ar3 < last_ar3) = nouveau sweep. */
+    /* Sweep tracking: one sweep = 50 consecutive 0x8f51 fires with AR3 walking
+     * 0..0x3A3 at stride +19. A wrap (ar3 < last_ar3) starts a new sweep. */
     uint16_t last_ar3_at_fire;
     uint64_t sweep_id;
     uint64_t sweep_nonzero_count;
@@ -323,7 +315,7 @@ extern unsigned   g_sp_abs_used;
 extern unsigned   g_sp_abs_total;
 extern int        g_sp_abs_enabled;
 extern unsigned   g_sp_abs_log_cap;
-extern uint32_t g_mvpd_buckets[MVPD_BUCKETS_N];  /* 80 buckets */;
+extern uint32_t g_mvpd_buckets[MVPD_BUCKETS_N];  /* 128 words each */;
 extern int      g_mvpd_trace_enabled;
 extern unsigned g_mvpd_boot_limit;
 extern int      g_mvpd_dumped;
@@ -421,7 +413,7 @@ extern bool g_c54x_early_booted;
 extern uint32_t g_arm_taskmd5_insn;
 extern uint16_t g_arm_taskmd5_ea;
 
-/* ---- fonctions partagees entre les fichiers du coeur ---- */
+/* ---- functions shared between the core files ---- */
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
 uint16_t prog_read(C54xState *s, uint32_t addr);
 uint16_t c54x_ovly_bas(void);
@@ -458,11 +450,7 @@ void xfer_log_push(uint16_t src_pc, uint8_t src_xpc, uint16_t op, uint16_t tgt_p
 void ar_write_track(C54xState *s, unsigned idx, uint16_t new_val);
 uint16_t c54x_circ_ref(uint16_t ar, int step, uint16_t bk);
 bool c54x_cond_true(C54xState *s, uint8_t cc);
-int c54x_dual_sett(void);
 bool c54x_irq_level_check(C54xState *s);
-int c54x_ld_par(void);
-int c54x_mas_dual(void);
-int c54x_mpy_fam(void);
 void c54x_par_postmod(C54xState *s, int ar, int mod);
 uint32_t c54x_prog_xlate(const C54xState *s, uint16_t addr16);
 void corr_read_record(uint16_t addr);

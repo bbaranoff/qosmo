@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Enregistrement de la couche 1 gr-gsm aupres de la plateforme.
+ * Registers the gr-gsm layer 1 with the platform.
  *
- * [2026-09-16] Ce fichier est tout ce que la L1 de qosmo-grgsm a eu a gagner
- * en passant sous la vtable : calypso_l1_grgsm.c et calypso_l1ctl_tap.c sont
- * repris SANS MODIFICATION autre que le chemin de leurs deux #include prives.
- * C'etait le test du decoupage - si la couture avait ete mal placee, il aurait
- * fallu retoucher la L1 elle-meme.
+ * [2026-09-16] This file is the whole cost of moving qosmo-grgsm's L1 under the
+ * vtable: calypso_l1_grgsm.c and calypso_l1ctl_tap.c are reused UNCHANGED apart
+ * from the paths of their two private #includes. That is the check on where the
+ * seam sits - a badly placed one would have forced edits inside the L1 itself.
  */
 #include "qemu/osdep.h"
 #include "qemu/module.h"
@@ -27,8 +26,8 @@ static const CalypsoL1Ops grgsm_ops = {
     .uart_tx_byte      = calypso_l1ctl_tap_tx_byte,
 };
 
-/* type_init s'execute avant calypso_machine_init(), ce qui est la seule
- * contrainte d'ordre imposee par calypso_l1_register(). */
+/* type_init runs before calypso_machine_init(), which is the only ordering
+ * constraint calypso_l1_register() imposes. */
 static void calypso_l1_grgsm_register_type(void)
 {
     calypso_l1_register(&grgsm_ops);

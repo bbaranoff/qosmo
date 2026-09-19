@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Doublure de qemu/osdep.h pour compiler les sources Calypso HORS de QEMU.
- * [2026-09-16] Les 12 fichiers qui l'incluent n'en tirent que les en-tetes C
- * standard : mesure faite avant d'ecrire ce fichier. */
+/* Stand-in for qemu/osdep.h, to build the Calypso sources OUTSIDE QEMU.
+ * [2026-09-16] Measured before writing this file: the 12 sources that include
+ * it use nothing from osdep.h but the standard C headers. */
 #ifndef QOSMO_DOUBLURE_OSDEP_H
 #define QOSMO_DOUBLURE_OSDEP_H
 #include <stdio.h>
@@ -17,7 +17,7 @@
 #include <time.h>
 #include <math.h>
 #include <assert.h>
-/* Le vrai osdep.h l'expose via _GNU_SOURCE ; calypso_invariants.c s'en sert. */
+/* The real osdep.h exposes this through _GNU_SOURCE; calypso_invariants.c uses it. */
 extern char **environ;
 
 typedef uint64_t hwaddr;

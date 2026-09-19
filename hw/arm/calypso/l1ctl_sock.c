@@ -1,24 +1,19 @@
 /*
- * l1ctl_sock.c — L1CTL unix socket server (legacy QEMU-internal path)
+ * l1ctl_sock.c - L1CTL unix socket server (legacy QEMU-internal path)
  *
- * État runtime actuel (2026-05-25) : ce socket est INACTIF dans le run
- * orchestré par scripts/run.sh. run.sh:458 override l'env L1CTL_SOCK vers
- * /tmp/qemu_l1ctl_disabled pour le child QEMU, donc ce module crée son
- * socket à une adresse-poubelle et personne ne s'y connecte. Le VRAI
- * socket /tmp/osmocom_l2 que le mobile osmocom-bb utilise est créé par
- * osmocon (-m romload -s /tmp/osmocom_l2), pas par QEMU.
- *
- * Le path historique « Replaces the Python bridge » reste possible si on
- * lance QEMU sans override env — utile pour des tests sans osmocon, mais
- * pas le mode de fonctionnement principal. Voir doc/L1CTL_SOCK_FLOW.md
- * et le commentaire à run.sh:458.
- *
- * Quand actif : provides a unix socket at /tmp/osmocom_l2 that speaks
- * L1CTL (length-prefixed messages) to OsmocomBB mobile.
- *
- * Internally translates between:
+ * Serves a unix socket (default /tmp/osmocom_l2) that speaks L1CTL
+ * (length-prefixed messages) to the OsmocomBB mobile, translating between:
  *   - sercomm framing (FLAG/ESCAPE/DLCI) on the firmware UART side
- *   - L1CTL length-prefix on the mobile socket side
+ *   - L1CTL length prefixes on the mobile socket side
+ *
+ * NOT WIRED IN THIS TREE. The file builds (meson.build, under the l1-dsp
+ * layer 1) but nothing calls l1ctl_sock_init(): the only call site lives in
+ * the qosmo-dsp fork. In a qosmo launcher run osmocon owns /tmp/osmocom_l2
+ * (osmocon -m romload -s /tmp/osmocom_l2) and relays to the firmware over the
+ * modem pty, so the mobile never connects here. When it was wired, the
+ * mobile -> firmware direction stayed empty: "RX<-mobile" logged 0 frames over
+ * a whole run while osmocon saw the traffic. The blocks below that depend on
+ * that direction are therefore dead, and marked as such.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -44,10 +39,9 @@
 #define L1CTL_LOG(fmt, ...) \
     fprintf(stderr, "[l1ctl-sock] " fmt "\n", ##__VA_ARGS__)
 
-/* Nom lisible des types L1CTL (l1ctl_proto.h) — diagnostic pur pour suivre la
- * conversation firmware↔mobile à l'œil. NB : ce mobile cause par osmocon/hdlc
- * (serial), pas par ce socket unix ; ce log ne voit que le sens firmware→mobile
- * via sercomm. Le vrai flux mobile↔firmware se lit dans osmocon.log (hdlc). */
+/* Readable L1CTL message names (l1ctl_proto.h), diagnostics only. This log
+ * only ever sees the firmware -> mobile direction via sercomm; the real
+ * mobile <-> firmware exchange is in osmocon.log (hdlc). */
 static inline const char *l1ctl_tname(uint8_t t)
 {
     switch (t) {
@@ -93,12 +87,6 @@ typedef struct L1CTLSock {
 
 static L1CTLSock g_l1ctl;
 
-
-/* [2026-09-03] SONDE CALYPSO_TCH_DL_PROBE SUPPRIMEE avec le shunt : elle
- * confrontait les 33 octets de voix d'un TRAFFIC_IND a l'anneau des trames que
- * le SHUNT avait ecrites dans a_dd_0. Sans shunt, il n'y a plus d'anneau de
- * reference — la question qu'elle posait (« le firmware relaie-t-il ce qu'on lui
- * donne ? ») ne se pose que quand quelqu'un d'autre que le DSP ecrit a_dd_0. */
 
 /* ---- Sercomm helpers ---- */
 
@@ -161,11 +149,6 @@ static void l1ctl_send_to_mobile(L1CTLSock *s, const uint8_t *payload, int len)
     }
 }
 
-/* [2026-09-03] l1ctl_inject_dl_si() SUPPRIMEE : elle poussait un SI directement
- * au mobile en L1CTL DATA_IND, court-circuitant a_cd -> ARM -> UART. Son unique
- * appelant etait le listener GSMTAP du shunt (les SI decodes par gr-gsm). Le SI
- * doit maintenant remonter par le chemin du firmware, comme sur le silicium. */
-
 /* ---- Process a complete sercomm frame from firmware TX ---- */
 
 static void sercomm_frame_complete(L1CTLSock *s)
@@ -178,73 +161,30 @@ static void sercomm_frame_complete(L1CTLSock *s)
     int plen = s->sc_len - 2;
 
     if (dlci == SERCOMM_DLCI_L1CTL && plen > 0) {
-        /* [2026-09-03] TROIS BEQUILLES SUPPRIMEES ICI.
+        /* Current dedicated channel -> /dev/shm/calypso_dcch_cfg, for
+         * external tools (l1-grgsm/calypso_l1ctl_tap.c reads it).
          *
-         * CALYPSO_FORCE_FBSB=1 forcait le resultat de FBSB_CONF a SUCCESS, et
-         * CALYPSO_FORCE_AGCH=1 rotait le type SI des DATA_IND BCCH puis ECRASAIT
-         * le L3 du PCH par un IMM ASSIGNMENT code en dur. Les deux maquillaient,
-         * dans le socket qui va au mobile, le resultat que le demod DSP n'avait
-         * pas produit. Leur annotation disait « retirer quand le demod DSP publie
-         * un a_cd valide » — et de toute facon run.sh les verrouillait a 0.
+         * Read it here, in the firmware -> mobile direction, because that is
+         * the only L1CTL flow this file parses. DATA_CONF (0x0f) and DATA_IND
+         * (0x03) carry l1ctl_info_dl.chan_nr in payload[4], filled by the
+         * firmware from its own mframe scheduler, so it is OUR mobile's
+         * channel and not a neighbour's. Not taken from the CCCH IMM ASSIGN,
+         * which carries every subscriber's (68 for RA=0x07 and 12 for RA=0x0a
+         * against a single RACH of ours at RA=0x08): the active subchannel
+         * jumped 60 times per run.
          *
-         * FN-FIX capturait le FN du RACH_CONF, global et par-RA, pour que le shunt
-         * puisse reecrire la req-ref de l'IMM ASSIGN qu'il injectait. Plus
-         * d'injection, plus de req-ref a recoller : g_last_rach_conf_fn et
-         * g_rach_conf_fn[] n'avaient aucun autre lecteur. */
-        /* ═══════════════════════════════════════════════════════════════════
-         * CANAL DEDIE COURANT -> /dev/shm/calypso_dcch_cfg  (2026-08-08)
-         *
-         * OU LE LIRE. Premiere tentative : depuis les IMM ASSIGN du CCCH, cote
-         * si_bridge. FAUX — le CCCH porte ceux de TOUS les abonnes (68 de
-         * RA=0x07, 12 de RA=0x0a pour un RACH a nous de RA=0x08) : la sous-voie
-         * active sautait 60 fois par run. Deuxieme tentative : DM_EST_REQ dans
-         * l1ctl_client_readable. FAUX AUSSI, et pour une raison structurelle
-         * documentee en tete de ce fichier : ce socket est INACTIF, osmocon
-         * detient /tmp/osmocom_l2 et relaie par le pty. Mesure : `RX←mobile` = 0
-         * occurrence sur tout le journal, alors qu'osmocon voit bien 6 DM_EST.
-         *
-         * ICI, en revanche, on est dans le sens firmware->mobile, qui est le
-         * SEUL flux L1CTL que QEMU parse reellement. DATA_CONF (0x0f) et
-         * DATA_IND (0x03) portent l1ctl_info_dl.chan_nr en payload[4], rempli
-         * par le firmware depuis SON ordonnanceur mframe : c'est donc bien le
-         * canal que NOTRE mobile utilise, pas celui d'un voisin.
-         *
-         * chan_nr (GSM 08.58 9.3.1) : 001SSTTT = SDCCH/4, 01SSSTTT = SDCCH/8.
-         * BCCH (0x80) / CCCH (0x90) / TCH (00001TTT) sont ignores ici.
-         * ═══════════════════════════════════════════════════════════════════ */
+         * chan_nr (GSM 08.58 9.3.1): 001SSTTT = SDCCH/4, 01SSSTTT = SDCCH/8.
+         * BCCH (0x80), CCCH (0x90) and TCH (00001TTT) are ignored here. */
         if ((payload[0] == 0x0f || payload[0] == 0x03) && plen >= 5) {
             uint8_t chan_nr = payload[4];
             int kind = -1, ss = 0;
             if ((chan_nr & 0xE0) == 0x20)      { kind = 0; ss = (chan_nr >> 3) & 0x03; }
             else if ((chan_nr & 0xC0) == 0x40) { kind = 1; ss = (chan_nr >> 3) & 0x07; }
             static uint8_t last_chan_nr = 0xFF;
-            /* [2026-08-09] FRONT DE LIBERATION DU DEDIE, dans le sens que QEMU
-             * parse REELLEMENT. Premiere tentative : accrocher DM_REL_REQ (0x12)
-             * dans le bloc mobile->firmware plus bas. C'est du CODE MORT ici :
-             * le socket l1ctl de QEMU est orphelin (le mobile parle a osmocon),
-             * mesure « RX←mobile » = 0 occurrence sur tout le journal. Ce meme
-             * bloc porte aussi la remise a zero du Kc a chaque DM_EST/DM_REL —
-             * elle ne s'execute donc jamais non plus, a verifier avant d'activer
-             * l'A5/1.
-             * Ici on est dans DATA_CONF/DATA_IND, qui EST parse : quand chan_nr
-             * repasse sur du non-dedie (BCCH 0x80 / CCCH 0x90), le canal est
-             * termine et la garde SI doit se lever. Sans ce front, seule la
-             * peremption de 60 s la libere, et le camp reste prive de SI. */
-            /* [2026-08-09] REMANENCE, PAS UN FRONT. Version precedente : lever la
-             * garde des qu un chan_nr non-dedie passait. Mesure : 121 armements
-             * et 121 levees pour 2 canaux dedies — parce qu en dedie le mobile
-             * lit AUSSI les BCCH voisines pour ses mesures, donc chan_nr bascule
-             * sans arret. La garde clignotait et le camp reprenait la main entre
-             * deux blocs. On rafraichit donc sur chaque bloc DEDIE et on laisse
-             * la peremption faire la fermeture. */
-            /* [2026-09-03] Les trois setters de fenetre DCCH du shunt
-             * (set_dcch_active / set_dcch_tch / set_dcch) sont retires : ils ne
-             * pilotaient que la fenetre de PRESENTATION a_cd des injections
-             * GSMTAP. Le predicat `dedie` qui les alimentait (TCH/F, TCH/H,
-             * SDCCH/4, SDCCH/8 -- codage GSM 08.58 du chan_nr, bits 7..3) part
-             * avec eux : il n'avait plus aucun lecteur. La publication de
-             * /dev/shm/calypso_dcch_cfg ci-dessous, elle, ne dependait que de
-             * `kind` et continue a l'identique pour les outils externes. */
+            /* Publish on change only: while on a dedicated channel the
+             * mobile also reads neighbour BCCHs for its measurements, so
+             * chan_nr toggles constantly (121 transitions measured for 2
+             * dedicated channels). */
             if (kind >= 0 && chan_nr != last_chan_nr) {
                 static uint32_t dcch_seq;
                 last_chan_nr = chan_nr;
@@ -352,22 +292,20 @@ static void l1ctl_client_readable(void *opaque)
 
         uint8_t *payload = &s->lp_buf[2];
 
-        /* === CAPTURE Kc (chiffrement A5) : L1CTL_CRYPTO_REQ (0x15) mobile->fw ===
-         * payload : [0]=0x15 [1]flags [2..3]pad [4]chan_nr [5]link_id [6..7]pad
-         * [8]algo [9]key_len [10..]Kc. On ecrit /dev/shm/calypso_kc (seq,algo,
-         * key_len,Kc) -> l'ipc-device chiffre l'UL (osmo_a5) et si_bridge relance
-         * grgsm -k pour dechiffrer le DL. Le Kc capture = celui derive par le
-         * mobile (A8) = exactement celui du reseau. */
+        /* Kc capture (A5 ciphering): L1CTL_CRYPTO_REQ (0x15), mobile -> fw.
+         * payload: [0]=0x15 [1]flags [2..3]pad [4]chan_nr [5]link_id [6..7]pad
+         * [8]algo [9]key_len [10..]Kc. Written to /dev/shm/calypso_kc as
+         * (seq, algo, key_len, Kc); si_bridge.py reads it and restarts grgsm
+         * with -k to decrypt the downlink. The captured Kc is the one the
+         * mobile derived (A8), i.e. exactly the network's. */
         if (payload[0] == 0x15 && msglen >= 10) {
             uint8_t algo = payload[8];
             uint8_t klen = payload[9];
             if (klen > 16) klen = 16;
-            /* [2026-08-08] GARDE SUR algo, parite avec l'ecrivain VIVANT
-             * (osmocon.c:1300). Ce chemin-ci est mort (osmocon detient
-             * /tmp/osmocom_l2 ; « RX<-mobile » = 0 occurrence mesuree), mais il
-             * ecrivait un seq NON NUL meme pour algo=0/klen=0 : un lecteur y
-             * verrait un Kc « present » et chiffrerait avec une cle nulle. Fusil
-             * charge pose sur la table — on met la securite. */
+            /* Guard on algo, matching the live writer in osmocon. Without
+             * it an algo=0/klen=0 request still bumps the sequence number, and
+             * a reader would take the file as holding a valid Kc and cipher
+             * with an all-zero key. */
             if (algo >= 1 && algo <= 3 && 10 + (int)klen <= msglen) {
                 static uint32_t kc_seq = 0;
                 uint8_t kbuf[32];
@@ -390,15 +328,13 @@ static void l1ctl_client_readable(void *opaque)
                           kc_seq);
             }
         }
-        /* Reset cipher a l'etablissement/liberation du canal dedie : chaque
-         * nouveau canal demarre EN CLAIR jusqu'a son propre CIPHER MODE COMMAND
-         * (sinon un Kc perime chiffrerait la SABM du canal suivant). */
+        /* Clear the cipher on dedicated channel setup and release: every new
+         * channel starts in the clear until its own CIPHER MODE COMMAND,
+         * otherwise a stale Kc would cipher the next channel's SABM. */
         if (payload[0] == 0x05 || payload[0] == 0x12) {   /* DM_EST_REQ / DM_REL_REQ */
-            /* ⚠️ CE BLOC EST MORT dans la configuration actuelle : « RX←mobile »
-             * ne compte 0 occurrence, le socket l1ctl de QEMU etant orphelin (le
-             * mobile parle a osmocon). La remise a zero du Kc ci-dessous ne
-             * s'execute donc JAMAIS — a verifier avant d'activer l'A5/1. La garde
-             * SI du dedie est branchee plus haut, sur DATA_CONF/DATA_IND. */
+            /* ⚠️ DEAD IN THE CURRENT SETUP: this mobile -> firmware direction
+             * measured 0 frames, so the Kc reset below never runs. Check this
+             * before enabling A5/1. */
             int kfd = open("/dev/shm/calypso_kc",
                            O_WRONLY | O_CREAT | O_TRUNC, 0666);
             if (kfd >= 0) {

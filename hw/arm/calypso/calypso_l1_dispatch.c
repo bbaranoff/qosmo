@@ -1,17 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Aiguillage plateforme → couche 1.
+ * Platform -> layer 1 dispatch.
  *
- * [2026-09-16] Tout le fichier n'existe que pour que calypso_trx.c,
- * calypso_mb.c et calypso_uart.c n'aient plus à connaître le nom de
- * l'implémentation de L1 avec laquelle ils sont liés. Voir l'en-tête
- * calypso_l1_ops.h pour le pourquoi du découpage.
+ * Exists so that calypso_trx.c, calypso_mb.c and calypso_uart.c never name
+ * the layer 1 implementation they are linked against. See calypso_l1_ops.h
+ * for the reasoning behind the split.
  *
- * LES DÉFAUTS NE SONT PAS DES ERREURS. Sans L1 enregistrée, `qosmo` seul est
- * un Calypso dont le modem ne reçoit rien : le firmware osmocom-bb boote,
- * balaie, ne trouve aucune cellule, et c'est le comportement attendu. C'est
- * ce qui permet de tester la plateforme — boot, IRQ, TDMA, UART, SIM — sans
- * traîner gr-gsm ni le C54x.
+ * THE DEFAULTS ARE NOT ERRORS. With no layer 1 registered, qosmo alone is a
+ * Calypso whose modem receives nothing: the osmocom-bb firmware boots, scans,
+ * finds no cell, and that is the expected behaviour. It is what lets the
+ * platform - boot, IRQ, TDMA, UART, SIM - be tested without dragging in
+ * gr-gsm or the C54x.
  */
 #include "qemu/osdep.h"
 #include <stdlib.h>
@@ -23,9 +22,9 @@ static const CalypsoL1Ops *l1;
 void calypso_l1_register(const CalypsoL1Ops *ops)
 {
     if (l1 && ops) {
-        /* Deux L1 liées dans le même binaire : le meson.build du fork a repris
-         * les sources de l'autre. On garde la dernière pour rester
-         * déterministe, mais ça ne doit pas passer inaperçu. */
+        /* Two layer 1 implementations linked into the same binary: the
+         * fork's meson.build picked up the other one's sources. Keep the last
+         * registered so the result stays deterministic, but say so loudly. */
         fprintf(stderr, "calypso: DEUX couches 1 enregistrees (%s puis %s) - "
                         "verifier hw/arm/calypso/meson.build\n",
                 l1->name ? l1->name : "?", ops->name ? ops->name : "?");
@@ -33,10 +32,10 @@ void calypso_l1_register(const CalypsoL1Ops *ops)
     l1 = ops;
 }
 
-/* [2026-09-16] DSP externe (calypso_trx.c, CALYPSO_DSP_EXTERN) : le C54x de
- * c54x_exe tient la couche 1, le shunt gr-gsm ne doit ni s'initialiser (ses
- * ecoutes UDP voleraient le flux du banc) ni substituer quoi que ce soit dans
- * l'API RAM. Tous les calypso_l1_do_* deviennent des non-operations. */
+/* External DSP (CALYPSO_DSP_EXTERN): the C54x in c54x_exe holds layer 1, so
+ * the gr-gsm shunt must neither initialise itself (its UDP listeners would
+ * steal the bench's stream) nor substitute anything in the API RAM. Every
+ * calypso_l1_do_* then becomes a no-op. */
 void calypso_l1_disable(const char *why)
 {
     if (l1) {
@@ -53,8 +52,9 @@ const char *calypso_l1_name(void)
 
 void calypso_l1_do_init(const char *firmware_elf)
 {
-    /* Avant tout : en DSP externe, le shunt ne doit meme pas ouvrir ses ports
-     * (calypso_mb.c appelle ceci avant calypso_trx_init). */
+    /* First of all: with an external DSP the shunt must not even open its
+     * ports, hence the check here - calypso_mb.c calls this before
+     * calypso_trx_init(). */
     const char *ext = getenv("CALYPSO_DSP_EXTERN");
     if (ext && *ext) {
         calypso_l1_disable("DSP externe, CALYPSO_DSP_EXTERN");
@@ -74,7 +74,7 @@ void calypso_l1_do_frame_tick(void)
 
 bool calypso_l1_do_api_read_override(uint32_t off, uint16_t *out)
 {
-    /* false = la base sert le contenu réel de l'API RAM. */
+    /* false = the base serves the real API RAM contents. */
     return (l1 && l1->api_read_override) ? l1->api_read_override(off, out)
                                          : false;
 }
@@ -86,9 +86,9 @@ bool calypso_l1_do_si_valid(void)
 
 uint32_t calypso_l1_do_l1s_fn(void)
 {
-    /* Sans L1, la seule trame qui existe est celle de l'horloge TDMA de la
-     * plateforme. Rendre 0 ici casserait la détection de continuité de
-     * l'anneau de bursts dans api_write(). */
+    /* With no layer 1, the only frame number that exists is the platform's
+     * TDMA clock. Returning 0 here breaks the burst ring continuity check in
+     * api_write(). */
     return (l1 && l1->l1s_fn) ? l1->l1s_fn() : calypso_trx_get_fn();
 }
 

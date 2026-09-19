@@ -1,17 +1,16 @@
 /*
- * calypso_asm4532.c — commutateur d'antenne ASM4532.
+ * calypso_asm4532.c - ASM4532 antenna switch.
  *
- * Cf. hw/arm/calypso/doc/CHAINE_RF_MATERIELLE.md §2.1 et §3.
- * Piloté par les lignes TSPACT, pas par le TSP série. Mapping porté tel quel de
- * osmocom-bb board/compal/rffe_dualband.c (board C123) :
- *   TRENA    = TSPACT(6)  Transmit Enable (Antenna Switch)  -- ACTIF BAS
- *   GSM_TXEN = TSPACT(8)  GSM (par opposition a DCS)        -- ACTIF BAS
+ * Driven by the TSPACT lines, not by the serial TSP. Line mapping taken
+ * as-is from osmocom-bb board/compal/rffe_dualband.c (C123 board):
+ *   TRENA    = TSPACT(6)  Transmit Enable (antenna switch)  -- ACTIVE LOW
+ *   GSM_TXEN = TSPACT(8)  GSM as opposed to DCS             -- ACTIVE LOW
  *
- * Ce modele est PASSIF : il latche l'etat, compte les fenetres, et signale les
- * incoherences. Il ne gate rien — le downlink est synthetique, donc gater le Rx
- * sur la position du commutateur ne ferait que casser des bancs qui marchent,
- * sans rien mesurer de plus. Il devient utile le jour ou l'UL est reellement
- * emise : c'est lui qui dira si l'antenne etait commutee pendant le burst.
+ * This model is PASSIVE: it latches the state, counts TX windows and reports
+ * inconsistencies. It gates nothing, because the downlink is synthetic and
+ * gating Rx on the switch position would only break working benches. It
+ * becomes useful once the uplink is really transmitted: it is what will tell
+ * whether the antenna was switched over during the burst.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -20,9 +19,9 @@
 #include "hw/arm/calypso/calypso_asm4532.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
-/* Lignes TSPACT, portees du firmware (TSPACT(n) = 1 << n). */
-#define ASM_TRENA       (1u << 6)   /* actif BAS */
-#define ASM_GSM_TXEN    (1u << 8)   /* actif BAS */
+/* TSPACT lines, ported from the firmware (TSPACT(n) = 1 << n). */
+#define ASM_TRENA       (1u << 6)   /* active LOW */
+#define ASM_GSM_TXEN    (1u << 8)   /* active LOW */
 
 #define ASM_LOG(fmt, ...) \
     do { if (calypso_debug_enabled("TPU")) \
@@ -30,17 +29,17 @@
 
 static struct {
     bool     init;
-    uint16_t tspact;        /* dernier etat vu */
-    bool     tx;            /* TRENA assertee  -> antenne sur le PA */
-    bool     gsm;           /* GSM_TXEN asserte -> bande GSM900 */
-    uint32_t tx_windows;    /* nombre de fenetres TX ouvertes */
+    uint16_t tspact;        /* last state seen */
+    bool     tx;            /* TRENA asserted    -> antenna on the PA */
+    bool     gsm;           /* GSM_TXEN asserted -> GSM900 band */
+    uint32_t tx_windows;    /* number of TX windows opened */
 } asm4532;
 
 void calypso_asm4532_tspact_update(uint16_t tspact, uint32_t fn)
 {
     bool tx_new, gsm_new;
 
-    /* Actif BAS : la ligne est ASSERTEE quand le bit est a 0. */
+    /* ACTIVE LOW: the line is asserted when the bit reads 0. */
     tx_new  = !(tspact & ASM_TRENA);
     gsm_new = !(tspact & ASM_GSM_TXEN);
 
@@ -59,9 +58,9 @@ void calypso_asm4532_tspact_update(uint16_t tspact, uint32_t fn)
                 tx_new ? "le PA (TX)" : "le chemin Rx",
                 gsm_new ? "GSM900" : "DCS1800", fn, asm4532.tx_windows);
     } else if (gsm_new != asm4532.gsm && tx_new) {
-        /* Changement de bande PENDANT une fenetre TX : le firmware ne fait pas
-         * ca (rffe_mode pose les deux ensemble). On le signale plutot que de
-         * l'absorber en silence. */
+        /* Band change DURING a TX window: the firmware does not do this,
+         * rffe_mode() sets both lines together. Report it rather than
+         * absorbing it silently. */
         ASM_LOG("⚠ bande changee PENDANT la fenetre TX : %s -> %s fn=%u",
                 asm4532.gsm ? "GSM900" : "DCS1800",
                 gsm_new ? "GSM900" : "DCS1800", fn);

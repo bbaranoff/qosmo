@@ -1,18 +1,21 @@
 /*
- * calypso_mailbox.c — moniteur COMPLET de la mailbox ARM <-> DSP
+ * calypso_mailbox.c - full ARM <-> DSP mailbox monitor.
  *
- * Voir calypso_mailbox.h pour le pourquoi. Configuration :
+ * See calypso_mailbox.h for the rationale. Configuration:
  *
- *   CALYPSO_MAILBOX=1|all     tout le flux de la fenêtre mailbox (0x0800..0x0FFF)
- *   CALYPSO_MAILBOX=w         écritures seulement (les deux sens)
- *   CALYPSO_MAILBOX=r         lectures seulement
- *   CALYPSO_MAILBOX_CELLS=0x098b,0x43d8,...   AJOUTE des cellules hors mailbox
- *                             (reprend l'idée de CALYPSO_WATCH_WR_ADDR, qu'il
- *                             remplace : ici les deux sens et les deux côtés)
- *   CALYPSO_MAILBOX_ONLY=1    ne trace QUE les cellules de _CELLS
- *   CALYPSO_MAILBOX_FILE=...  défaut $CALYPSO_LOG_DIR/mailbox.log, sinon
+ *   CALYPSO_MAILBOX=1|all     everything crossing the mailbox window
+ *                             (0x0800..0x0FFF)
+ *   CALYPSO_MAILBOX=w         writes only (both directions)
+ *   CALYPSO_MAILBOX=r         reads only
+ *   CALYPSO_MAILBOX_CELLS=0x098b,0x43d8,...   ADDS cells outside the window,
+ *                             watched in both directions and on both sides
+ *   CALYPSO_MAILBOX_RANGES=lo-hi,...          ADDS address ranges, bounds
+ *                             included
+ *   CALYPSO_MAILBOX_ONLY=1    trace ONLY the cells and ranges listed above
+ *   CALYPSO_MAILBOX_BRUT=1    disable folding, log every event
+ *   CALYPSO_MAILBOX_FILE=...  defaults to $LOG_DIR/mailbox.log, else
  *                             /tmp/calypso/logs/mailbox.log
- *   CALYPSO_MAILBOX_MAX=N     garde-fou (défaut 5 000 000 lignes, 0 = illimité)
+ *   CALYPSO_MAILBOX_MAX=N     safety cap (default 5 000 000 lines, 0 = none)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -21,45 +24,43 @@
 #include <stdlib.h>
 #include <string.h>
 
-int calypso_mbx_actif = -1;   /* -1 = à initialiser au premier accès */
+int calypso_mbx_actif = -1;   /* -1 = initialise on first access */
 
 static FILE    *g_f;
 static int      g_init;
-static int      g_ecr = 1, g_lec = 1;      /* écritures / lectures */
-static int      g_only;                    /* 1 = seulement _CELLS */
+static int      g_ecr = 1, g_lec = 1;      /* writes / reads */
+static int      g_only;                    /* 1 = _CELLS/_RANGES only */
 static uint16_t g_cells[32];
 static int      g_ncells;
-/* [2026-08-22] PLAGES arbitraires : la fenetre API seule laissait des regions
- * entieres du modele hors de portee (la reference de correlation 0x2cea.., le
- * tampon de burst 0x2a00.., le scratch-pad 0x0060..). 32 cellules unitaires ne
- * suffisaient pas pour une region de 128 mots. */
+/* Arbitrary RANGES: the API window alone left whole regions of the model out of
+ * reach (the correlation reference at 0x2cea.., the burst buffer at 0x2a00..,
+ * the scratch-pad at 0x0060..), and 32 single cells cannot cover a 128-word
+ * region. */
 static struct { uint16_t lo, hi; } g_ranges[16];
 static int      g_nranges;
 static unsigned long g_n, g_max = 5000000UL;
 
-/* Repliement PAR CELLULE — journaliser au CHANGEMENT, pas au non-consécutif.
+/* PER-CELL folding: log on CHANGE, not on non-consecutive repeats.
  *
- * [2026-07-29, seconde version] La première repliait les événements CONSÉCUTIFS
- * identiques. Ça ne replie rien : la boucle de fond du DSP interroge DEUX
- * cellules en alternance (`0xde86 ld *(0x098c)` puis `0xddfd ld *(0x098d)`),
- * donc jamais deux lignes de suite identiques. Résultat mesuré : 291 Mo et
- * 3 690 446 lignes en quelques minutes, et QEMU tué.
+ * Folding identical CONSECUTIVE events folds nothing here: the DSP background
+ * loop polls two cells in alternation (0xde86 ld *(0x098c) then 0xddfd ld
+ * *(0x098d)), so no two successive lines are ever identical. Measured that way:
+ * 291 MB and 3 690 446 lines in a few minutes, and QEMU killed.
  *
- * La bonne sémantique est par cellule : une lecture qui rend la MÊME valeur au
- * MÊME PC ne porte aucune information neuve, même si d'autres accès s'intercalent.
- * On garde donc, pour chaque mot, la dernière valeur journalisée et le contexte ;
- * on n'écrit qu'au changement, en résumant la série précédente par « x N ».
- * Les écritures sont toujours journalisées : elles sont rares et chacune est un
- * événement.  CALYPSO_MAILBOX_BRUT=1 désactive tout le repliement. */
+ * Per cell is the right granularity: a read returning the SAME value at the
+ * SAME PC carries no new information, even with other accesses interleaved. So
+ * keep, per word, the last logged value and context, and emit only on change,
+ * summarising the run just closed as "x N". CALYPSO_MAILBOX_BRUT=1 turns all
+ * folding off. */
 static int       g_brut;
-static uint16_t *g_dval;      /* dernière valeur journalisée, par mot */
-static uint32_t *g_dctx;      /* dernier contexte journalisé, par mot */
-static uint32_t *g_drep;      /* longueur de la série en cours, par mot */
-static uint8_t  *g_dvu;       /* ce mot a-t-il déjà été journalisé ? */
-static uint8_t  *g_dsens;     /* sens du dernier événement journalisé */
+static uint16_t *g_dval;      /* last logged value, per word */
+static uint32_t *g_dctx;      /* last logged context, per word */
+static uint32_t *g_drep;      /* length of the run in progress, per word */
+static uint8_t  *g_dvu;       /* has this word been logged at all? */
+static uint8_t  *g_dsens;     /* direction of the last logged event */
 
-/* Noms des cellules qui reviennent sans cesse dans le diagnostic. Une trace
- * lisible évite de re-chercher « 0x08fa c'était quoi déjà » à chaque lecture. */
+/* Names for the cells that keep coming up in diagnosis: a readable trace saves
+ * looking up "0x08fa, what was that again" on every read. */
 static const char *mbx_nom(uint16_t m)
 {
     switch (m) {
@@ -70,9 +71,8 @@ static const char *mbx_nom(uint16_t m)
     case 0x083C: return "d_task_d/rp1";
     case 0x083D: return "d_burst_d/rp1";
     case 0x0810: return "d_ctrl_system";
-    /* [2026-07-29] 0x08E2 etait libelle « d_dsp_page » : faux de +14 mots.
-     * NDB+0 = 0x08D4 = d_dsp_page ; NDB+14 = 0x08E2 = d_dsp_state (l'ARM y
-     * ecrit 3 = C_DSP_IDLE3 depuis dsp.c:215). Voir calypso_fbsb.h. */
+    /* NDB+0 = 0x08D4 = d_dsp_page; NDB+14 = 0x08E2 = d_dsp_state, where the
+     * ARM writes 3 = C_DSP_IDLE3 from dsp.c:215. See calypso_fbsb.h. */
     case 0x08D4: return "d_dsp_page";
     case 0x08D5: return "d_error_status";
     case 0x08E2: return "d_dsp_state";
@@ -108,7 +108,7 @@ void calypso_mbx_init(void)
 
     e = getenv("CALYPSO_MAILBOX");
     if (!e || !*e || !strcmp(e, "0")) {
-        calypso_mbx_actif = 0;        /* éteint : coût nul sur les chemins chauds */
+        calypso_mbx_actif = 0;        /* off: zero cost on the hot paths */
         return;
     }
     if (!strcmp(e, "w") || !strcmp(e, "W")) {
@@ -131,15 +131,15 @@ void calypso_mbx_init(void)
             }
             v = strtol(p, &fin, 0);
             if (fin == p) {
-                break;                /* rien de lisible : on arrête là */
+                break;                /* nothing parseable: stop here */
             }
             g_cells[g_ncells++] = (uint16_t)v;
             p = fin;
         }
     }
-    /* [2026-08-22] CALYPSO_MAILBOX_RANGES=lo-hi,lo-hi,... (bornes INCLUSES).
-     * Meme analyse tolerante que _CELLS : on s arrete au premier illisible
-     * plutot que de deviner. Les bornes sont remises dans l ordre si besoin. */
+    /* CALYPSO_MAILBOX_RANGES=lo-hi,lo-hi,... , bounds INCLUDED. Same tolerant
+     * parse as _CELLS: stop at the first unreadable token rather than guess.
+     * Bounds are swapped back into order when needed. */
     e = getenv("CALYPSO_MAILBOX_RANGES");
     if (e && *e) {
         const char *p = e;
@@ -165,7 +165,7 @@ void calypso_mbx_init(void)
                 }
                 p = fin;
             } else {
-                hi = lo;              /* une borne seule = une cellule */
+                hi = lo;              /* a lone bound = a single cell */
             }
             if (lo > hi) { long t = lo; lo = hi; hi = t; }
             g_ranges[g_nranges].lo = (uint16_t)lo;
@@ -188,9 +188,8 @@ void calypso_mbx_init(void)
     e = getenv("CALYPSO_MAILBOX_FILE");
     if (!e || !*e) {
         static char def[512];
-        /* Le dépôt exporte LOG_DIR (paths.env) ; CALYPSO_LOG_DIR n'existe pas —
-         * première version de ce code : mauvais nom, le fichier serait toujours
-         * tombé dans le repli. On accepte les deux, LOG_DIR fait foi. */
+        /* The repo exports LOG_DIR (paths.env). CALYPSO_LOG_DIR is accepted as
+         * a fallback, but LOG_DIR wins. */
         const char *d = getenv("LOG_DIR");
         if (!d || !*d) d = getenv("CALYPSO_LOG_DIR");
         snprintf(def, sizeof(def), "%s/mailbox.log",
@@ -203,9 +202,10 @@ void calypso_mbx_init(void)
         calypso_mbx_actif = 0;
         return;
     }
-    /* Tampon PLEIN et large. En _IOLBF chaque ligne était un appel système :
-     * 3,7 M de write() ont suffi à mettre QEMU à genoux. On vide périodiquement
-     * (voir mbx_ecrire) pour qu'un arrêt brutal ne perde qu'une fenêtre. */
+    /* FULL buffering, and wide. Under _IOLBF every line was a syscall, and
+     * 3.7 M write() calls were enough to bring QEMU to its knees. Flush
+     * periodically (see mbx_ecrire) so an abrupt exit loses one window at
+     * most. */
     setvbuf(g_f, NULL, _IOFBF, 1 << 20);
 
     g_dval = calloc(0x10000, sizeof(*g_dval));
@@ -230,9 +230,8 @@ void calypso_mbx_init(void)
             "(ecr=%d lec=%d cellules_sup=%d only=%d max=%lu)\n",
             e, g_ecr, g_lec, g_ncells, g_only, g_max);
 
-    /* [2026-08-22] Annonce de ce qui est REELLEMENT couvert. Sans elle on ne
-     * distingue pas « la cellule n a pas bouge » de « la cellule n etait pas
-     * surveillee » — c est ce qui m avait fait chercher 0x2cea a la main. */
+    /* Announce what is ACTUALLY covered: without this there is no telling
+     * "the cell never moved" from "the cell was never watched". */
     {
         int i;
         fprintf(stderr, "[mailbox] couverture : %s",
@@ -253,7 +252,7 @@ void calypso_mbx_init(void)
     calypso_mbx_actif = 1;
 }
 
-/* Dans la fenêtre mailbox, ou dans la liste supplémentaire ? */
+/* In the mailbox window, or in the extra cell/range list? */
 static int mbx_retenu(uint16_t mot)
 {
     int i;
@@ -310,14 +309,13 @@ void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
         return;
     }
 
-    /* Une écriture qui CHANGE la valeur est toujours un événement : elle passe
-     * sans condition, et elle redéfinit la référence.
+    /* A write that CHANGES the value is always an event: it passes
+     * unconditionally and becomes the new reference.
      *
-     * [2026-07-29, troisième version] Auparavant TOUTE écriture passait. Mesuré
-     * sur un run natif : 87 174 lignes sur 92 150 étaient le DSP réécrivant
-     * « 0x0000 -> 0x0000 » depuis le même PC (@0xb446), une fois par trame. Une
-     * écriture qui ne change rien, depuis le même PC, ne porte pas plus
-     * d'information qu'une lecture — même règle pour les deux. */
+     * Writes that change nothing do not: measured on a native run, 87 174 of
+     * 92 150 lines were the DSP rewriting 0x0000 -> 0x0000 from the same PC
+     * (@0xb446), once per frame. A write with no effect from the same PC
+     * carries no more information than a read, so both follow the same rule. */
     if (est_ecr && avant != val) {
         if (g_drep[mot] > 1) {
             mbx_ecrire(g_dsens[mot], mot, g_dval[mot], g_dval[mot], g_dctx[mot],
@@ -332,15 +330,15 @@ void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
         return;
     }
 
-    /* Sinon — lecture, ou écriture sans effet : rien de neuf si même valeur ET
-     * même contexte. On compte. */
+    /* Otherwise - a read, or a write with no effect: nothing new if both the
+     * value and the context match. Just count it. */
     if (g_dvu[mot] && g_dval[mot] == val && g_dctx[mot] == ctx) {
         g_drep[mot]++;
-        g_n--;                        /* ne consomme pas le plafond */
+        g_n--;                        /* does not count against the cap */
         return;
     }
 
-    /* Changement : on résume la série précédente, puis on journalise. */
+    /* Change: close the previous run with a summary, then log. */
     if (g_drep[mot] > 1) {
         mbx_ecrire(g_dsens[mot], mot, g_dval[mot], g_dval[mot], g_dctx[mot],
                    fn, insn, g_drep[mot] - 1);
@@ -364,7 +362,7 @@ static void mbx_ecrire(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
         snprintf(suffixe, sizeof(suffixe), "  x%lu", rep + 1);
     }
     if ((g_n & 0x3FF) == 0) {
-        fflush(g_f);                  /* une fenêtre de 1024 lignes au pire */
+        fflush(g_f);                  /* at worst a 1024-line window */
     }
     if (sens == MBX_ARM_WR || sens == MBX_DSP_WR) {
         fprintf(g_f, "%-12u %-8u %-6s 0x%04x %-14s 0x%04x -> 0x%04x  @0x%04x%s\n",

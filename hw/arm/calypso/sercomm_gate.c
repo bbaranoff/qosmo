@@ -1,22 +1,16 @@
 /*
- * sercomm_gate.c — Sercomm DLCI router (PTY) + CLK UDP listener
+ * sercomm_gate.c — Sercomm DLCI router on the modem UART (PTY).
  *
- * Two separate roles, matching the current QEMU split:
+ * The sercomm HDLC stream coming from the host (mobile/ccch_scan) is decoded
+ * here, re-wrapped and pushed into the UART RX FIFO, so the firmware's own
+ * sercomm driver parses it through the real code path. L1CTL = DLCI 5;
+ * TRXC = DLCI 4, intercepted here with stub responses wrapped back out. No
+ * DLCI on the PTY ever carries radio bursts.
  *
- *   1. PTY (UART modem) — sercomm HDLC stream from host (mobile/ccch_scan).
- *      DLCIs are re-wrapped and pushed to the UART RX FIFO so the firmware's
- *      sercomm driver parses them via the real code path. L1CTL = DLCI 5,
- *      TRXC = DLCI 4 (intercepted here, stub responses wrapped back out).
- *      No DLCI on the PTY ever carries radio bursts.
- *
- *   2. UDP CLK listener — just drains "IND CLOCK <fn>" on the baseband
- *      side and logs it. calypso_trx owns its own FN counter; the CLK
- *      packets are purely informational here.
- *
- *      TRXC traffic is stubbed locally by calypso-ipc-device on UDP 5701 — QEMU
- *      never sees TRXC on UDP.
- *
- *      TRXD (burst) transport is owned by calypso_bsp.c via calypso_orch.
+ * Nothing else lands here: TRXC over UDP is stubbed by calypso-ipc-device on
+ * port 5701 and never reaches QEMU, TRXD (bursts) belongs to calypso_bsp.c via
+ * calypso_orch, and QEMU, being the clock master, sends CLK ticks to the
+ * bridge from calypso_trx.c instead of listening for them.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -33,16 +27,10 @@
 #include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/sercomm_gate.h"
 
-/* TRXC handling is NOT done by QEMU. calypso-ipc-device answers TRXC commands
- * locally (stub) on UDP 5701 — QEMU never sees them. The L1CTL/L23
- * path on PTY DLCI 5 is the only thing the modem UART carries. */
-
 #define GATE_LOG(fmt, ...) \
     fprintf(stderr, "[gate] " fmt "\n", ##__VA_ARGS__)
 
-/* UART pointer captured on the first sercomm_gate_feed() call. The TRXC
- * UDP callback uses it to push received sercomm-wrapped frames straight
- * into the firmware UART RX FIFO. */
+/* UART captured on the first sercomm_gate_feed() call. */
 static CalypsoUARTState *g_uart;
 
 /* ============================================================
@@ -202,10 +190,10 @@ void sercomm_gate_feed(CalypsoUARTState *s, const uint8_t *buf, int size)
         case GATE_IN_FRAME:
             if (b == SERCOMM_FLAG) {
                 if (sc_len >= 2) {
-                    /* DLCI 5 = L1CTL from mobile (via bridge).
-                     * Trace, then push to firmware FIFO so the real
-                     * sercomm parser dispatches it. All other DLCIs
-                     * (console, debug, …) go straight to FIFO. */
+                    /* DLCI 5 = L1CTL from the mobile (via the bridge):
+                     * trace it, then push it to the firmware FIFO so the
+                     * real sercomm parser dispatches it. Every other DLCI
+                     * (console, debug, ...) goes straight to the FIFO. */
                     if (sc_buf[0] == SERCOMM_DLCI_TRXC && sc_len >= 2) {
                         char rsp[512];
                         int rl = gate_trxc_handle(sc_buf + 2, sc_len - 2,
@@ -242,14 +230,9 @@ void sercomm_gate_feed(CalypsoUARTState *s, const uint8_t *buf, int size)
 }
 
 /* ============================================================
- * 2. UDP CLK listener — informational only
- * ============================================================
- *
- * TRXC is stubbed by calypso-ipc-device on UDP 5701; QEMU never sees it.
- * TRXD (bursts) is owned by calypso_bsp.c via calypso_orch.
- */
+ * 2. Clock — no listener
+ * ============================================================ */
 
-/* CLK UDP listener removed — QEMU sends ticks to bridge directly. */
 static int g_clk_fd = -1;
 
 /* ---------- init ---------- */
@@ -259,9 +242,9 @@ void sercomm_gate_init(int base_port)
     if (base_port <= 0) base_port = 6700;
     int clk_port = base_port + 0;
 
-    /* CLK UDP listener disabled — QEMU is now the clock master and sends
-     * ticks directly to the bridge via calypso_trx.c (port 6700).
-     * The gate no longer needs to receive CLK IND. */
+    /* No CLK listener: QEMU is the clock master and sends the ticks straight
+     * to the bridge from calypso_trx.c (port 6700), so the gate never has to
+     * receive a CLK IND. */
     (void)clk_port;
     g_clk_fd = -1;
     GATE_LOG("TRXD: owned by calypso_bsp.c via calypso_orch");

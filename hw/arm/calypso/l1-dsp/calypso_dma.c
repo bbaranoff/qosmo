@@ -1,14 +1,14 @@
 /*
- * calypso_dma.c — contrôleur DMA interne du TMS320C54x
+ * calypso_dma.c - internal DMA controller of the TMS320C54x.
  *
- * Voir calypso_dma.h pour le pourquoi, le conflit de mapping et la liste
- * explicite de ce qui n'est PAS modélisé.
+ * See calypso_dma.h for the rationale, the mapping conflict and the explicit
+ * list of what is NOT modelled.
  *
- * Configuration :
- *   CALYPSO_DMA=1            active le module (défaut OFF)
- *   CALYPSO_DMA_VEC_BASE=30  vecteur de l'IT DMA (defaut 30 = INT10n = IMR
- *                            bit 14 + 16, CAL000 §5.1 ; partage par les 4 canaux)
- *   CALYPSO_DMA_MAX_MOTS=…   garde-fou par transfert (défaut 4096)
+ * Configuration:
+ *   CALYPSO_DMA=1            enable the module (default OFF)
+ *   CALYPSO_DMA_VEC_BASE=30  DMA interrupt vector (default 30 = INT10n = IMR
+ *                            bit 14 + 16, CAL000 5.1; shared by the 4 channels)
+ *   CALYPSO_DMA_MAX_MOTS=... per-transfer safety cap (default 4096)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -18,25 +18,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-int calypso_dma_actif = -1;   /* -1 = à initialiser au premier accès */
+int calypso_dma_actif = -1;   /* -1 = initialise on first access */
 
 static int      g_init;
-/* [2026-08-03] CORRIGE d'apres CAL000 §5.1. AVANT : 23, au motif « DMAC0 =
- * IMR bit 7 + 16 » — c'est la table du C54x GENERIQUE (SPRU131). Sur Calypso le
- * bit 7 est INT4n = MCSI TRANSMIT, et il n'existe pas de vecteurs DMAC0..3 : le
- * DSP ne voit qu'UNE ligne DMA, INT10n = bit 14 = vec 30. Les quatre canaux
- * (§3.5.15) partagent donc ce meme vecteur ; le canal se lit dans les registres,
- * pas dans le numero d'IT. */
-static int      g_vec_base = C54X_IT_DMA_VEC;   /* INT10n, partage par les 4 canaux */
+/* Per CAL000 5.1. Do NOT take the DMAC0 vector from the GENERIC C54x table
+ * (SPRU131): on Calypso, IMR bit 7 is INT4n = MCSI TRANSMIT, and no DMAC0..3
+ * vectors exist. The DSP sees a SINGLE DMA line, INT10n = bit 14 = vec 30, and
+ * the four channels (CAL000 3.5.15) share it; the channel is read from the
+ * registers, not from the interrupt number. */
+static int      g_vec_base = C54X_IT_DMA_VEC;   /* INT10n, shared by the 4 channels */
 static unsigned g_max_mots = 4096;
 static unsigned g_log;
 
-/* État propre au module : le banc de sous-registres de calypso_c54x.c ne
- * compte que 4 registres par canal, on garde donc ici ce qui manque. */
-static uint16_t g_dmprec;                       /* dernier DMPREC écrit */
+/* Module-local state: the sub-register bank in calypso_c54x.c only holds 4
+ * registers per channel, so the missing ones are kept here. */
+static uint16_t g_dmprec;                       /* last DMPREC written */
 static uint16_t g_subaddr;                      /* DMSA */
 static uint16_t g_sub[C54X_DMA_CANAUX * 5];     /* SRC/DST/CTR/SFC/MCR */
-static uint8_t  g_arme[C54X_DMA_CANAUX];        /* canal activé, transfert dû */
+static uint8_t  g_arme[C54X_DMA_CANAUX];        /* channel enabled, transfer due */
 
 void calypso_dma_init(void)
 {
@@ -70,7 +69,7 @@ void calypso_dma_init(void)
             g_vec_base, g_max_mots);
 }
 
-/* Nom lisible d'un sous-registre, pour les traces. */
+/* Readable name of a sub-register, for traces. */
 static const char *dma_nom_sub(unsigned reg)
 {
     static const char *n[5] = { "SRC", "DST", "CTR", "SFC", "MCR" };
@@ -83,16 +82,16 @@ bool calypso_dma_mmr_write(C54xState *s, uint16_t addr, uint16_t val)
         calypso_dma_init();
     }
     if (!calypso_dma_actif) {
-        return false;            /* éteint : le décodage historique s'applique */
+        return false;            /* off: the historical decode applies */
     }
 
     switch (addr) {
     case C54X_DMPREC: {
         uint16_t avant = g_dmprec;
         g_dmprec = val;
-        /* Bits 0..5 : DE0..DE5, activation par canal. Un front montant arme le
-         * transfert ; on ne le déclenche PAS ici mais au tick, pour que le
-         * firmware ait fini d'écrire ses sous-registres. */
+        /* Bits 0..5: DE0..DE5, per-channel enable. A rising edge arms the
+         * transfer; it is NOT started here but at the tick, so the firmware
+         * has finished writing its sub-registers first. */
         for (unsigned c = 0; c < C54X_DMA_CANAUX; c++) {
             uint16_t bit = (uint16_t)(1u << c);
             if ((val & bit) && !(avant & bit)) {
@@ -128,7 +127,7 @@ bool calypso_dma_mmr_write(C54xState *s, uint16_t addr, uint16_t val)
         }
         s->data[addr] = val;
         if (addr == C54X_DMSDI) {
-            g_subaddr++;          /* auto-incrément, DMSDN ne l'a pas */
+            g_subaddr++;          /* auto-increment; DMSDN has none */
         }
         return true;
 
@@ -155,8 +154,8 @@ void calypso_dma_tick(C54xState *s)
         uint16_t ctr = g_sub[c * 5 + 2];
         unsigned n   = ctr;
 
-        /* Garde-fou : un CTR aberrant (sous-registres pas encore écrits, ou
-         * mapping faux) ne doit pas balayer toute la mémoire du DSP. */
+        /* Safety net: a bogus CTR (sub-registers not written yet, or a wrong
+         * mapping) must not sweep the whole DSP memory. */
         if (n == 0 || n > g_max_mots) {
             if (g_log < 40) {
                 g_log++;
@@ -168,15 +167,15 @@ void calypso_dma_tick(C54xState *s)
             continue;
         }
 
-        /* Transfert bloc, espace DONNÉES uniquement (cf. en-tête : les espaces
-         * programme et I/O ne sont pas modélisés). */
+        /* Block transfer, DATA space only (see the header: program and I/O
+         * spaces are not modelled). */
         for (unsigned i = 0; i < n; i++) {
             s->data[(uint16_t)(dst + i)] = s->data[(uint16_t)(src + i)];
         }
 
-        g_sub[c * 5 + 2] = 0;     /* CTR épuisé */
+        g_sub[c * 5 + 2] = 0;     /* CTR exhausted */
         g_arme[c] = 0;
-        g_dmprec = (uint16_t)(g_dmprec & ~(1u << c));   /* le canal se désarme */
+        g_dmprec = (uint16_t)(g_dmprec & ~(1u << c));   /* channel disarms itself */
         s->data[C54X_DMPREC] = g_dmprec;
 
         if (g_log < 40) {
@@ -186,8 +185,8 @@ void calypso_dma_tick(C54xState *s)
                     c, n, src, dst, c, g_vec_base, g_vec_base - 16);
         }
 
-        /* Completion : c'est CE signal qui manquait. §5.1 : ligne unique INT10n
-         * pour les 4 canaux, IMR bit = vec - 16 (formule de calypso_c54x.h). */
+        /* Completion signal. CAL000 5.1: one INT10n line for all 4 channels,
+         * IMR bit = vec - 16 (formula from calypso_c54x.h). */
         c54x_interrupt_ex(s, g_vec_base, g_vec_base - 16);
     }
 }

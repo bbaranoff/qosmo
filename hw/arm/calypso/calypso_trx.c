@@ -10,8 +10,8 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
 #include "hw/arm/calypso/calypso_trx.h"
-/* l1-dsp/ n'est lie que sous --enable-l1-dsp : symbole FAIBLE, teste avant appel,
- * pour que ce fichier reste commun aux deux L1 (cf. ilot l1-dsp). */
+/* l1-dsp/ is only linked under --enable-l1-dsp: WEAK symbol, tested before the
+ * call, so this file stays common to both L1s (see the l1-dsp island). */
 extern void calypso_twl3025_set_afc_dac(int16_t dac_value) __attribute__((weak));
 #include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/calypso_timer.h"
@@ -41,15 +41,15 @@ extern CalypsoUARTState *g_uart_irda;
 typedef struct CalypsoTRX {
     qemu_irq *irqs;
     MemoryRegion api_iomem;
-    uint16_t *api_ram;          /* g_new0, ou mmap du segment partage du pont */
-    /* [2026-09-16] DSP EXTERNE (CALYPSO_DSP_EXTERN=<socket>|1) : la couche 1
-     * n'est plus un shunt gr-gsm mais un vrai C54x qui tourne dans c54x_exe.
-     * L'API RAM est partagee par /dev/shm, la trame est verrouillee par TICK/DONE
-     * (cf. include/hw/arm/calypso/calypso_dsp_pont.h). */
+    uint16_t *api_ram;          /* g_new0, or mmap of the bridge shared segment */
+    /* EXTERNAL DSP (CALYPSO_DSP_EXTERN=<socket>|1): layer 1 is a real C54x
+     * running inside c54x_exe instead of a gr-gsm shunt. API RAM is shared
+     * through /dev/shm and the frame is locked by TICK/DONE (see
+     * include/hw/arm/calypso/calypso_dsp_pont.h). */
     bool pont;
-    bool pont_pending;          /* un TICK envoye, DONE pas encore releve */
+    bool pont_pending;          /* a TICK was sent, DONE not collected yet */
     int pont_fd;
-    QEMUTimer *pont_boot_timer; /* cadence le DSP seul, avant que le firmware lance le TDMA */
+    QEMUTimer *pont_boot_timer; /* clocks the DSP alone, before the firmware starts the TDMA */
     unsigned pont_timeouts;
     uint64_t pont_frames;
     uint64_t pont_api_irqs;
@@ -111,9 +111,9 @@ void calypso_trx_autosync_fn(uint32_t sch_fn)
     }
     int64_t raw = (int64_t)sch_fn - (int64_t)g_trx->fn;
 
-    /* La latence gr-gsm/UDP/boucle QEMU ne peut que retarder la lecture de
-     * fn local, donc gonfler fn et reduire l'offset mesure. Le maximum des
-     * derniers SCH est la valeur la plus proche de la verite. */
+    /* gr-gsm/UDP/QEMU-loop latency can only delay the local fn read, hence
+     * inflate fn and shrink the measured offset. The maximum over the last few
+     * SCHs is the value closest to the truth. */
     g_trx->fn_offset_hist[g_trx->fn_offset_n % FN_SYNC_WINDOW] = raw;
     g_trx->fn_offset_n++;
     unsigned n = g_trx->fn_offset_n < FN_SYNC_WINDOW ? g_trx->fn_offset_n : FN_SYNC_WINDOW;
@@ -137,7 +137,7 @@ void calypso_trx_autosync_fn(uint32_t sch_fn)
             sch_fn, (long long)offset, (long long)raw);
 }
 
-/* ── pont DSP externe ─────────────────────────────────────────────────── */
+/* ── external DSP bridge ──────────────────────────────────────────────── */
 static bool pont_send(CalypsoTRX *s, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 {
     CalypsoPontMsg m = { type, a, b, c };
@@ -179,8 +179,8 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
                 CALYPSO_PONT_SHM, (long long)st.st_size, CALYPSO_PONT_SHM_BYTES);
         exit(1);
     }
-    /* Fenetre ARM de 64 Ko, alignee sur une page ; les 16 premiers Ko sont le
-     * segment partage (la fenetre API du DSP), le reste est prive et vide. */
+    /* 64 KB page-aligned ARM window; the first 16 KB are the shared segment
+     * (the DSP API window), the rest is private and empty. */
     void *base = NULL;
     if (posix_memalign(&base, 4096, CALYPSO_API_SIZE) != 0) {
         fprintf(stderr, "[trx] pont DSP : posix_memalign\n");
@@ -233,11 +233,11 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
     }
 
     if (s->pont) {
-        /* Le C54x externe ecrit lui-meme d_task_d / d_burst_d dans la page de
-         * lecture, ET son bootloader ROM (parque en 0xb41c) repond lui-meme aux
-         * commandes BL_CMD_STATUS : l'emulation ci-dessous, faite pour le shunt
-         * sans DSP, forcerait IDLE apres trois lectures, AVANT que le DSP n'ait
-         * vu la commande - il rate alors le COPY_BLOCK de demarrage. */
+        /* The external C54x writes d_task_d / d_burst_d into the read page
+         * itself, and its ROM bootloader (parked at 0xb41c) answers the
+         * BL_CMD_STATUS commands itself. The emulation below, written for the
+         * DSP-less shunt, would force IDLE after three reads, BEFORE the DSP
+         * has seen the command, making it miss the startup COPY_BLOCK. */
         return val;
     }
     uint16_t rv;
@@ -277,23 +277,22 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
     } else {
         ((uint8_t *)s->api_ram)[off] = (uint8_t)value;
     }
-    /* [2026-09-17] RELAIS AFC — MANQUANT dans qosmo, present dans qemu-src.
-     * afc_load_dsp() du firmware ecrit dsp_api.db_w->d_afc (mot 15 de la page W :
-     * page0 = octet 0x001E, page1 = 0x0046). Sur silicium le DSP le serialise
-     * vers le TWL3025 par le TSP. Ici personne ne le relayait :
-     * calypso_twl3025_set_afc_dac() n'etait appele NULLE PART, donc la rotation
-     * des echantillons ne bougeait jamais et l'erreur de frequence mesuree par le
-     * detecteur FB ne convergeait pas -> le firmware n'atteignait jamais le seuil
-     * SB (800 Hz) et rejouait FB indefiniment. Mesure (rejeu deterministe) :
-     * sans ce relais df ~ milliers de Hz ; avec, df tombe sous 100 Hz et les 224
-     * tentatives SB ont lieu. */
+    /* [2026-09-17] AFC RELAY. The firmware's afc_load_dsp() writes
+     * dsp_api.db_w->d_afc (word 15 of the W page: byte 0x001E on page 0,
+     * 0x0046 on page 1). On silicon the DSP serialises it to the TWL3025 over
+     * the TSP; here this hook is the only relay. Without it the sample
+     * rotation never moves, the frequency error seen by the FB detector never
+     * converges, the firmware never reaches the SB threshold (800 Hz) and
+     * replays FB forever. Measured on a deterministic replay: df ~ thousands
+     * of Hz without the relay, below 100 Hz with it, and the 224 SB attempts
+     * do take place. */
     if ((off == 0x001E || off == 0x0046) && size == 2 && calypso_twl3025_set_afc_dac) {
         calypso_twl3025_set_afc_dac((int16_t)(uint16_t)value);
     }
 
-    /* [2026-09-16] La fenetre entiere, pour les L1 qui la decodent (le C54x).
-     * Avant les hooks nommes ci-dessous, et apres le rangement ci-dessus : une
-     * L1 qui relit l'API RAM depuis ce callback doit y voir la valeur ecrite. */
+    /* The whole window, for the L1s that decode it (the C54x). Order matters:
+     * after the store above and before the named hooks below, so an L1 that
+     * reads API RAM back from this callback sees the value just written. */
     if (size == 2) {
         calypso_l1_do_api_write_observed((uint32_t)off, (uint16_t)value, size);
     }
@@ -320,8 +319,8 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
             s->bl_booted = false;
             s->bl_polls = 0;
         } else if (value == BL_STATUS_READY) {
-            /* En DSP externe cette valeur est en fait BL_CMD_COPY_BLOCK (2) :
-             * le vrai bootloader la consomme, on ne touche pas a l'API RAM. */
+            /* With an external DSP this value is in fact BL_CMD_COPY_BLOCK
+             * (2): the real bootloader consumes it, so leave API RAM alone. */
             if (!s->pont) {
                 s->api_ram[API_VERSION / 2] = API_VERSION_VALUE;
                 s->api_ram[API_VERSION2 / 2] = 0;
@@ -342,10 +341,10 @@ void calypso_trx_dsp_reset_line(bool active)
     static bool precedent;
     CalypsoTRX *s = g_trx;
     if (s && s->pont && precedent && !active) {
-        /* Relache du reset : la ROM de boot repart de 0xff80, pose IDLE et se
-         * parque en 0xb41c, prete pour les COPY_BLOCK de l'ARM. C'est le SEUL
-         * moment ou l'on remet le C54x a zero - jamais sur une commande du
-         * bootloader (qosmo-dsp : « NE PAS re-reset ... preserve bootloader cmd »). */
+        /* Reset release: the boot ROM restarts at 0xff80, posts IDLE and
+         * parks at 0xb41c, ready for the ARM COPY_BLOCKs. This is the ONLY
+         * point where the C54x is reset - never on a bootloader command, which
+         * would destroy the pending command. */
         pont_send(s, PONT_RESET, 0, 0, 0);
         fprintf(stderr, "[trx] pont DSP : RESET_DSP relache par le firmware -> "
                 "PONT_RESET (fn=%u)\n", s->fn);
@@ -370,11 +369,10 @@ static void tpu_done(CalypsoTRX *s)
 
 static void tdma_tick(void *opaque);
 
-/* [2026-09-16] Battement impose de l'exterieur, a un numero de trame donne.
- * C'est le maitre d'horloge de la L1 C54x : la-bas c'est le timer TINT0 du DSP
- * qui cadence le TDMA, pas l'horloge murale de la plateforme. Sens L1 ->
- * plateforme, donc symbole direct et non entree de vtable (cf.
- * calypso_l1_ops.h) : il n'a qu'une implementation possible. */
+/* Externally imposed beat, at a given frame number: the clock master of the
+ * C54x L1, where the DSP TINT0 timer drives the TDMA rather than the platform
+ * wall clock. L1 -> platform direction, hence a direct symbol and not a vtable
+ * entry (see calypso_l1_ops.h): only one implementation is possible. */
 void calypso_trx_force_tick(uint32_t fn)
 {
     if (!g_trx) {
@@ -571,8 +569,8 @@ static void *wall_clock_loop(void *arg)
     return NULL;
 }
 
-/* Un echange TICK/DONE avec le DSP externe : releve le DONE de la trame
- * precedente sans attendre, puis envoie le TICK de celle-ci si le DSP est libre. */
+/* One TICK/DONE exchange with the external DSP: collect the previous frame's
+ * DONE without blocking, then send this frame's TICK if the DSP is idle. */
 static void pont_echange(CalypsoTRX *s)
 {
     if (s->pont_fd < 0) {
@@ -602,11 +600,11 @@ static void pont_echange(CalypsoTRX *s)
     }
 }
 
-/* Avant que le firmware n'active le TPU (ce qui lance tdma_tick), le DSP
- * externe doit deja tourner : dsp_power_on() attend son bootloader. Ce timer
- * ne fait QUE l'echange avec le DSP - pas d'IRQ TPU-frame, pas de sequenceur,
- * l'ARM n'a pas encore installe ses vecteurs. Il s'arrete de lui-meme quand
- * le vrai tick prend le relais. */
+/* Before the firmware enables the TPU (which starts tdma_tick) the external
+ * DSP must already run: dsp_power_on() waits for its bootloader. This timer
+ * does ONLY the DSP exchange - no TPU-frame IRQ, no sequencer, since the ARM
+ * has not installed its vectors yet. It stops by itself once the real tick
+ * takes over. */
 static void pont_boot_tick(void *opaque)
 {
     CalypsoTRX *s = opaque;
@@ -628,13 +626,13 @@ static void tdma_tick(void *opaque)
         timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
         return;
     }
-    /* [2026-09-17] LOCK-STEP DSP (CALYPSO_PONT_LOCKSTEP=1, defaut ON en mode pont) :
-     * n'avancer la trame (fn + IT TPU-frame au firmware) QUE si le DSP externe a fini
-     * la trame precedente. Sinon QEMU genere des trames plus vite que le DSP ne les
-     * traite, les ticks sont sautes, et le compteur de trame du firmware s'envole
-     * (fn_offset ~600k) : les trois horloges (BTS/QEMU/firmware) divergent et
-     * l'acquisition ne se verrouille jamais. En lock-step, firmware et DSP restent sur
-     * la MEME trame -> coherence d'horloge, TOA stable, verrouillage natif possible. */
+    /* [2026-09-17] DSP LOCK-STEP (CALYPSO_PONT_LOCKSTEP=1): advance the frame
+     * (fn + TPU-frame IT to the firmware) ONLY once the external DSP has
+     * finished the previous one. Otherwise QEMU produces frames faster than
+     * the DSP consumes them, ticks are skipped and the firmware frame counter
+     * runs away (fn_offset ~600k): the three clocks (BTS/QEMU/firmware)
+     * diverge and acquisition never locks. In lock-step firmware and DSP stay
+     * on the SAME frame: coherent clocks, stable TOA, native lock possible. */
     if (s->pont && s->pont_fd >= 0 && s->pont_pending) {
         static int ls = -1;
         if (ls < 0) { const char *e = getenv("CALYPSO_PONT_LOCKSTEP"); ls = (e && *e=='1') ? 1 : 0; }
@@ -644,7 +642,7 @@ static void tdma_tick(void *opaque)
                 s->pont_pending = false; s->pont_frames++;
                 if (m.a & PONT_DONE_API_IRQ) { s->pont_api_irqs++; qemu_irq_raise(s->irqs[CALYPSO_IRQ_API]); }
             } else {
-                /* DSP pas encore pret : ne pas avancer, reessayer bientot */
+                /* DSP not ready yet: do not advance, retry soon */
                 timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 8);
                 return;
             }
@@ -654,7 +652,7 @@ static void tdma_tick(void *opaque)
         static int ls2 = -1;
         if (ls2 < 0) { const char *e = getenv("CALYPSO_PONT_LOCKSTEP"); ls2 = (e && *e=='1') ? 1 : 0; }
         if (s->pont && s->pont_fd >= 0 && ls2) {
-            s->fn = (s->fn + 1) % GSM_HYPERFRAME;   /* rythme DSP, pas l'horloge murale */
+            s->fn = (s->fn + 1) % GSM_HYPERFRAME;   /* DSP pace, not the wall clock */
         } else {
             uint32_t wfn = __atomic_load_n(&g_wall_fn, __ATOMIC_ACQUIRE);
             s->fn = (wfn ? wfn : s->fn + 1) % GSM_HYPERFRAME;
@@ -672,16 +670,16 @@ static void tdma_tick(void *opaque)
     }
 
     if (s->pont) {
-        /* Le C54x consomme lui-meme d_task_ra / d_task_u (l1s_compl() du
-         * firmware refait dsp_api_memset() sur la page d'ecriture) : ne pas
-         * les effacer ici, cf. qosmo-dsp « Do NOT clear tasks here ». */
-        /* [2026-09-17] PIPELINE, PAS D'ATTENTE. Attendre DONE ici bloquait la
-         * boucle principale (verrou global tenu) pendant toute la trame du DSP,
-         * ~26 ms pour 64000 insn, et le vCPU ARM, qui a besoin du verrou pour
-         * chaque acces MMIO, n'avancait plus (bloque dans hwtimer_config).
-         * Desormais : le DONE de la trame N est releve au tick N+1 sans
-         * attendre ; s'il n'est pas la, le DSP est en retard et ce tick lui est
-         * saute. Cout : l'IRQ API arrive une trame plus tard qu'en interne. */
+        /* The C54x consumes d_task_ra / d_task_u itself (the firmware's
+         * l1s_compl() re-runs dsp_api_memset() on the write page): do NOT
+         * clear them here. */
+        /* [2026-09-17] PIPELINE, NO WAIT. Waiting for DONE here held the
+         * global lock for a whole DSP frame, ~26 ms for 64000 insn, and the
+         * ARM vCPU, which needs that lock for every MMIO access, stopped
+         * advancing (stuck in hwtimer_config). The DONE of frame N is now
+         * collected at tick N+1 without blocking; if it is missing the DSP is
+         * late and this tick is skipped for it. Cost: the API IRQ arrives one
+         * frame later than with the internal DSP. */
         pont_echange(s);
     } else {
         *api_wp(s->dsp_page, WP_D_TASK_RA) = 0;
@@ -746,9 +744,9 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs)
     map_io(sysmem, &s->api_iomem, &api_ops, s, "calypso.dsp_api", CALYPSO_API_BASE,
            CALYPSO_API_SIZE);
     if (!s->pont) {
-        /* Etat initial du bootloader EMULE. En DSP externe, c'est le vrai
-         * bootloader ROM (parque en 0xb41c par c54x_reset) qui a pose IDLE dans
-         * la cellule, et la vraie L1 qui ecrira sa version : on ne touche a rien. */
+        /* Initial state of the EMULATED bootloader. With an external DSP the
+         * real ROM bootloader (parked at 0xb41c by c54x_reset) has posted IDLE
+         * in that cell and the real L1 writes its version: touch nothing. */
         s->api_ram[API_BL_STATUS / 2] = BL_STATUS_READY;
         s->api_ram[API_VERSION / 2] = API_VERSION_VALUE;
     }
@@ -776,11 +774,11 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs)
     pthread_setname_np(g_wall_thread, "cal-tdma-clock");
 
     if (s->pont) {
-        /* Le DSP externe ne tourne que sur les TICK. Or dsp_power_on() du
-         * firmware attend le bootloader (IDLE) AVANT d'activer le TPU, qui est
-         * ce qui lance normalement le tick : on cadence donc des l'init, sinon
-         * l'ARM attend le DSP qui attend l'ARM. Le tdma_start() du TPU, plus
-         * tard, ne fait que remettre fn a 0. */
+        /* The external DSP only runs on TICKs, but the firmware's
+         * dsp_power_on() waits for the bootloader (IDLE) BEFORE enabling the
+         * TPU, which is what normally starts the tick. Clocking it from init
+         * breaks that deadlock, where the ARM waits for the DSP waiting for
+         * the ARM. The later tdma_start() from the TPU only resets fn to 0. */
         s->pont_boot_timer = timer_new_ns(QEMU_CLOCK_REALTIME, pont_boot_tick, s);
         timer_mod_ns(s->pont_boot_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
         fprintf(stderr, "[trx] pont DSP : timer de boot lance (echange DSP seul, "

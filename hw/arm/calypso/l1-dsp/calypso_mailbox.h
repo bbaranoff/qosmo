@@ -1,35 +1,22 @@
 /*
- * calypso_mailbox.h — moniteur COMPLET de la mailbox ARM <-> DSP
+ * calypso_mailbox.h - full monitor of the ARM <-> DSP mailbox.
  *
- * [2026-07-29] Pourquoi ce module existe.
+ * The mailbox (API RAM, DSP words 0x0800..0x0FFF) is the only contact point
+ * between the ARM and the c54x: which task is commanded, who writes d_burst_d,
+ * which cell the dispatcher polls, are all events on that boundary. Point
+ * probes wired to one address or one value report zero when they miss, and
+ * zero reads like an answer; this module traces the whole flow, both
+ * directions, all the time.
  *
- *   La mailbox (API RAM, mots DSP 0x0800..0x0FFF) est le SEUL point de contact
- *   entre l'ARM et le c54x. Tout ce qu'on a passé la journée à chercher — quelle
- *   tâche est commandée, qui écrit d_burst_d, pourquoi le DSP ne voit pas la
- *   tâche 24, quelle cellule le dispatcher interroge — est un événement de cette
- *   frontière. Jusqu'ici on l'observait avec des sondes ponctuelles, écrites une
- *   par une, chacune câblée en dur sur UNE adresse ou UNE valeur :
+ * Output goes to its own file, not stderr: a full stream on stderr drowns
+ * qemu.log and truncates the neighbouring probes (measured once at 480898
+ * lines / 35 MB with the surrounding traces lost). The two journals stay
+ * independent.
  *
- *     - TASKGO / FBCALL  : câblées sur d_task_md == 5. Quand l'ARM a enfin
- *                          commandé ALLC (24), on était AVEUGLES dessus.
- *     - ARM-WRITE-0810   : une seule cellule.
- *     - WATCH_WR_ADDR    : une adresse (étendue à 8 aujourd'hui, dans l'urgence).
- *
- *   À chaque question nouvelle il fallait écrire, compiler et relancer une sonde
- *   de plus — et une sonde absente rend zéro, ce qui ressemble à une réponse.
- *   Neuf conclusions fausses en une journée sont venues de là.
- *
- *   Ce module trace TOUT le flux, dans les deux sens, tout le temps.
- *
- * SORTIE SÉPARÉE, et c'est délibéré : le moniteur écrit dans SON fichier, pas
- * sur stderr. Un flux complet sur stderr noierait qemu.log et tronquerait les
- * autres sondes — exactement l'accident du matin (480 898 lignes, 35 Mo, les
- * traces voisines effacées). Ici les deux journaux sont indépendants.
- *
- * FORMAT UNIFORME, pour que deux runs soient DIFFÉRENTIABLES. C'est le but :
- * capturer une séquence en `shunt_legit` (qui marche, donc exerce la vraie
- * séquence de commande) puis en natif, et lire le delta — le delta EST la liste
- * de ce qui n'est pas câblé.
+ * The record format is uniform so two runs are diffable: capture a sequence
+ * under `shunt_legit`, which works and therefore exercises the real command
+ * sequence, then capture it natively; the delta is the list of what is not
+ * wired yet.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -38,35 +25,34 @@
 
 #include <stdint.h>
 
-/* Sens de l'accès, du point de vue de la mailbox. */
+/* Access direction, seen from the mailbox. */
 typedef enum {
-    MBX_ARM_WR = 0,   /* l'ARM écrit   (commande) */
-    MBX_ARM_RD,       /* l'ARM lit     (résultat) */
-    MBX_DSP_WR,       /* le DSP écrit  (résultat) */
-    MBX_DSP_RD,       /* le DSP lit    (commande) */
+    MBX_ARM_WR = 0,   /* ARM writes  (command) */
+    MBX_ARM_RD,       /* ARM reads   (result)  */
+    MBX_DSP_WR,       /* DSP writes  (result)  */
+    MBX_DSP_RD,       /* DSP reads   (command) */
 } CalypsoMbxSens;
 
-/* Testé en ligne sur les chemins CHAUDS (data_read / data_write du c54x sont
- * appelés à chaque instruction) : quand le moniteur est éteint, le coût se
- * réduit à la lecture d'un int.
+/* Tested inline on the hot paths (the c54x data_read / data_write run on every
+ * instruction): with the monitor off the cost is one int load.
  *
- * TROIS états, et c'est nécessaire : -1 = pas encore initialisé, 0 = éteint,
- * 1 = actif. Première version : le drapeau démarrait à 0, donc l'enveloppe en
- * ligne n'appelait jamais calypso_mbx_evt(), donc calypso_mbx_init() n'était
- * jamais atteint, donc le drapeau restait à 0 — aucun fichier n'était créé.
- * Avec -1 le premier accès passe, l'init tranche, et les suivants sont filtrés. */
+ * Three states are required: -1 = not initialised, 0 = off, 1 = on. Init is
+ * lazy, so a flag starting at 0 would keep the inline wrapper from ever calling
+ * calypso_mbx_evt(), calypso_mbx_init() would never run, the flag would stay 0
+ * and no file would be created. With -1 the first access goes through, init
+ * decides, and later accesses are filtered. */
 extern int calypso_mbx_actif;
 
-/* Ouvre le fichier et lit la configuration. Idempotent. Appelé paresseusement
- * au premier événement, donc rien à ordonnancer au démarrage. */
+/* Opens the file and reads the configuration. Idempotent, called lazily on the
+ * first event, so there is nothing to schedule at startup. */
 void calypso_mbx_init(void);
 
-/* Enregistre un événement. `avant` n'a de sens que pour les écritures (sinon 0).
- * `ctx` = PC du DSP, ou offset MMIO côté ARM. */
+/* Records one event. `avant` is meaningful for writes only (0 otherwise).
+ * `ctx` is the DSP PC, or the MMIO offset on the ARM side. */
 void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
                      uint16_t avant, uint32_t ctx, uint32_t fn, uint32_t insn);
 
-/* Enveloppes en ligne : le test du drapeau évite l'appel quand c'est éteint. */
+/* Inline wrapper: the flag test avoids the call when the monitor is off. */
 static inline void calypso_mbx(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
                                uint16_t avant, uint32_t ctx, uint32_t fn,
                                uint32_t insn)

@@ -1,18 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * c54x_irq.c — Interruptions : IFR/IMR, IT trame, niveau
+ * c54x_irq.c - interrupts: IFR/IMR, frame IT, level hold.
  *
- * Extrait de calypso_c54x.c le 2026-09-18 (decoupage par role).
- * Carte des fichiers dans c54x_internal.h.
+ * Split out of calypso_c54x.c on 2026-09-18 (one file per role).
+ * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
 
 void calypso_inth_arm_ack(void);
-/* @BEQUILLE — FRAME_IT_LEVEL  (CALYPSO_FRAME_IT_LEVEL, EQ1, defaut OFF)
- *   masque  : la fenetre INTM=0 trop rare du firmware. Re-assert IFR bit12 a CHAQUE
- *             insn tant que vec28 n'a pas vectorise — l'IFR c54x est a latch
- *             d'evenement, il n'a pas de mode "level".
- *   retirer : quand la cadence INTM du firmware suffit a attraper l'IT au vol.
+/* @BEQUILLE - FRAME_IT_LEVEL  (CALYPSO_FRAME_IT_LEVEL, EQ1, default OFF)
+ *   masque  : the firmware's INTM=0 window, too rare to catch the frame IT.
+ *             Re-asserts IFR bit 12 on EVERY instruction until vector 28 is
+ *             taken, because the c54x IFR latches events and has no level mode.
+ *   retirer : once the firmware's INTM duty cycle is wide enough to catch the
+ *             IT as it comes.
  */
 bool frame_it_level_on(void)
 {
@@ -20,12 +21,12 @@ bool frame_it_level_on(void)
     if (c < 0) { const char *e = getenv("CALYPSO_FRAME_IT_LEVEL"); c = (e && *e == '1') ? 1 : 0; }
     return c;
 }
-/* @BEQUILLE — FRAME_IT_PRIO  (CALYPSO_FRAME_IT_PRIO, EQ1, defaut OFF)
- *   masque  : la priorite d'interruption. Force b=12 au lieu de ctz(pend) pour que
- *             la frame passe devant BRINT0/bit5 — sur c54x la priorite est fixee
- *             par le numero de vecteur, elle n'est pas configurable.
- *   retirer : quand BRINT0 et la frame ne se disputent plus la meme fenetre
- *             (livraison BSP a la bonne cadence).
+/* @BEQUILLE - FRAME_IT_PRIO  (CALYPSO_FRAME_IT_PRIO, EQ1, default OFF)
+ *   masque  : interrupt priority. Forces b=12 instead of ctz(pend) so the frame
+ *             IT wins over BRINT0/bit 5; on the c54x, priority is fixed by the
+ *             vector number and is not configurable.
+ *   retirer : once BRINT0 and the frame IT no longer compete for the same
+ *             window (BSP delivery at the right rate).
  */
 bool frame_it_prio_on(void)
 {
@@ -37,47 +38,39 @@ bool frame_it_prio_on(void)
 bool c54x_irq_level_check(C54xState *s)
 {
     static int en = -1;
-    if (en < 0) { const char *_d = getenv("CALYPSO_DSP"); en = (getenv("CALYPSO_C54X_IRQ_LEVEL") || (_d && !strcmp(_d, "c54x"))) ? 1 : 0; }  /* natif revive */
+    if (en < 0) { const char *_d = getenv("CALYPSO_DSP"); en = (getenv("CALYPSO_C54X_IRQ_LEVEL") || (_d && !strcmp(_d, "c54x"))) ? 1 : 0; }
     if (!en) return false;
-    /* LEVEL hold : tant que la frame-IT n a pas ete vectorisee (vec28), garder
-     * bit12 pendant dans l IFR -> la prochaine fenetre INTM=0 la prend. */
+    /* Level hold: keep bit 12 pending in the IFR until the frame IT has been
+     * vectored (vec 28), so the next INTM=0 window picks it up. */
     if (g_frame_it_level && frame_it_level_on()) {
         s->ifr |= (1u << 12);
     }
-    /* ═══════════════════════════════════════════════════════════════════════
-     * [2026-08-04] NIVEAU DE INT10n (bit 14) — la ligne DMA.
+    /* [2026-08-04] INT10n (bit 14) is a LEVEL line: the DMA line.
      *
-     * CAL000 §5.1 liste explicitement le SENS de chaque ligne :
+     * CAL000 5.1 gives the sense of each line:
      *     INT0n  (level) -> RIF receive        INT8n  (edge) -> TPU frame
      *     INT1n  (level) -> RIF transmit       INT9n  (edge) -> TPU programmable
      *     INT10n (level) -> DMA interrupt      INT7n  (edge) -> CYPHER
-     * Le maintien ci-dessus ne couvrait que le bit 12 (frame-IT). Le bit 14
-     * etait donc traite en FRONT : `c54x_interrupt_ex` posait IFR une fois, et
-     * si INTM valait 1 a cet instant l'evenement etait PERDU.
+     * Posting bit 14 once on the edge loses the event whenever INTM is 1 at
+     * that instant: over the 15 logged vec=30 requests, IMR=0x52ed (bit 14
+     * unmasked) and IFR=0x4000 (bit 14 pending) with INTM=1 all 15 times, and
+     * "IRQ-LEVEL take" never fires. The DSP then never services DMA
+     * completion, its internal queues overflow (116 writes at 0x434e/0x434f)
+     * and it raises DSP_ERR_DMA_PEND.
      *
-     * MESURE QUI L'IMPOSE : sur les 15 demandes vec=30 journalisees,
-     *     IMR=0x52ed (bit14 = 1, ligne DEMASQUEE)
-     *     IFR=0x4000 (bit14 = 1, IT EN ATTENTE)
-     *     INTM=1     (masque global pose)  -> 15 fois sur 15
-     * et `IRQ-LEVEL take` n'a jamais une seule ligne. Le DSP ne servait donc
-     * jamais la fin de DMA, ses files internes debordaient (PEND : 116 ecritures
-     * en 0x434e/0x434f) et il levait DSP_ERR_DMA_PEND — le temoin qu'on cherche
-     * a supprimer en FOURNISSANT la fonction, pas en le masquant.
-     *
-     * La source du niveau est IRQ_STATE du canal, que CAL207 §11.3.5 decrit
-     * comme « cleared after being read » : la ligne retombe donc quand le
-     * firmware lit le registre, exactement comme sur silicium.
-     * ═══════════════════════════════════════════════════════════════════════ */
+     * The level source is the channel IRQ_STATE, which CAL207 11.3.5 describes
+     * as "cleared after being read": the line drops when the firmware reads the
+     * register, as on silicon. */
     if (calypso_rhea_dma_irq_level()) {
         s->ifr |= (1u << C54X_IT_DMA_BIT);
     }
-    /* [2026-07-22] LEVELCHK-DBG (gated CALYPSO_AR0_DEBUG) : quand IMR!=0 (fenetre
-     * armee), pourquoi l'IT frame n'est-elle pas prise ? Tranche INTM vs IPTR vs
-     * pend=0. C'est le verrou du mur terminal Frontiere A. */
+    /* [2026-07-22] LEVELCHK-DBG (gated CALYPSO_AR0_DEBUG): with IMR != 0 (window
+     * armed), report which gate keeps the frame IT from being taken - INTM vs
+     * IPTR vs pend=0. */
     {
         static int lcdbg = -1;
         if (lcdbg < 0) lcdbg = calypso_gate("CALYPSO_AR0_DEBUG", 0);
-        if (lcdbg && s->imr && s->insn_count > 4000) {   /* skip boot-reset noise, vise go-live */
+        if (lcdbg && s->imr && s->insn_count > 4000) {   /* skip boot-reset noise */
             static unsigned lc = 0;
             uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
             uint16_t pend = (uint16_t)(s->ifr & s->imr);
@@ -92,12 +85,11 @@ bool c54x_irq_level_check(C54xState *s)
                         (!pend) ? "BLOCK:pend=0(IFR&IMR)" : "WOULD-TAKE!");
         }
     }
-    /* [2026-07-23] LEVELCHK-EMPIRICAL (unconditional, capped) : "IRQ-LEVEL take"
-     * never fires in native runs despite INTM-TRANS showing IFR=0x1020/0x1030
-     * (bit5=BRINT0 + bit12=frame pending) right at INTM 1->0 (RETE) moments.
-     * This traces EVERY early-return path of this function so we can see
-     * empirically which gate is blocking dispatch, instead of reasoning about
-     * it statically (this session has been burned by that repeatedly). */
+    /* [2026-07-23] LEVELCHK-EMPIRICAL (unconditional, capped): "IRQ-LEVEL take"
+     * never fires in native runs although INTM-TRANS shows IFR=0x1020/0x1030
+     * (bit 5 BRINT0 + bit 12 frame pending) right at the INTM 1->0 (RETE)
+     * moments. Traces every early-return path of this function so the blocking
+     * gate is observed rather than inferred. */
     {
         static unsigned _lcn = 0;
         static uint32_t _last_insn = 0xFFFFFFFFu;
@@ -105,13 +97,10 @@ bool c54x_irq_level_check(C54xState *s)
         bool _delay = s->delay_slots != 0;
         uint16_t _iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
         uint16_t _pend = (uint16_t)(s->ifr & s->imr);
-        /* [2026-07-23] DEDUP : RPT re-executes the same instruction (same PC,
-         * same insn_count) hundreds/thousands of times without advancing --
-         * confirmed via s->rpt_active/rpt_count (calypso_c54x.c ~14371: "RPT:
-         * after executing an instruction while repeat is active, re-execute
-         * the SAME instruction... continue" -- skips insn_count++). That was
-         * exhausting our cap on ONE repeat loop. Only log on a NEW insn_count
-         * so the cap covers distinct instructions, not RPT spin. */
+        /* [2026-07-23] DEDUP: while RPT is active the same instruction is
+         * re-executed hundreds of times at the same PC WITHOUT insn_count
+         * advancing, which burns the whole cap on one repeat loop. Log only on
+         * a new insn_count so the cap covers distinct instructions. */
         if (_pend && _iptr != 0x1FF && _lcn < 5000 && s->insn_count != _last_insn) {
             _last_insn = s->insn_count;
             _lcn++;
@@ -124,19 +113,20 @@ bool c54x_irq_level_check(C54xState *s)
                     (_iptr == 0x1FF) ? "BLOCKED:IPTR=0x1FF" : "WOULD-DISPATCH");
         }
     }
-    /* [2026-07-30] LEVELCHK-WINDOW — compter la FENETRE, pas le cas ennuyeux.
+    /* [2026-07-30] LEVELCHK-WINDOW - count the window, not the boring case.
      *
-     * LEVELCHK-EMPIRICAL est plafonnee a 5000 lignes et les brule toutes sur
-     * `BLOCKED:INTM=1` avant insn=14M, alors que la question est l'inverse :
-     * QUAND INTM retombe, voit-on l'IT pendante, et la prend-on ? Mesure du
-     * 30/07 : `IRQ-LEVEL take` = 0 sur 52M d'insn, pour 739 transitions INTM
-     * 1->0 tracees, avec pend=0x1020 (bit5 BRINT0 + bit12 frame) en permanence.
-     * La fenetre dure ~1 instruction (1->0 @187431877 puis 0->1 @187431878).
+     * LEVELCHK-EMPIRICAL is capped at 5000 lines and burns them all on
+     * BLOCKED:INTM=1 before insn=14M, while the question is the opposite one:
+     * when INTM drops, is the pending IT seen, and is it taken? Measured
+     * 2026-07-30: "IRQ-LEVEL take" = 0 over 52M instructions for 739 traced
+     * INTM 1->0 transitions, with pend=0x1020 (bit 5 BRINT0 + bit 12 frame)
+     * permanently set; the window lasts about one instruction (1->0 at
+     * insn 187431877, 0->1 at 187431878).
      *
-     * Compteurs, pas lignes : le resume dit en un coup d'oeil si la fenetre est
-     * seulement VUE par cette fonction. Si w_intm0 reste a 0 alors qu'INTM-TRANS
-     * compte des 1->0, c'est que la fonction n'est pas appelee dans la fenetre —
-     * probleme d'ORDONNANCEMENT dans la boucle d'execution, pas de garde. */
+     * Counters, not lines: the summary shows at a glance whether the window is
+     * even SEEN here. w_intm0 staying at 0 while INTM-TRANS counts 1->0
+     * transitions means this function is not called inside the window - an
+     * ordering problem in the execution loop, not a guard. */
     {
         static unsigned long long w_calls = 0, w_intm0 = 0, w_pend = 0, w_ready = 0;
         static unsigned w_log = 0;
@@ -169,32 +159,30 @@ bool c54x_irq_level_check(C54xState *s)
     }
 
     if ((s->st1 & ST1_INTM) || s->delay_slots != 0) return false;
-    /* Ne pas vectoriser tant que le ROM n a pas relocalise IPTR (reset=0x1ff ->
-     * table en 0xff80 = garbage). Attendre IPTR reloue (typiquement 0x001). */
+    /* Do not vector until the ROM has relocated IPTR: reset value 0x1ff puts the
+     * vector table at 0xff80, which is garbage. Wait for a relocated IPTR
+     * (typically 0x001). */
     if (((s->pmst >> PMST_IPTR_SHIFT) & 0x1FF) == 0x1FF) return false;
     uint16_t pend = (uint16_t)(s->ifr & s->imr);
     if (!pend) return false;
     int b = __builtin_ctz(pend);          /* lowest set bit = highest priority */
-    /* PRIO : la frame (bit12/vec28) prime sur les bits plus bas (BRINT0 bit5) qui
-     * voleraient la fenetre rare et re-masqueraient INTM. Gate CALYPSO_FRAME_IT_PRIO. */
+    /* Priority: the frame IT (bit 12 / vec 28) outranks lower bits such as
+     * BRINT0 (bit 5), which would steal the rare window and re-mask INTM. */
     if (frame_it_prio_on() && (pend & (1u << 12))) {
         b = 12;
     }
     int vec = b + 16;                     /* C54x: maskable IMR bit b -> vector b+16 */
-    /* [2026-09-03] REMAP VEC28 SUPPRIME ici aussi. Ce site remappait `b == 3`
-     * (TINT) vers vec 28 des que CALYPSO_DSP=c54x — « allumee sans etre
-     * demandee », comme le disait son propre PIEGE. Maintenant que l'IT trame est
-     * emise sur 28/12 a la source, bit 3 redevient ce qu'il est (le timer du DSP)
-     * et `vec = b + 16` est correct sans exception. */
+    /* Bit 3 is the DSP timer: the frame IT is raised on bit 12 / vector 28 at
+     * the source, so vec = b + 16 holds with no exception. */
     c54x_ifr_clear(s, (uint16_t)(1u << b), "vector-level");
-    if (b == 12) g_frame_it_level = false;   /* frame-IT vectorisee -> relache le LEVEL hold */
+    if (b == 12) g_frame_it_level = false;   /* frame IT vectored: release the level hold */
     s->sp--; data_write(s, s->sp, (uint16_t)s->pc);
-    /* [2026-07-22] FIX DRIFT SP (racine du storm bootstub) : pousser XPC SEULEMENT
-     * en mode etendu (xpc!=0). Le firmware sort l ISR via POPM ST1 + RCD (pop 1w=PC),
-     * PAS RETE (pop 2w, path mort cf l.5294). Quand xpc=0 (pas de paging), pousser
-     * XPC laisse un mot orphelin JAMAIS depile -> drift SP +1/IT -> SP wrap -> le RET
-     * bootstub 0xab38 pop mem[0x5ac8]=0 au lieu de mem[0x5ac7]=retour -> PC=0 storm.
-     * Vrai c54x standard = push PC seul. Legacy: CALYPSO_IT_PUSH_XPC_ALWAYS=1. */
+    /* [2026-07-22] Push XPC ONLY in extended mode (xpc != 0), as a standard c54x
+     * does. The firmware leaves the ISR through POPM ST1 + RCD (pops 1 word =
+     * PC), not RETE (pops 2). With xpc == 0 (no paging), pushing XPC leaves an
+     * orphan word that is never popped: SP drifts +1 per IT until it wraps, the
+     * bootstub RET at 0xab38 pops mem[0x5ac8]=0 instead of mem[0x5ac7], and the
+     * PC=0 storm follows. Legacy behaviour: CALYPSO_IT_PUSH_XPC_ALWAYS=1. */
     {
         static int always = -1;
         if (always < 0) { const char *e = getenv("CALYPSO_IT_PUSH_XPC_ALWAYS");
@@ -214,36 +202,31 @@ bool c54x_irq_level_check(C54xState *s)
 }
 
 
-/* [2026-07-28] GATE UNIFIE DES CORRECTIFS D EMULATION.
- *   CALYPSO_FIXES=FIX_UN,FIX_DEUX   active des correctifs nommes
- *   CALYPSO_FIXES=all               les active tous
- *   (absent)                        aucun — comportement d origine strictement inchange
+/* [2026-07-28] Unified gate for emulation fixes.
+ *   CALYPSO_FIXES=FIX_ONE,FIX_TWO   enables the named fixes
+ *   CALYPSO_FIXES=all               enables them all
+ *   (unset)                         none; original behaviour strictly unchanged
  *
- * PROTOCOLE : on pose TOUS les correctifs surs derriere ce gate d un coup, on teste
- * SOUS CHARGE MAXIMALE (camp + LU + SMS, pas un simple boot), et DES QU UN CORRECTIF
- * EST CONFIRME on efface **la CONDITION**, pas le correctif : on retire le
- * `if (calypso_fix_enabled("FIX_...")) {` et ses accolades, le code reste et devient
- * inconditionnel. Son nom disparait alors de la liste des gates.
- * Ce gate est un SAS TEMPORAIRE, jamais une option de configuration : une bequille
- * reste, un sas se vide. Ne jamais y laisser vieillir un correctif valide. */
-/* ═══════════════════════════════════════════════════════════════════════════
- * [2026-08-04] FIX_F4XX_SRCDST — la famille F4xx/F5xx avait src et dst INVERSES.
+ * Protocol: land all safe fixes behind this gate at once, test under full load
+ * (camp + LU + SMS, not a bare boot), and once a fix is confirmed delete the
+ * CONDITION, not the fix - drop the `if (calypso_fix_enabled("FIX_..."))` and
+ * its braces so the code becomes unconditional and the name leaves the gate
+ * list. This is a temporary airlock, never a configuration option: an airlock
+ * empties. Never let a validated fix grow old in it. */
+/* [2026-08-04] FIX_F4XX_SRCDST - the F4xx/F5xx family had src and dst swapped.
  *
- * TI SPRU172C (Mnemonic Instruction Set, mars 2001), pages instruction :
- *     ADD forme 9 : 15..10 = 111101   bit9 = S   bit8 = D   7..5 = 000  SHIFT
- *     LD  forme   : 15..10 = 111101   bit9 = S   bit8 = D   7..5 = 010  SHIFT
- *     (meme layout de champs pour SUB, SFTA, SFTL, NEG, ABS, MACA, *,ASM,*)
- * Soit **bit 9 = SRC, bit 8 = DST** — identique a la famille F0-F3 (OR forme 4),
- * ou le bloc 1 mot avait DEJA la bonne assignation. Le fichier se contredisait
- * donc lui-meme, et c'est la famille F4xx qui avait tort : 22 sites ecrivaient
- * `src = (op>>8)&1, dst = (op>>9)&1`.
+ * TI SPRU172C (Mnemonic Instruction Set, March 2001), instruction pages:
+ *     ADD form 9 : 15..10 = 111101   bit9 = S   bit8 = D   7..5 = 000  SHIFT
+ *     LD  form   : 15..10 = 111101   bit9 = S   bit8 = D   7..5 = 010  SHIFT
+ *     (same field layout for SUB, SFTA, SFTL, NEG, ABS, MACA, *,ASM,*)
+ * So bit 9 = SRC and bit 8 = DST, as in the F0-F3 family (OR form 4), where the
+ * one-word block already had it right. 22 handlers had the opposite assignment
+ * (`src = (op>>8)&1, dst = (op>>9)&1`).
  *
- * PORTEE : 22 handlers (ADD/SUB/LD/SFTA/SFTL/NEG/ABS/MACA/…). Le rayon est
- * large, d'ou la gate d'echappement : `CALYPSO_FIX_F4XX_SRCDST=0` restaure a
- * l'identique le comportement d'avant le 04/08, pour isoler une regression sans
- * toucher au code. Defaut 1 : le correctif est conforme a la doc du fondeur.
+ * The blast radius is why the escape gate exists: CALYPSO_FIX_F4XX_SRCDST=0
+ * restores the pre-2026-08-04 behaviour exactly, to isolate a regression
+ * without touching code. Default 1: the fix matches the vendor documentation.
  *
- * ⚠️ NON VALIDE SOUS CHARGE. Aucun banc ne reunit aujourd'hui « c54x actif » et
- * « LU complet » (shunt_legit pose CALYPSO_DSP_RUN_C54X=0). Effacer la gate
- * seulement quand un parcours camp->LU l'aura exercee.
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * WARNING: not validated under load. No bench currently combines "c54x active"
+ * with "full LU" (shunt_legit forces CALYPSO_DSP_RUN_C54X=0). Remove the gate
+ * only once a camp->LU run has exercised it. */

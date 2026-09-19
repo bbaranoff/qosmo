@@ -1,14 +1,14 @@
 /*
- * calypso_debug.c — env-gated probe lookup implementation
+ * calypso_debug.c - env-gated probe lookup implementation
  *
- * Une seule env : CALYPSO_DEBUG="probe1,probe2,probe3,..."
- * Valeur spéciale : "ALL" (ou contenant "ALL") active tout.
+ * One env var: CALYPSO_DEBUG="probe1,probe2,probe3,...".
+ * A list containing "ALL" enables every probe.
  *
- * Probes lookup : O(N) sur la liste parsée une fois au premier appel.
- * Pour 10-20 probes typiquement actifs, c'est négligeable.
+ * Lookup is O(N) over the list, parsed once on first call; negligible for the
+ * 10-20 probes typically active.
  *
- * Normalisation : nom de probe upper-case, '-'/' '/'.'/'/'  → '_'.
- * Ex : "IMR-W" matche entry "IMR_W" comme "imr-w".
+ * Normalisation: probe name upper-cased, '-' ' ' '.' '/' mapped to '_', so
+ * "IMR-W" matches the entry "IMR_W" as well as "imr-w".
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -29,11 +29,11 @@ static bool     s_all = false;
 static bool     s_inited = false;
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
 
-/* Master gate : -1 = pas encore init, 0 = CALYPSO_DEBUG vide (toutes sondes
- * OFF, fast-path inliné dans le header), 1 = au moins une sonde active. */
+/* Master gate: -1 = not initialised yet, 0 = CALYPSO_DEBUG empty (every probe
+ * OFF, fast path inlined in the header), 1 = at least one probe active. */
 int calypso_debug_master = -1;
 
-/* Normalize probe name in-place : upper-case, separators → '_'. */
+/* Normalize a probe name in place: upper-case, separators to '_'. */
 static void normalize(char *s)
 {
     for (; *s; s++) {
@@ -81,8 +81,9 @@ static void parse_env_locked(void)
     }
 }
 
-/* Init unique du master gate : parse l'env et fixe calypso_debug_master.
- * Appelé depuis l'inline calypso_debug_enabled() du header au 1er passage. */
+/* One-shot init of the master gate: parses the env and sets
+ * calypso_debug_master. Called from the inline calypso_debug_enabled() in the
+ * header on first use. */
 void calypso_debug_master_init(void)
 {
     pthread_mutex_lock(&s_mu);
@@ -91,8 +92,8 @@ void calypso_debug_master_init(void)
     pthread_mutex_unlock(&s_mu);
 }
 
-/* Impl réelle (out-of-line). N'est atteinte que quand master == 1, donc
- * parse_env_locked a déjà tourné — le bloc !s_inited reste par sûreté. */
+/* Out-of-line implementation. Only reached with master == 1, so
+ * parse_env_locked() has already run; the !s_inited block is belt and braces. */
 bool calypso_debug_enabled_(const char *probe_name)
 {
     if (!probe_name) return false;
@@ -120,24 +121,24 @@ bool calypso_debug_enabled_(const char *probe_name)
     return false;
 }
 
-/* calypso_gate — voir calypso_debug.h pour la sémantique et le pourquoi.
+/* calypso_gate - see calypso_debug.h for the semantics and the rationale.
  *
- * Pas de cache : un appelant qui veut mémoriser le fait déjà dans son `static
- * int`. Mettre un cache ICI empêcherait de changer d'avis à chaud et masquerait
- * les cas où deux modules lisent la même variable à des moments différents. */
+ * No cache: a caller that wants to memoise already does so in its own `static
+ * int`. Caching HERE would prevent changing a gate at runtime and would hide
+ * the cases where two modules read the same variable at different times. */
 int calypso_gate(const char *nom, int defaut)
 {
     const char *e = nom ? getenv(nom) : NULL;
     if (!e) {
-        return defaut;          /* absente : c'est l'appelant qui décide */
+        return defaut;          /* unset: the caller decides */
     }
     if (!*e) {
-        return 0;               /* posée VIDE = explicitement coupée */
+        return 0;               /* set but EMPTY = explicitly off */
     }
-    /* Comparaison insensible à la casse, sur les formes que les gens écrivent
-     * réellement dans un .env. Tout ce qui n'est pas une négation vaut « oui » :
-     * mieux vaut activer sur « yes » que d'ignorer silencieusement une valeur
-     * que l'opérateur croyait comprise. */
+    /* Case-insensitive compare over the spellings people actually write in a
+     * .env. Anything that is not a negation counts as yes: better to enable on
+     * "yes" than to silently ignore a value the operator believed was
+     * understood. */
     if (!strcasecmp(e, "0")     || !strcasecmp(e, "no") ||
         !strcasecmp(e, "off")   || !strcasecmp(e, "false") ||
         !strcasecmp(e, "n")) {

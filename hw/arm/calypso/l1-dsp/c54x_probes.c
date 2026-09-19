@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * c54x_probes.c — Sondes, traces et instrumentation (diagnostic seul)
+ * c54x_probes.c - probes, traces and instrumentation (diagnostics only)
  *
- * Extrait de calypso_c54x.c le 2026-09-18 (decoupage par role).
- * Carte des fichiers dans c54x_internal.h.
+ * Split out of calypso_c54x.c on 2026-09-18 (per-role file split).
+ * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
 
@@ -18,18 +18,12 @@ uint16_t prog_fetch(C54xState *s, uint16_t pc);
 /* Propagated by D_BURST_D probe, consumed by A_CD-BY-BURST correlation. */
 uint16_t g_last_d_burst_d;
 
-/* PROBE 2026-05-31 (review c web) : dernier PC/op ayant écrit chaque slot de
- * pile (zone 0x1000-0x1FFF). Nomme le PSHM qui a posé l'orphelin 0x80fd lu par
- * POPM ST0 @0x94f3 → matching-frame vs frame étranger. À RETIRER. */
-
-/* === Generic watch-write zone helper (2026-05-15 matin) ===
+/* === Generic watch-write zone helper ===
  *
- * Factorisation du pattern COEFFS-WR / A_CD-WR / ... : pour chaque zone
- * mémoire surveillée, maintient per-PC counter + log throttled + summary
- * périodique. La 4e+ instrumentation devient triviale au call site.
+ * One monitored memory range: per-PC counter, throttled log, periodic summary.
+ * Callers in c54x_mem.c: COEFFS, A_CD, BLK-SRC, DISP-TBL, TRAMPO.
  *
- * Cost : 512 KB de statique par zone (per_pc[0x10000] × uint64_t). Acceptable
- * pour debug. */
+ * Cost: 512 KB of static storage per zone (per_pc[0x10000] * uint64_t). */
 
 bool watch_write_zone_check(C54xState *s, uint16_t addr, uint16_t val,
                                    const char *name,
@@ -64,8 +58,8 @@ bool watch_write_zone_check(C54xState *s, uint16_t addr, uint16_t val,
     }
     if (s->insn_count - st->last_summary_insn >= 5000000) {
         st->last_summary_insn = s->insn_count;
-        /* Format `<NAME>-WR-SUMMARY` (avec -WR- infix) pour cohérence avec
-         * les per-hit lines `<NAME>-WR #N` et backward-compat regex tests. */
+        /* Keep the -WR- infix: `<NAME>-WR-SUMMARY` must stay consistent with
+         * the per-hit `<NAME>-WR #N` lines and with the regex tests. */
         fprintf(stderr, "[c54x] %s-WR-SUMMARY insn=%u total=%llu",
                 name, s->insn_count, (unsigned long long)st->total);
         for (int p = 0; p < 0x10000; p++) {
@@ -79,40 +73,36 @@ bool watch_write_zone_check(C54xState *s, uint16_t addr, uint16_t val,
     return true;
 }
 
-/* === FB-det timing/content stats (2026-05-14 night) ===
+/* === FB-det timing/content stats ===
  *
- * Captures sur les ~928 fires de 0x8f51 (au lieu du cap 50 actuel) :
- *   - AR4 dans/hors zone [0x2bc0..0x2bff] → addressing vs timing
- *   - delta insn depuis dernier write par cluster (compute/clear/pattern)
- *   - histogramme val[AR4] : zero / 0xfffe sentinel / other
+ * Filled by c54x_mem.c over the ~928 fires of PC 0x8f51:
+ *   - AR4 inside/outside [0x2bc0..0x2bff] -> addressing vs timing
+ *   - insn delta since the last write, per cluster (compute/clear/pattern)
+ *   - val[AR4] histogram: zero / 0xfffe sentinel / other
  *
- * Verdict :
- *   ar4_in_zone < 100% → bug d'addressing (AR4 pointe hors zone)
- *   delta_clear < delta_compute systématique → timing race (clear gagne)
- *   delta_compute >> 1M → compute jamais dans la fenêtre du fire
- *   other > 0 → certains sweeps voient des données — creuser ces fires
+ * Reading the counters:
+ *   ar4_in_zone < 100%            addressing bug, AR4 points outside the zone
+ *   delta_clear < delta_compute   timing race, the clear wins
+ *   delta_compute >> 1M           compute never lands in the fire window
+ *   other > 0                     some sweeps do see data
  */
 struct c54x_g_fb_det_timing_s g_fb_det_timing;
 
-/* === Generic ARn write tracer with provenance (2026-05-25 v3 unified) ===
- * Tracer paramétré pour AR0..AR7. Remplace les ad-hoc ar2/ar4. Env mask
- * `CALYPSO_AR_TRACE` (hex, default 0) :
- *   =0xFF  → trace tous les AR0..AR7
- *   =0x14  → trace AR2 + AR4 seulement (bits 2 et 4 set)
- *   =0x04  → AR2 only
- *   =0     → désactivé (zéro coût)
+/* === Generic ARn write tracer with provenance (AR0..AR7) ===
+ * Gate: AR-TRACE. Env `CALYPSO_AR_TRACE` is a hex bitmask of the AR indices
+ * to trace, default 0xFF (all); 0x14 = AR2 + AR4, 0x04 = AR2 only.
  *
- * Hook : `case MMR_AR0..AR7` dans data_write_locked. Skip auto-modify
- * noise (Δ ∈ [-3, 3]). Classification opcode via decode + flag ZERO
- * automatique (= suspect clobber MMR via STL A,*AR-).
+ * Hooked from `case MMR_AR0..AR7` in data_write_locked, so it observes MMR
+ * loads only, never auto-modify; deltas in [-3, 3] are skipped as increment
+ * noise. A write of 0 is flagged separately (suspect MMR clobber via
+ * STL A,*AR-).
  *
- * Question résolue par cette sonde : qui pose ARn = mauvaise valeur ?
- *   STM-#lk    → immediate hardcoded ROM (silicon-intentional, le fix
- *                est ailleurs : étape ultérieure qui ré-set manque)
- *   MVDM-mem   → load depuis mem (slot uninit divergence QEMU vs silicon)
- *   MVMM       → copie d'un autre AR (remonter le tracer sur source)
- *   STM Smem   → load mem indirect (idem MVDM)
- *   STLM-A     → from accumulator A (vérifier d'où A vient) */
+ * Opcode classification names where the value comes from:
+ *   STM-#lk    ROM immediate, a deliberate firmware update
+ *   MVDM-mem   load from memory
+ *   MVMM       copy of another AR
+ *   STM Smem   indirect memory load
+ *   STLM-A     from accumulator A */
 ArEntry  g_ar_hist[8][AR_HIST_MAX];
 unsigned g_ar_used[8]    = {0};
 unsigned g_ar_total[8]   = {0};
@@ -122,15 +112,12 @@ unsigned g_ar_log_cap    = 50;
 
 void ar_write_track(C54xState *s, unsigned idx, uint16_t new_val)
 {
-    /* AR3-PRELOAD (revival dsp 2026-06-22, read-only, toujours actif, cape 120) :
-     * capture les LOADS d'AR3 dans/autour du buffer I/Q [0x2a00..0x2c00). Le
-     * correlateur PC=0xee38 lit AR3=0x2b97 (HORS buffer, fin=0x2b28). ar_write_track
-     * n'est appele QUE sur load MMR (STM/STLM/MVDM), PAS sur auto-increment.
-     * VERDICT :
-     *  - AR3 loade a ~0x2a00 (debut buffer) et AUCUN load >=0x2b28 ici -> le 0x2b97
-     *    vient d'INCREMENTS = boucle trop longue / buffer trop court = FIX B (BSP).
-     *  - AR3 loade directement >=0x2b28 (flag OUT-OF-BUF) -> instruction mal emulee
-     *    = FIX A (decodage c54x), avec le PC/op coupable. */
+    /* AR3-PRELOAD: read-only, always on, capped at 120 lines. Logs AR3 loads
+     * landing in or around the I/Q buffer [0x2a00..0x2c00), whose end is
+     * 0x2b28. Only MMR loads (STM/STLM/MVDM) reach ar_write_track, never
+     * auto-increment, so an OUT-OF-BUF load (>= 0x2b28) points at the loading
+     * instruction, while the absence of one means an out-of-range AR3 comes
+     * from increments instead (loop too long / buffer too short). */
     if (idx == 3 && new_val >= 0x2a00 && new_val < 0x2c00) {
         static unsigned ar3p_n = 0;
         if (ar3p_n < 120) {
@@ -194,14 +181,12 @@ void ar_write_track(C54xState *s, unsigned idx, uint16_t new_val)
             idx, old_val, new_val, delta,
             (unsigned long long)(s->a & 0xFFFFFFFFFFULL), s->sp);
     }
-    /* Distinction sémantique critique (cf review Claude web 2026-05-25 v2) :
-     * - STM-#lk    = deliberate AR update via immediate hardcoded ROM
-     *                (silicon-intentional, l'AR change par design firmware)
-     * - LD-#k      = idem (small immediate)
-     * - STL-A / autres = side-effect d'un MMR write where AR happens to
-     *                    self-alias (= AR pointing at its own MMR slot).
-     *                    NOT an explicit AR update — coincidence pointer.
-     * Label clairement pour ne pas confondre les 2 dans le hunt. */
+    /* Semantic distinction, kept explicit in the log:
+     * - STM-#lk / LD-#k  deliberate AR update from a ROM immediate, the AR
+     *                    changes by firmware design
+     * - anything else    side effect of an MMR write where the AR happens to
+     *                    point at its own MMR slot (self-alias). A coincidence,
+     *                    not an explicit AR update. */
     if (new_val == 0) {
         int deliberate = ((op & 0xFF80) == 0x7700);  /* STM-#lk only */
         fprintf(stderr,
@@ -213,15 +198,14 @@ void ar_write_track(C54xState *s, unsigned idx, uint16_t new_val)
     }
 }
 
-/* === A accumulator provenance tracer (2026-05-25 v3) ===
- * Capture le LAST WRITER de A via chokepoint top-of-loop : compare A
- * iter-à-iter, si change → mémorise PC + op du writer. Quand un trigger
- * PC fire (default = 0x9ac0 = STL A,*AR2- clobber IMR), dump A + last
- * writer. Réponse à la question Claude web : A=0 délibéré (= mask-all
- * design firmware) ou A=0 divergence (= A devait porter mask valide) ?
+/* === A accumulator provenance tracer ===
+ * Records A's last writer at the top-of-loop chokepoint: A is compared with
+ * the previous iteration and, on a change, the writer's PC and opcode are
+ * kept. When the trigger PC fires, A and its last writer are dumped, which
+ * tells a deliberate A=0 (mask-all by design) from a diverged one.
  *
- * Env : CALYPSO_A_TRACE_PC=0x9ac0 (hex PC trigger, default 0xFFFF=off)
- * Zéro coût si env non set. */
+ * Gate: A-TRACE. Env CALYPSO_A_TRACE_PC sets the trigger PC (hex, 0 when the
+ * gate is on but the variable is unset). Zero cost when off. */
 int64_t  g_a_last_value      = 0;
 uint16_t g_a_last_writer_pc  = 0;
 uint16_t g_a_last_writer_op  = 0;
@@ -249,7 +233,7 @@ void a_track_init_lazy(void)
 void a_track_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op)
 {
     if (g_a_trace_enabled <= 0) return;
-    /* Detect A change → mémorise dernier writer */
+    /* A changed: the instruction that just ran is its writer. */
     if (s->a != g_a_last_value) {
         g_a_last_writer_pc   = prev_pc;
         g_a_last_writer_op   = prev_op;
@@ -260,9 +244,9 @@ void a_track_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op)
     if (s->pc == g_a_trace_pc) {
         g_a_trace_hits++;
         int a_zero = ((s->a & 0xFFFF) == 0);
-        /* Log if (a) parmi les N premiers (contexte) OR (b) A_low=0 (= cas
-         * suspect STL clobber zone). Évite cap log silencieux qui masque
-         * les events critiques tardifs (cf cas insn=253328 IMR clobber). */
+        /* Log the first N hits for context, plus every A_low=0 hit whatever
+         * the count: a silent cap hides late critical events, as it did for
+         * the IMR clobber at insn=253328. */
         if (g_a_trace_hits <= g_a_trace_log_cap || a_zero) {
             fprintf(stderr,
                 "[c54x] A-AT-PC #%u @insn=%u PC=0x%04x  A=%010llx (low=0x%04x, %s) "
@@ -277,20 +261,18 @@ void a_track_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op)
     }
 }
 
-/* === AR6 windowed snapshot at trigger PC (2026-05-25 v4) ===
- * Capture AR6 + B + source provenance à chaque fire d'un PC trigger,
- * fenêtré sur [insn_lo, insn_hi] pour éviter explosion log (le PC 0x821a
- * fire 10M+ fois). Réponse à la question Claude web : aux fires qui
- * clobber IMR à PC=0x821a, AR6 vaut 0 (= base divergence) ou 0x16
- * (= self-alias feedback) ?
+/* === AR6 windowed snapshot at a trigger PC ===
+ * Captures AR6, B and AR6's last writer on each fire of the trigger PC,
+ * restricted to [insn_lo, insn_hi] because such a PC fires 10M+ times
+ * (0x821a does). At a fire, AR6=0 means the buffer base diverged and the
+ * write lands on IMR, AR6=0x16 means AR6 aliases its own MMR slot.
  *
- * Tracking AR6's last writer (= what set AR6 to its current value)
- * via top-of-loop comparison (même pattern que A tracer).
+ * The last writer is tracked by top-of-loop comparison, like the A tracer.
  *
- * Env :
- *   CALYPSO_AR6_AT_PC=0x821a    PC trigger
+ * Gate: AR6-AT. Env:
+ *   CALYPSO_AR6_AT_PC=0x821a    trigger PC
  *   CALYPSO_AR6_WIN_LO=3619500  insn window start
- *   CALYPSO_AR6_WIN_HI=3619810  insn window end (one outer-loop iter)
+ *   CALYPSO_AR6_WIN_HI=3619810  insn window end (one outer-loop iteration)
  *   CALYPSO_AR6_AT_LOG_CAP=200  max log lines (default 200)
  */
 uint16_t g_ar6_last_value     = 0;
@@ -335,7 +317,7 @@ void ar6_at_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op)
         g_ar6_last_writer_insn = s->insn_count;
         g_ar6_last_value       = s->ar[6];
     }
-    /* Trigger : PC about to execute matches AND within window */
+    /* Trigger: PC about to execute matches AND we are inside the window. */
     if (s->pc == g_ar6_at_pc &&
         s->insn_count >= g_ar6_at_win_lo &&
         s->insn_count <= g_ar6_at_win_hi) {
@@ -361,38 +343,39 @@ void ar6_at_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op)
 }
 
 
-/* RSBX INTM hits counter (cheap probe, candidat 1 du doc §7). */
+/* RSBX INTM hit counter (cheap probe). */
 uint64_t g_rsbx_intm_hits = 0;
 int      g_rsbx_intm_enabled = -1;
 
-/* DISP-ENTRY discriminateur (c web 2026-05-29) : capture du contexte de
- * préemption d'IT, pour trancher "dispatcher atteint via vecteur IT avec DP
- * foreground sale" (b) vs "DP clobbé" (a). C54x n'empile PAS ST0/DP à l'IT →
- * l'ISR hérite du DP du code interrompu. Si les entrées dispatcher KO
- * (DP≠0x124) corrèlent avec une IT récente → préemption confirmée. */
-uint64_t g_last_intr_insn  = 0;      /* insn_count de la dernière IT servie */;
-int      g_last_intr_vec   = -1;     /* vecteur de la dernière IT */;
-uint16_t g_last_intr_fg_pc = 0;      /* PC foreground préempté */;
-uint16_t g_last_intr_fg_dp = 0;      /* DP foreground préempté */;
-/* dernier LDP (qui a posé DP) + PC prédécesseur (comment on arrive à 0x8341) */
-uint16_t g_last_ldp_pc  = 0;         /* PC de l'instruction qui a posé DP */;
-uint16_t g_last_ldp_val = 0;         /* valeur DP posée */;
-int      g_last_ldp_kind = 0;        /* 1=LDP#k(5902) 2=LDP#k9(6262) 3=LD Smem,DP(7049) */;
-uint16_t g_prev_pc = 0;
-uint16_t g_prev_op = 0;  /* opcode insn precedente - bc TC-fiable apres cmpm/bitf (2026-06-23) */              /* PC de l'instruction exécutée juste avant */;
-uint16_t g_last_st0w_pc  = 0;        /* PC du dernier write ST0 entier (POPM ST0/STLM) */;
-uint16_t g_last_st0w_val = 0;        /* valeur ST0 restaurée */;
-uint16_t g_last_st0w_op  = 0;        /* opcode de l'instruction qui écrit ST0 */;
-uint16_t g_last_st0w_xpc = 0;        /* XPC au moment du write (0xf48b dépend de XPC) */;
-uint16_t g_last_st0w_prev = 0;       /* PC prédécesseur du write (comment on y arrive) */;
+/* DISP-ENTRY discriminator: captures the interrupt-preemption context. The
+ * C54x does not push ST0/DP on interrupt entry, so the ISR inherits the DP of
+ * the code it preempted. Bad dispatcher entries (DP != 0x124) correlating with
+ * a recent interrupt therefore mean preemption, not a clobbered DP. */
+uint64_t g_last_intr_insn  = 0;      /* insn_count of the last interrupt serviced */;
+int      g_last_intr_vec   = -1;     /* vector of the last interrupt */;
+uint16_t g_last_intr_fg_pc = 0;      /* preempted foreground PC */;
+uint16_t g_last_intr_fg_dp = 0;      /* preempted foreground DP */;
+/* Last LDP (the instruction that set DP) and the predecessor PC. */
+uint16_t g_last_ldp_pc  = 0;         /* PC of the instruction that set DP */;
+uint16_t g_last_ldp_val = 0;         /* DP value written */;
+int      g_last_ldp_kind = 0;        /* 1=LDP #k  2=LDP #k9  3=LD Smem,DP */;
+uint16_t g_prev_pc = 0;  /* PC of the instruction executed just before */
+uint16_t g_prev_op = 0;  /* its opcode; makes TC reliable for BC after CMPM/BITF */;
+uint16_t g_last_st0w_pc  = 0;        /* PC of the last full ST0 write (POPM ST0 / STLM) */;
+uint16_t g_last_st0w_val = 0;        /* ST0 value restored */;
+uint16_t g_last_st0w_op  = 0;        /* opcode of the instruction writing ST0 */;
+uint16_t g_last_st0w_xpc = 0;        /* XPC at the write (PC 0xf48b is XPC-dependent) */;
+uint16_t g_last_st0w_prev = 0;       /* predecessor PC of the write */;
 
-/* === ST0 push/pop ring (C-sweep 2026-05-30, gated DISP-ENTRY) ============
- * Capture PSHM ST0 (push) + POPM/STLM ST0 (write) dans un ring. Dumpé au
- * dispatcher BAD (lut != 0xff72) pour discriminer le DP périmé en 3 branches :
- *   - dernier PUSH val=0x3124 mais POP=0x3125 → CLOBBE pile entre push/pop
- *     (famille SP/circulaire)
- *   - dernier PUSH val=0x3125 → DP déjà faux au push (LDP sauté en amont)
- *   - pas de PUSH ST0 apparié au POP → désalignement SP (pop lit autre slot) */
+/* === ST0 push/pop ring (gate: DISP-ENTRY) ===============================
+ * Records PSHM ST0 (push) and POPM/STLM ST0 (write) in a ring, dumped on a bad
+ * dispatcher entry (LUT read != 0xff72). It splits a stale DP three ways:
+ *   - last PUSH val=0x3124 but POP=0x3125: the stack slot was clobbered
+ *     between push and pop (SP / circular-addressing family)
+ *   - last PUSH val=0x3125: DP was already wrong at push time (LDP skipped
+ *     upstream)
+ *   - no PUSH ST0 paired with the POP: SP misalignment, the pop reads another
+ *     slot */
 St0Ev    g_st0_ring[ST0_RING_N];
 unsigned g_st0_ring_idx = 0;
 int      g_st0_ring_on  = -1;
@@ -404,36 +387,36 @@ void st0_ring_rec(C54xState *s, uint16_t val, char kind)
     e->pc = s->pc; e->op = prog_fetch(s, s->pc); e->val = val; e->sp = s->sp; e->kind = kind;
     g_st0_ring_idx++;
 }
-/* SURGICAL 2026-05-30 : slot LUT lu à l'entrée dispatcher 0x834d (capture
- * silencieuse, pour épingler le DP coupable du self-CALA 0x70c3 sans le
- * spam de DISP-TRACE qui décale le timing et masque le bug). */
+/* LUT slot read at dispatcher entry 0x834d. Captured silently on purpose:
+ * DISP-TRACE's logging shifts the timing and hides the bug it looks for. */
 uint16_t g_disp_lut_ea  = 0;
 uint16_t g_disp_lut_val = 0;
-/* SURGICAL 2026-05-30 : ring des évènements SP (push/pop) au chokepoint
- * unique de la boucle run. Sur tout changement de SP on enregistre
- * {pc, op, delta}. Dumpé par BLACKHOLE-CALA → nomme la source récurrente
- * de drain (push jamais dépoppé). Écritures array only = ~zéro coût. */
+/* Ring of SP events (push/pop), fed from the single chokepoint of the run
+ * loop: every SP change records {pc, op, delta}. Dumped by BLACKHOLE-CALA to
+ * name the recurring drain source, a push that is never popped. Array writes
+ * only, so the cost is negligible. */
 struct sp_evt g_spring[64];
 uint32_t g_spring_idx = 0;
 
-/* === SHADOW STACK (pairing push/pop, 2026-05-30, c-web) ===
- * Miroir logique de la pile DSP : à chaque PUSH (CALL/CALLD/PSHM/IRQ → SP-)
- * on empile {pc,op,kind} ; à chaque POP (RET/RETD/RETE/FRET/RETED/POPM → SP+)
- * on dépile et on VÉRIFIE l'appariement. Un POP sur shadow VIDE = return SANS
- * call apparié = LA source de l'over-pop (lit la pile vierge au-dessus de SP_base).
- * On nomme ce return orphelin (PC/op/SP), ce que les 15 victimes 0xc8be ne disent
- * pas. Gated CALYPSO_DEBUG=ORPHAN. kind: 'C'=call 'P'=pshm/pshd 'I'=irq 'R'=reti.
- * Array-only quand off → ~zéro coût. */
+/* === SHADOW STACK (push/pop pairing) ===
+ * Logical mirror of the DSP stack: every PUSH (CALL/CALLD/PSHM/IRQ, SP-)
+ * pushes {pc,op,kind}, every POP (RET/RETD/RETE/FRET/RETED/POPM, SP+) pops and
+ * checks the pairing. A POP against an empty shadow is a return with no
+ * matching call: the over-pop source, reading pristine stack above SP_base.
+ * It names that orphan return (PC/op/SP) instead of its victims.
+ * Gate: env CALYPSO_ORPHAN, deliberately outside CALYPSO_DEBUG so the master
+ * switch stays off (anti-Heisenbug). kind: 'C'=call 'P'=pshm/pshd 'I'=irq
+ * 'R'=reti. Array writes only when off. */
 struct shadow_ent g_shadow[SHADOW_N];
-int  g_shadow_depth = 0;     /* nb de mots actuellement empilés (logique) */;
-int  g_shadow_on   = -1;     /* -1 = pas encore résolu le gate */;
-uint64_t g_orphan_hits = 0;  /* nb de POP-orphelins détectés */;
-uint64_t g_mismatch_hits = 0;/* nb de POP avec kind mismatché */;
+int  g_shadow_depth = 0;     /* words currently pushed (logical) */;
+int  g_shadow_on   = -1;     /* -1 = gate not resolved yet */;
+uint64_t g_orphan_hits = 0;  /* orphan POPs detected */;
+uint64_t g_mismatch_hits = 0;/* POPs whose kind does not match */;
 
-/* Tracker stores directs zone pile [0x1100..0x1140] (AU-DESSUS de SP_base) :
- * ces slots ne sont JAMAIS écrits par un push (la pile descend SOUS 0x1100),
- * donc uniquement par un ST direct. Discrimine vecteur-init LÉGIT (slot écrit
- * par le firmware) vs slot VIERGE (jamais écrit = vrai over-pop garbage). */
+/* Tracks direct stores into the stack zone [0x1100..0x1140], ABOVE SP_base.
+ * A push never writes these slots (the stack grows below 0x1100), so only a
+ * direct ST does. Tells a legitimate vector init (slot written by firmware)
+ * from a pristine slot (never written = genuine over-pop garbage). */
 uint16_t g_stkslot_wpc[STKSLOT_N];
 uint16_t g_stkslot_wop[STKSLOT_N];
 uint8_t  g_stkslot_written[STKSLOT_N];
@@ -460,35 +443,19 @@ void rsbx_intm_check(C54xState *s, uint16_t op)
     }
 }
 
-/* === AR4 write tracer with provenance (2026-05-25) ===
- * Hooke chaque write vers MMR_AR4 (= 0x14) via data_write_locked.
- * Logge (insn, PC, opcode courant, val écrite, ancien AR4) + tente une
- * classification de provenance via decode opcode :
- *   STM #lk, ARn  (0x77yx)  → immediate value depuis next prog word
- *   STLM src,ARn  (0x84yx)  → from accumulator A/B low
- *   MVDM dmad,ARn (0x86yx)  → from data memory absolute
- *   MVDD/MVMM     (autres)  → from another register
- * Flag SUSPECT si nouvelle valeur AR4 ∈ [0x2b80..0x2c00] (observed bug
- * zone) ou [0x3fb0..0x3fbf] (BSP buffer area). Env CALYPSO_AR4_TRACE=1.
+/* === SP absolute-write tracer ===
+ * Logs every SP write that *teleports* SP to an arbitrary value - STL/STM/STLM
+ * absolute, FRAME #imm, MVMM register transfer - as opposed to PUSH/POP/
+ * CALL/RET, which move SP by one. A site that teleports SP=0x3fbe is the exact
+ * corrupter of the bootstub entry observed at insn=3995013.
  *
- * Question critique (cf Claude web) : provenance = const/mem/register ?
- * Si AR4 vient d'un mem load (LDM/MVDM), le corrupter remonte au TCB
- * en mémoire — pas l'instruction qui charge AR4, mais le TCB lui-même
- * (potentiellement uninitialized faute de re-init firmware sautée). */
-/* === SP absolute-write tracer (2026-05-25 — nohack hunt) ===
- * Logge chaque write SP via STL/STM/STLM absolute, FRAME #imm, MVMM
- * register transfer — c'est-à-dire les sites où SP est *téléporté* à une
- * valeur arbitraire, par opposition aux PUSH/POP/CALL/RET qui sont des
- * inc/dec de 1. Si un site téléporte SP=0x3fbe, on tient le corrupter
- * exact du bootstub-entry observé à insn=3995013.
+ * Hooked at the three sites that can do it:
+ *   site 0  data_write_locked case MMR_SP (STL/STM/STLM to MMR_SP)
+ *   site 1  F7Dx case 0xD, LD #k8u, SP
+ *   site 2  MVMM register transfer with dst==8 (SP in the 3-bit MMR encoding)
  *
- * Hooké aux 3 sites identifiés :
- *   L1218 : data_write_locked case MMR_SP — STL/STM/STLM to MMR_SP
- *   L3875 : F7Dx case 0xD — LD #k8u, SP
- *   L4285 : MVMM register transfer — dst==8 (SP via MMR enc 3-bit)
- *
- * Env-gated CALYPSO_SP_ABS_TRACE=1, zéro coût si OFF.
- * Limite N premiers writes verbatim + histo per-PC (cap SP_ABS_HIST_MAX). */
+ * Gate: CALYPSO_DEBUG token SP-ABS, zero cost when off. First N writes are
+ * logged verbatim, the rest go to a per-PC histogram (cap SP_ABS_HIST_MAX). */
 SpAbsEntry g_sp_abs_hist[SP_ABS_HIST_MAX];
 unsigned   g_sp_abs_used     = 0;
 unsigned   g_sp_abs_total    = 0;
@@ -507,7 +474,7 @@ void sp_abs_track(C54xState *s, uint16_t new_val, uint8_t site)
     }
     if (g_sp_abs_enabled <= 0) return;
     g_sp_abs_total++;
-    /* Per-PC histo */
+    /* Per-PC histogram */
     unsigned i;
     for (i = 0; i < g_sp_abs_used; i++) {
         if (g_sp_abs_hist[i].pc == s->pc && g_sp_abs_hist[i].site == site) {
@@ -535,8 +502,8 @@ void sp_abs_track(C54xState *s, uint16_t new_val, uint8_t site)
             s->sp, new_val, delta,
             (unsigned long long)(s->a & 0xFFFFFFFFFFULL), s->ar[4]);
     }
-    /* Flag if SP lands in suspect zone (0x3fb0..0x3fbf = BSP read region
-     * OR 0x2b80..0x2c00 = 0xfd2a A=AR4 historical) */
+    /* Flag an SP landing in a suspect zone: 0x3fb0..0x3fbf is the BSP read
+     * region, 0x2b80..0x2c00 the I/Q buffer tail. */
     if ((new_val >= 0x3fb0 && new_val <= 0x3fbf) ||
         (new_val >= 0x2b80 && new_val <= 0x2c00)) {
         fprintf(stderr,
@@ -545,16 +512,15 @@ void sp_abs_track(C54xState *s, uint16_t new_val, uint8_t site)
     }
 }
 
-/* === MVPD overlay occupancy trace (2026-05-25) ===
- * Bucket writes à data[0x0080..0x27FF] en buckets de 0x80 words.
- * Dump occupancy à la fin de la boot phase (insn cap) ou périodiquement.
- * Objectif : identifier quelles sub-ranges de [0x0080..0x27FF] sont
- * chargées par MVPD au boot (= code overlay). Critique pour décider si
- * BSP buffer peut vivre dans la read-region [0x0000..0x03A3] sans
- * écraser du code en cours d'exécution.
- * Env gates :
- *   CALYPSO_MVPD_TRACE=1       active (default OFF)
- *   CALYPSO_MVPD_BOOT_LIMIT=N  cap insn pour dump (default 500000) */
+/* === MVPD overlay occupancy trace ===
+ * Buckets writes to data[0x0080..0x27FF] in 0x80-word buckets and dumps the
+ * occupancy at the end of the boot phase. It shows which sub-ranges MVPD
+ * loads at boot (= overlay code), which decides whether the BSP buffer can
+ * live in the read region [0x0000..0x03A3] without overwriting code that is
+ * executing.
+ * Gates:
+ *   CALYPSO_DEBUG token MVPD   enables the trace (default off)
+ *   CALYPSO_MVPD_BOOT_LIMIT=N  insn cap for the dump (default 500000) */
 uint32_t g_mvpd_buckets[MVPD_BUCKETS_N];  /* 80 buckets */;
 int      g_mvpd_trace_enabled = -1;
 unsigned g_mvpd_boot_limit    = 0;
@@ -599,9 +565,9 @@ void mvpd_trace_dump_if_due(unsigned insn)
             "[c54x] MVPD-BUCKET [0x%04x..0x%04x] writes=%u\n",
             lo, hi, g_mvpd_buckets[b]);
     }
-    /* Verdict pour decision buffer placement : si [0x0080..0x03A3]
-     * (correlator read region, bucket 0..6) a peu/zéro writes → safe
-     * pour BSP DMA. Sinon il faut une autre zone. */
+    /* Buffer placement verdict: few or no writes in [0x0080..0x03A3]
+     * (correlator read region, buckets 0..6) means the range is safe for BSP
+     * DMA; otherwise the buffer needs another home. */
     unsigned bucket_0_to_6_total = 0;
     for (unsigned b = 0; b < 7 && b < MVPD_BUCKETS_N; b++)
         bucket_0_to_6_total += g_mvpd_buckets[b];
@@ -616,32 +582,28 @@ void mvpd_trace_dump_if_due(unsigned insn)
             : "HEAVILY USED (code overlay, NE PAS placer BSP buffer ici)");
 }
 
-/* === Correlator trace (2026-05-25 — pour run 0x6000 dual-purpose) ===
- * Capture AR3/AR4/AR5 à l'entrée du correlator FB-det + les data reads
- * pendant son exécution. Objectif : valider empiriquement que le firmware
- * lit son input I/Q dans [0x0000..0x03A3] (assertion TODO.md:13 jamais
- * exercée avec real data — l'A/B précédent mesurait WR-SITE pré-BSP).
- * Env-gated CALYPSO_CORRELATOR_TRACE=1, zéro coût si OFF.
+/* === Correlator trace ===
+ * Captures AR0..AR7, SP and ST0/ST1 on entry into the FB-det correlator, and
+ * the data reads performed while inside it, to check empirically that the
+ * firmware reads its I/Q input from [0x0000..0x03A3].
+ * Gate: CALYPSO_DEBUG token CORRELATOR, zero cost when off.
  *
- * Correlator range : [0x8d00..0x9000] (FB-det handler PROM0).
+ * Correlator range: [0x8d00..0x9000) (FB-det handler in PROM0). The upper
+ * bound was raised from 0x8F80 to 0x9000 because d_fb_det WATCH-READ showed
+ * reads at PC=0x8FAC and 0x8FB5 falling outside the old filter, which made
+ * CORR-ENTRY report 0 while the firmware was in fact working in the zone.
  *
- * 2026-05-25 night : range étendu de 0x8F80 → 0x9000. Évidence runtime
- * (d_fb_det WATCH-READ) montrait des reads à PC=0x8FAC et 0x8FB5 qui
- * étaient HORS l'ancien filtre → CORR-ENTRY=0 alors que firmware FAIT
- * des accès dans la zone FB-det. Range élargi pour capturer ces hits.
- *
- * À l'entrée from-outside : log AR0..7, SP, ST0/1.
- * Pendant exec : log les data_read addr (top N uniques, capped pour
- * éviter explosion log sur runs longs). */
+ * Reads are kept as a capped list of unique addresses so long runs do not
+ * flood the log. */
 CorrReadEntry g_corr_read_hist[CORR_READ_HIST_MAX];
 unsigned    g_corr_read_used    = 0;
 int         g_corr_trace_enabled = -1; /* -1 uninit, 0 off, 1 on */;
 unsigned    g_corr_entry_count  = 0;
 unsigned    g_corr_entry_log_cap = 100000;  /* uncap : voir le par-frame post-+3s */;
 
-/* Posés par calypso_trx.c quand l'ARM écrit d_task_md=5 (commande FB).
- * La sonde D_TASK_MD-RD timestampe les reads DSP par rapport à ce write
- * (test H1 : EA write ARM vs EA read DSP + ordre). */
+/* Set by calypso_trx.c when the ARM writes d_task_md=5 (FB command). The
+ * D_TASK_MD-RD probe timestamps the DSP reads against this write, comparing
+ * the ARM write EA with the DSP read EA and their order. */
 uint32_t g_arm_taskmd5_insn = 0;
 uint16_t g_arm_taskmd5_ea   = 0;
 uint64_t    g_corr_read_total   = 0;
@@ -660,9 +622,9 @@ void corr_trace_init_lazy(void)
     }
 }
 
-/* CORR-ENTRY tracker : appelé au top-of-loop pour chaque insn dispatch.
- * Détecte transition PC out→in du range FB-det. Log les premières N
- * entrées avec contexte AR/SP/ST. */
+/* CORR-ENTRY tracker: called at the top of the loop for every dispatched
+ * instruction. Detects a PC transition from outside into the FB-det range and
+ * logs the first N entries with the AR/SP/ST context. */
 void corr_entry_track(uint16_t pc, void *s_void)
 {
     if (g_corr_trace_enabled <= 0) return;
@@ -689,19 +651,19 @@ void corr_entry_track(uint16_t pc, void *s_void)
     }
 }
 
-/* === FBDB/FBF3 + 0x3DC0 probes (c web reframe 2026-05-25 night2) ========
+/* === FBDB/FBF3 + 0x3DC0 probes ========================================
  *
- * Sondes diagnostiques POST-désassemblage fc50-fc6f, sans aucun fix.
- * Trois questions à trancher :
- *   A) B @ PC=0xfbd9 vaut-il une valeur cohérente avant `SUB #8, B, A` ?
- *      (= si B faux upstream, F2xx fix donne A faux downstream)
- *   B) A @ PC=0xfbdb juste après SUB → AR4 setup à PC=0xfbf3 → corruption ?
- *   C) Le bit 4 du flag 0x3DC0 (= testé par BITF à fc63) est-il jamais set ?
- *      Si jamais set par aucune routine DSP → BCD NTC à fc66 toujours branche →
- *      fc50-fc6f loop forever sans toucher au body.
+ * Read-only probes around the fc50-fc6f kernel, three observations:
+ *   A) B at PC=0xfbd9, before `SUB #8, B, A`: a wrong B upstream yields a
+ *      wrong A downstream whatever the F2xx handler does.
+ *   B) A at PC=0xfbdb (just after the SUB) and at PC=0xfbf3 (just before
+ *      STLM A,AR4): A_low=0 there gives AR4=0, hence AR5=1=MMR_IFR.
+ *   C) Whether bit 4 of the flag at 0x3DC0, tested by the BITF at fc63, is
+ *      ever set. If no DSP routine sets it, the BCD NTC at fc66 always
+ *      branches and fc50-fc6f loops forever without entering its body.
  *
- * Env-gated : CALYPSO_FBDB_PROBE=1 active toutes les sondes.
- * Coût off : 1 compare + 1 branch par opcode (négligeable). */
+ * Gate: CALYPSO_DEBUG token FBDB. Cost when off: one compare and one branch
+ * per opcode. */
 int g_fbdb_probe_enabled = -1;
 unsigned g_fbdb_probe_log_cap = 100;
 unsigned g_fbdb_probe_count_b = 0;
@@ -762,20 +724,18 @@ void fbdb_probe_check_pc(uint16_t pc, void *s_void)
     }
 }
 
-/* === STUCK-STATE PC+XPC histogram (c web reframe 2026-05-25 night3) =====
+/* === STUCK-STATE PC+XPC histogram =====================================
  *
- * Sonde diagnostique : quand le DSP est en "stuck state" (= INTM=1 ET
- * BRINT0 pending dans IFR), on enregistre PC+XPC. Permet d'identifier
- * la VRAIE boucle de blocage XPC-qualifiée — sans présumer que c'est
- * fc50 ou autre PC particulier.
+ * While the DSP is stuck (INTM=1 AND BRINT0 pending in IFR), record PC+XPC.
+ * The plain PC histogram cannot tell XPC pages apart - a bare "fc50" may be
+ * the page 0x1F mirror, or page 0x28, 0x38... - so the XPC qualification is
+ * what names the real blocking loop.
  *
- * Le PC HIST classique ne distingue pas les pages XPC (= ambiguous "fc50"
- * peut être page 0x1F mirror ou 0x28/0x38 etc.).
+ * Stuck entry and exit are logged to delimit the window, and the top 20
+ * PC+XPC pairs are dumped periodically while it lasts.
  *
- * Entry/exit du stuck state logué (= delimit la fenêtre).
- * Top-20 PC+XPC dump périodique (= quand stuck dure).
- *
- * Env-gated CALYPSO_STUCK_PROBE=1. Coût off : 1 bit-check + 1 branch. */
+ * Gate: CALYPSO_DEBUG token STUCK. Cost when off: one bit test and one
+ * branch. */
 StuckHistEntry g_stuck_hist[STUCK_HIST_SIZE];
 unsigned g_stuck_hist_used = 0;
 int g_stuck_probe_enabled = -1;
@@ -842,51 +802,49 @@ static void stuck_probe_dump(uint64_t cur_insn, const char *trig)
     }
 }
 
-/* === FORCE-INTM-ONESHOT (c web reframe 2026-05-25 night4) ===============
+/* === FORCE-INTM-ONESHOT ================================================
  *
- * Sonde d'arbitrage : quand INTM=1 ET BRINT0 (IFR bit 5) pending,
- * forcer UNE SEULE FOIS INTM=0 pour permettre dispatch. Observer ce
- * qui se passe ensuite via les tracers existants (CORR-ENTRY, a_sync_demod
- * writes, RETE log, INTM-TRANS).
+ * Arbitration probe: when INTM=1 AND BRINT0 (IFR bit 5) is pending, clear
+ * INTM ONCE to let the dispatch happen, then watch the existing tracers
+ * (CORR-ENTRY, a_sync_demod writes, RETE log, INTM-TRANS). Real snr/toa after
+ * the dispatch means INTM was the only blocker; garbage or nothing means the
+ * downstream path is broken too, or the ISR state is corrupt.
  *
- * Partitionne l'arbre :
- *   - snr/toa réels après dispatch → INTM est le SEUL blocker
- *   - garbage / rien → aval cassé aussi (≥2 bugs) OU corruption ISR state
+ * This is a probe, NOT a fix: the one-shot observes without masking steady
+ * behaviour. If INTM turns out to be the only blocker, the fix belongs in the
+ * ISR (why no RETE), not in a systematic INTM clear.
  *
- * IMPORTANT : c'est une SONDE diagnostique, PAS un fix. Le one-shot
- * permet d'observer sans masquer un comportement régulier. Si on confirme
- * "INTM est le seul blocker", le vrai fix sera côté ISR (= pourquoi pas
- * de RETE), pas un INTM-clear systématique.
- *
- * Env-gated CALYPSO_FORCE_INTM_ONESHOT=1. */
+ * Env: CALYPSO_FORCE_INTM_ONESHOT=1. */
 int g_force_intm_oneshot_enabled = -1;
 int g_force_intm_oneshot_done = 0;
 uint64_t g_force_intm_oneshot_insn = 0;
-/* CALYPSO_FORCE_INTM_AT_PC=0xfc6f : restreindre le force au PC donné (=
- * point sûr = RET du compute kernel fc50 par exemple). 0xFFFF sentinel
- * = pas de restriction PC (= comportement v1 = première opportunité). */
+/* CALYPSO_FORCE_INTM_AT_PC=0xfc6f restricts the force to that PC, so it can
+ * fire at a safe point (the RET of the fc50 compute kernel, say) instead of
+ * mid-compute. The 0xFFFF sentinel means no PC restriction: fire at the first
+ * opportunity. */
 uint16_t g_force_intm_at_pc = 0xFFFF;
 
-/* @BEQUILLE — FORCE_INTM_ONESHOT (+ FORCE_INTM_AT_PC)  (CALYPSO_FORCE_INTM_ONESHOT=1,
- *              CALYPSO_FORCE_INTM_AT_PC=0xXXXX ; defaut OFF ; calypso_wire.env:=1)
- *   masque  : le RSBX INTM 0xa51b que le firmware ne joue pas. Avec le PC-gate le
- *             bloc POSE EN PLUS l'IT (s->ifr |= s->imr & 0x3000) : il fabrique
- *             l'evenement, il n'ouvre pas seulement la fenetre.
- *   retirer : quand INTM passe a 0 par le chemin ROM (trace INTM-TRANS).
- *   NB      : run.sh le signale deja comme "NON-nominal".
+/* @BEQUILLE - FORCE_INTM_ONESHOT (+ FORCE_INTM_AT_PC)  (CALYPSO_FORCE_INTM_ONESHOT=1,
+ *              CALYPSO_FORCE_INTM_AT_PC=0xXXXX ; default OFF ; calypso_wire.env:=1)
+ *   masks   : the RSBX INTM at 0xa51b that the firmware never executes. With the
+ *             PC gate the block ALSO raises the interrupt (s->ifr |= s->imr &
+ *             0x3000): it manufactures the event, it does not merely open the
+ *             window.
+ *   remove  : once INTM reaches 0 through the ROM path (see the INTM-TRANS trace).
+ *   NB      : run.sh already reports it as "NON-nominal".
  */
 void force_intm_oneshot_check(C54xState *s)
 {
     if (g_force_intm_oneshot_enabled < 0) {
         const char *e = getenv("CALYPSO_FORCE_INTM_ONESHOT");
-        /* Gate PROPRE : ON seulement si =1 ; =0 ou unset -> OFF. (NB : ce oneshot
-         * masque le livelock vec28 en clearant INTM 1x ; utile tant que le sur-fire
-         * frame-IT n est pas corrige a la racine BSP.) */
+        /* Strict gate: ON only for =1; =0 or unset means OFF. The one-shot
+         * masks the vec28 livelock by clearing INTM once, which is useful
+         * until the frame-IT over-fire is fixed at its BSP root. */
         g_force_intm_oneshot_enabled = (e && *e == '1') ? 1 : 0;
-        /* Optional PC gate : si CALYPSO_FORCE_INTM_AT_PC=0xXXXX présent,
-         * fire seulement quand PC matche. Permet de départager state-
-         * corruption vs aval-cassé per c web : force à un PC sûr (= RET
-         * fc6f, idle dispatcher, etc.) au lieu de mid-compute fc57. */
+        /* Optional PC gate: with CALYPSO_FORCE_INTM_AT_PC=0xXXXX set, fire
+         * only when the PC matches, so the force lands at a safe point (the
+         * RET at fc6f, the idle dispatcher) instead of mid-compute at fc57.
+         * That separates state corruption from a broken downstream path. */
         const char *pc_e = getenv("CALYPSO_FORCE_INTM_AT_PC");
         if (pc_e && *pc_e) {
             unsigned long pc_val = strtoul(pc_e, NULL, 0);
@@ -912,16 +870,18 @@ void force_intm_oneshot_check(C54xState *s)
     if (g_force_intm_oneshot_done) return;
     int intm_set = !!(s->st1 & ST1_INTM);
     if (!intm_set) return;
-    /* [2026-07-22] FAIRE FIRE L IFR. Au go-live (0xa4e1) IMR=0x3000 (bit frame
-     * demasque) mais IFR=0 -> aucune IT pending, clearer INTM ne fait rien. Le
-     * frame-IT n est jamais latche (modele IT c54x incomplet). Donc AU PC cible :
-     * on FORCE l IFR frame pending (IFR |= bits demasques) PUIS on clear INTM ->
-     * l IT part. Sans PC-gate : ancien comportement (fire sur IT deja pending). */
+    /* [2026-07-22] Raise IFR before clearing INTM. At go-live (0xa4e1) IMR is
+     * 0x3000 (frame bit unmasked) but IFR is 0, so no interrupt is pending and
+     * clearing INTM alone does nothing: the frame interrupt is never latched
+     * (the c54x interrupt model is incomplete). At the target PC, force the
+     * frame interrupt pending (IFR |= unmasked bits) and only then clear INTM.
+     * Without the PC gate, keep the old behaviour: fire on an already pending
+     * interrupt. */
     if (g_force_intm_at_pc != 0xFFFF) {
         if (s->pc != g_force_intm_at_pc) return;
         uint16_t unmasked = s->imr & 0x3000;   /* vec28/frame (bit12) + bit13 */
-        if (!unmasked) return;                 /* rien de demasque a forcer */
-        s->ifr |= unmasked;                    /* <-- pose l IT frame pending */
+        if (!unmasked) return;                 /* nothing unmasked to force */
+        s->ifr |= unmasked;                    /* raise the frame interrupt */
     } else {
         int it_pending = !!(s->ifr & s->imr);
         if (!it_pending) return;
@@ -942,22 +902,22 @@ void force_intm_oneshot_check(C54xState *s)
         "dispatch + CORR-ENTRY + a_sync_demod writes\n", s->st1);
 }
 
-/* === INT3 cycle tracer + control-flow signature (c web reframe 2026-05-25 night5)
+/* === INT3 cycle tracer + control-flow signature ========================
  *
- * Sonde décisive pour départager F1 (= pourquoi ISR INT3 ne RETE pas).
+ * Answers why an INT3 ISR does not reach its RETE.
  *
- * Per cycle INT3 :
- *   - START : INT3 dispatched (vec=19) → reset trace, log cycle_id + entry PC
- *   - DURING : chaque branch conditionnelle exécutée → (PC, op, target, taken)
- *   - END (good) : RETE fire → dump trace tagged GOOD + insn count
- *   - END (orphan) : nouveau INT3 dispatch avant RETE → dump previous tagged
- *                   ORPHAN-NEXT-INT3 + reason
+ * Per INT3 cycle:
+ *   START   INT3 dispatched (vec=19): reset the trace, log cycle_id and entry PC
+ *   DURING  every conditional branch executed: (PC, op, target, taken)
+ *   END ok  RETE fires: dump the trace tagged GOOD plus the insn count
+ *   END bad a new INT3 dispatch before the RETE: dump the previous trace
+ *           tagged ORPHAN-NEXT-INT3
  *
- * Diff offline good_cycle vs orphan_cycle → 1ère branche qui diverge
- * = trigger du bug. À cette branche, lire l'état testé = la vraie cause.
+ * Diffing a good cycle against an orphan one offline gives the first branch
+ * that diverges; the state tested at that branch is the cause.
  *
- * Cappé 256 branches/cycle (= overflow tagué pour borne).
- * Env-gated CALYPSO_INT3_CYCLE_TRACE=1. */
+ * Capped at INT3_BRANCH_TRACE_MAX branches per cycle, overflow is tagged.
+ * Gate: CALYPSO_DEBUG token INT3-CYCLE. */
 Int3BranchEvent g_int3_trace[INT3_BRANCH_TRACE_MAX];
 unsigned g_int3_trace_count = 0;
 int g_int3_trace_overflow = 0;
@@ -1234,13 +1194,13 @@ void corr_read_dump(const char *trig)
     }
 }
 
-/* === DSP throughput emission (2026-05-14 evening) ===
+/* === DSP throughput emission ===
  *
- * Émet `[c54x] INSN-COUNT-STATS total=N delta=N elapsed_ms=N rate=N/s` toutes
- * les 1M insn. Lu en stéréo par :
+ * Emits `[c54x] INSN-COUNT-STATS total=N delta=N elapsed_ms=N rate=N/s` every
+ * 1M instructions. Two tests read it:
  *   - test_dsp_throughput_5x (milestones, static)
  *   - test_dsp_throughput_above_threshold (observability, runtime)
- * Seuil pytest : 50M/s (marge ×2 sous les 100M/s historiques). */
+ * The pytest threshold is 50M/s, a x2 margin below the 100M/s measured here. */
 #include <time.h>
 struct c54x_g_throughput_s g_throughput;
 
@@ -1271,24 +1231,19 @@ inline void throughput_tick(uint64_t insn_count)
     g_throughput.last_logged_insn = insn_count;
 }
 
-/* === Read-by-range tracking for FB-det path analysis (2026-05-14 evening) ===
+/* === Read-by-range tracking for FB-det path analysis ===
  *
- * Cible : identifier la zone DARAM lue par la routine FB-det sans préjuger.
- * Compteurs cumulatifs par plage + snapshot/delta à chaque "trigger PC"
- * (sites qui écrivent d_fb_det, identifiés par grep ZERO-WR + WR-SITE).
+ * Identifies which DARAM zone the FB-det routine reads. Cumulative counters
+ * per range, plus a snapshot/delta at each trigger PC, so the delta between
+ * two consecutive triggers is the reads accumulated in the window before it.
  *
- * Plages mutuellement exclusives :
- *   RR_MMRS   [0x0000..0x005F]  registres MMR C54x
- *   RR_LOW    [0x0060..0x03A3]  zone correlator linéaire (hypothèse 05-14)
- *   RR_APIRAM [0x0800..0x27FF]  API RAM partagée ARM/DSP (hypothèse β)
- *   RR_TARGET [0x3FB0..0x3FFF]  où BSP DMA écrit par défaut
- *   RR_WRAP   [0xFC5D..0xFFED]  zone correlator wrap BK=176 (AR2/AR7)
- *   RR_OTHER  tout le reste (incluant overlay 0x80..7FF, debord 0x4000+, etc.)
- *
- * Trigger PCs : 5 sites observés écrivant d_fb_det (4 ZERO-WR rares + 0x8f51
- * en boucle 50 fois). Le delta entre 2 triggers consécutifs = reads
- * cumulés dans la fenêtre amont. Cap à 200 triggers loggés pour ne pas
- * flooder. */
+ * Mutually exclusive ranges:
+ *   RR_MMRS   [0x0000..0x005F]  C54x MMR registers
+ *   RR_LOW    [0x0060..0x03A3]  linear correlator zone
+ *   RR_APIRAM [0x0800..0x27FF]  ARM/DSP shared API RAM
+ *   RR_TARGET [0x3FB0..0x3FFF]  where the BSP DMA writes by default
+ *   RR_WRAP   [0xFC5D..0xFFED]  correlator wrap zone, BK=176 (AR2/AR7)
+ *   RR_OTHER  everything else (overlay 0x80..0x7FF, above 0x4000, ...) */
 
 struct c54x_g_read_stats_s g_read_stats;
 
@@ -1306,12 +1261,12 @@ inline void read_stats_record(uint16_t addr)
 
 void read_stats_trigger_check(C54xState *s)
 {
-    /* Trigger PC réduit à 0x8f51 uniquement (FB-det compute loop, 50 hits/sweep).
-     * 2026-05-14 — Run précédent : trigger list large {0x8f51, 0x778a, 0x9ac0,
-     * 0x9ad0, 0x9b00, 0x821a} → 0x821a en boot mailbox poll loop (14 insns
-     * entre hits) a dévoré les 200 lignes de cap avant que 0x8f51 ne fire.
-     * Les autres PCs étaient init/reset (1-3 hits chacun sur tout le run).
-     * Cap remonté à 5000 pour couvrir plusieurs sweeps FB-det. */
+    /* [2026-05-14] Single trigger PC 0x8f51 (FB-det compute loop, 50 hits per
+     * sweep). The wider list {0x8f51, 0x778a, 0x9ac0, 0x9ad0, 0x9b00, 0x821a}
+     * did not work: 0x821a sits in the boot mailbox poll loop, 14 insns apart,
+     * and ate the 200-line cap before 0x8f51 ever fired; the other PCs were
+     * init/reset code, 1-3 hits each over a whole run. The cap is now 5000, to
+     * cover several FB-det sweeps. */
     if (s->pc != 0x8f51) return;
     g_read_stats.trigger_count++;
     if (g_read_stats.trigger_count > 5000) return;
@@ -1338,7 +1293,7 @@ void read_stats_trigger_check(C54xState *s)
  *   (a) trigger transfer (the call/branch that landed in NOP zone)
  *   (b) N last control-flow transfers (most recent → oldest)
  *   (c) N last A-writes
- * Together they name the racine without spéculation. */
+ * Together they name the root cause without speculation. */
 
 
 
@@ -1406,17 +1361,13 @@ void awrite_log_push(uint16_t pc, uint8_t xpc, uint16_t op,
 /* NOP-region predicate :
  *   xpc == 0 && pc < 0x7000 && !(OVLY && pc in [0x80, 0x2800])
  * Anything that lands here is in the unmapped prog area = NOP slide. */
-/* [2026-08-22] Prototype : le plancher de l alias OVLY est utilise des
- * pc_in_nop_region (ligne ~1595), bien avant sa definition. */
+/* Forward declaration: pc_in_nop_region below needs the OVLY alias floor,
+ * defined in another translation unit. */
 uint16_t c54x_ovly_bas(void);
-int c54x_dual_sett(void);
-int c54x_mpy_fam(void);
-int c54x_ld_par(void);
-int c54x_mas_dual(void);
 
 inline int pc_in_nop_region(const C54xState *s, uint16_t pc, uint8_t xpc)
 {
-    if (xpc != 0) return 0;                 /* banque sup : géré ailleurs */
+    if (xpc != 0) return 0;                 /* upper bank: handled elsewhere */
     if (pc >= 0x7000) return 0;             /* PROM0 + PROM1 mirror = valid */
     if ((s->pmst & PMST_OVLY) && pc >= c54x_ovly_bas() && pc < 0x2800)
         return 0;                           /* OVLY DARAM mapping = valid */

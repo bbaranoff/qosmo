@@ -1,11 +1,11 @@
 /*
- * calypso_rf3166.c — amplificateur de puissance RF3166.
+ * calypso_rf3166.c - RF3166 power amplifier.
  *
- * Cf. hw/arm/calypso/doc/CHAINE_RF_MATERIELLE.md §3 et calypso_rf3166.h.
- * Enable = PA_ENABLE = TSPACT(1), ACTIF HAUT (rffe_dualband.c).
- * Sequence de rffe_mode() : au repos `tspact &= ~PA_ENABLE` ; en emission
- * `tspact &= ~TRENA` (commutateur) puis `tspact |= PA_ENABLE` — donc le PA
- * s'allume APRES que l'antenne a ete commutee. C'est cet ordre qu'on verifie.
+ * Enable = PA_ENABLE = TSPACT(1), ACTIVE HIGH (osmocom-bb rffe_dualband.c).
+ * Order imposed by rffe_mode(): at rest `tspact &= ~PA_ENABLE`; to transmit
+ * `tspact &= ~TRENA` (antenna switch) then `tspact |= PA_ENABLE`, so the PA
+ * only comes up AFTER the antenna has been switched over. That ordering is
+ * what this model checks.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -15,21 +15,21 @@
 #include "hw/arm/calypso/calypso_asm4532.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
-#define PA_ENABLE   (1u << 1)   /* TSPACT(1), actif HAUT */
+#define PA_ENABLE   (1u << 1)   /* TSPACT(1), active HIGH */
 
 #define PA_LOG(fmt, ...) \
     do { if (calypso_debug_enabled("TPU")) \
         fprintf(stderr, "[rf3166] " fmt "\n", ##__VA_ARGS__); } while (0)
 
-/* Modele de rampe : 0..255 -> 0..33 dBm. ⚠️ INVENTE, pas calibre. */
+/* Ramp model: 0..255 -> 0..33 dBm. ⚠️ MADE UP, not calibrated. */
 #define RF3166_MAX_DBM  33
 
 static struct {
     bool     on;
     bool     apc_known;
     uint8_t  apc;
-    uint32_t bursts;        /* nombre d'activations */
-    uint32_t faults;        /* activations sans commutateur en position TX */
+    uint32_t bursts;        /* number of PA activations */
+    uint32_t faults;        /* activations with the switch not in TX position */
 } pa;
 
 void calypso_rf3166_tspact_update(uint16_t tspact, uint32_t fn)
@@ -42,8 +42,9 @@ void calypso_rf3166_tspact_update(uint16_t tspact, uint32_t fn)
 
     if (on_new) {
         pa.bursts++;
-        /* Recoupement avec le commutateur : le firmware commute AVANT
-         * d'allumer. Si l'antenne n'est pas sur le PA, on emet dans le vide. */
+        /* Cross-check against the switch: the firmware switches BEFORE
+         * powering up. If the antenna is not on the PA, we transmit into
+         * nothing. */
         if (!calypso_asm4532_tx_connected()) {
             pa.faults++;
             fprintf(stderr, "[rf3166] ⚠ PA_ENABLE assertee alors que l'antenne "
@@ -72,7 +73,7 @@ bool calypso_rf3166_enabled(void) { return pa.on; }
 int32_t calypso_rf3166_out_dbm(void)
 {
     if (!pa.on || !pa.apc_known) {
-        return INT32_MIN;   /* eteint, ou APC jamais pose : inconnu */
+        return INT32_MIN;   /* off, or APC never set: unknown */
     }
     return ((int32_t)pa.apc * RF3166_MAX_DBM) / 255;
 }

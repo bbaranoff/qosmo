@@ -1,35 +1,23 @@
 /*
- * calypso_fbsb.c — QEMU-side FBSB state tracking (logs only)
+ * calypso_fbsb.c - QEMU-side FBSB state tracking (logs only)
  *
- * 2026-05-28 cleanup : all host-side synthesis (publish_fb_found /
- * publish_sb_found / clear_fb / W1C latches / on_frame_tick state
- * machine) removed. fbsb.c logs DSP task changes ; fb0_attempt/sb_attempt sont des compteurs REELS
- * de dispatch (2026-07-27, avant : figes a 0 = red herring qui trompait le diag). FB/SB
- * detection is driven entirely by the DSP (real ROM or L1 stub via
- * CALYPSO_DSP_L1_STUB=1) writing NDB cells, and ARM reads them
- * directly. The only env-gated hack on this path is
- * CALYPSO_FORCE_ANGLE_ZERO (calypso_trx.c).
+ * No host-side synthesis: FB/SB detection is driven entirely by the DSP
+ * writing the NDB cells, and the ARM reads them directly. This file only
+ * follows d_task_md transitions, counts dispatches and dumps the cells.
  *
- * [2026-07-29] LOGGER REBRANCHE SUR DU VIVANT. Le quadruplet « last(...) »
- * etait MORT : les champs last_toa/last_angle/last_pm/last_snr etaient mis a 0
- * par calypso_fbsb_reset() et plus jamais ecrits par personne. La ligne
- * « last(snr=0 toa=0 ang=0 pm=0) » a donc ete lue pendant des semaines comme
- * « le DSP ne rend aucun resultat », alors qu elle ne disait rien du tout —
- * red herring documente. Le dump lit desormais les cellules NDB VIVANTES, et
- * aux DEUX endroits, parce que ces deux vues peuvent diverger :
+ * The dump reads each cell in BOTH views, because they can disagree:
  *
- *   data[] : vue DSP   — ce que le correlateur natif / le shunt ecrivent
- *   api[]  : vue ARM   — ce que le firmware lit REELLEMENT (prim_fbsb.c:306
- *                        read_fb_result() tape dans api_ram, PAS dans data[])
+ *   data[] : DSP view - what the correlator writes
+ *   api[]  : ARM view - what the firmware actually reads (prim_fbsb.c:306
+ *                       read_fb_result() reads api_ram, not data[])
  *
- * Une divergence entre les deux colonnes n est pas un artefact de sonde :
- * c est le diagnostic. « data[] plein / api[] vide » = le resultat est calcule
- * et n arrive jamais au firmware.
+ * A divergence is not a probe artefact, it is the diagnostic: "data[] full,
+ * api[] empty" means the result is computed and never reaches the firmware.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "calypso_fbsb.h"
-#include "calypso_full_pcb.h"   /* DARAM lock helpers — cf gap #3 */
+#include "calypso_full_pcb.h"   /* DARAM lock helpers */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,25 +35,21 @@ void calypso_fbsb_init(CalypsoFbsb *s, uint16_t *ndb_word_base,
 void calypso_fbsb_reset(CalypsoFbsb *s)
 {
     if (!s) return;
-    /* NB : ne remet PAS a zero ndb / api / api_base — ce sont des liaisons,
-     * pas de l etat de session. */
+    /* Deliberately does NOT clear ndb / api / api_base: those are bindings,
+     * not session state. */
     s->state       = FBSB_IDLE;
     s->fb0_attempt = 0;
     s->fb1_attempt = 0;
     s->sb_attempt  = 0;
-    /* [2026-08-03] fb0_retries / afc_retries supprimes : jamais incrementes,
-     * donc toujours 0. Voir la note dans calypso_fbsb_dump(). */
     s->fn_started  = 0;
 }
 
 void calypso_fbsb_on_dsp_task_change(CalypsoFbsb *s, uint16_t d_task_md,
                                      uint64_t fn)
 {
-    /* [2026-08-03] DEDUPE — meme motif que DISPATCH SB et LATCH : 2 554 lignes
-     * sur 20 000, pour une tache et un etat qui ne changent pas d'une trame a
-     * l'autre. On n'imprime que les transitions (c'est tout l'interet de la
-     * sonde : voir la tache CHANGER) plus un resume periodique. Le `fflush`
-     * par ligne coutait en plus a chaque appel. */
+    /* Dedupe: task and state rarely change between frames, and printing one
+     * line per call produced 2554 lines out of 20000, each with its own
+     * fflush. Print transitions only, plus a periodic repeat count. */
     {
         static uint32_t l_key = 0xFFFFFFFFu; static unsigned long long rep = 0;
         uint32_t key = ((uint32_t)d_task_md << 8) ^ (uint32_t)(s ? s->state : 0xFF);
@@ -87,13 +71,13 @@ void calypso_fbsb_on_dsp_task_change(CalypsoFbsb *s, uint16_t d_task_md,
     if (!s) return;
     switch (d_task_md) {
     case DSP_TASK_FB:
-        s->fb0_attempt++;   /* [2026-07-27] compteur REEL : nb de dispatch tache FB (etait fige a 0 = red herring) */
+        s->fb0_attempt++;   /* real count of FB task dispatches */
         s->state       = FBSB_FB0_SEARCH;
         s->fn_started  = fn;
         calypso_fbsb_dump(s, "FB0_SEARCH (real DSP path)");
         break;
     case DSP_TASK_SB:
-        s->sb_attempt++;    /* [2026-07-27] compteur REEL : nb de dispatch tache SB */
+        s->sb_attempt++;    /* real count of SB task dispatches */
         s->state      = FBSB_SB_SEARCH;
         s->fn_started = fn;
         calypso_fbsb_dump(s, "SB_SEARCH (real DSP path)");
@@ -114,11 +98,10 @@ void calypso_fbsb_on_dsp_task_change(CalypsoFbsb *s, uint16_t d_task_md,
     }
 }
 
-/* Lecture d une cellule NDB dans une des deux vues. `base` vaut s->api_base
- * (0x0800) pour les deux : data[] est indexe depuis &data[0x0800] et api_ram
- * depuis C54X_API_BASE, qui vaut la meme chose. Rend -1 si la vue est absente
- * (pointeur nul) pour distinguer « non liee » de « lue a zero » — cette
- * distinction est exactement celle qui manquait a l ancienne ligne morte. */
+/* Read one NDB cell in either view. `base` is s->api_base (0x0800) for both:
+ * data[] is indexed from &data[0x0800] and api_ram from C54X_API_BASE, which
+ * is the same value. Returns -1 when the view is absent (null pointer), so
+ * that "not bound" stays distinguishable from "read as zero". */
 static int fbsb_cell(const uint16_t *view, uint16_t base, uint16_t cell)
 {
     return view ? (int)view[cell - base] : -1;
@@ -147,23 +130,7 @@ void calypso_fbsb_dump(const CalypsoFbsb *s, const char *tag)
     int a_ang = fbsb_cell(s->api, b, NDB_A_SYNC_DEMOD_ANG);
     int a_snr = fbsb_cell(s->api, b, NDB_A_SYNC_DEMOD_SNR);
 
-    /* TOA et ANGLE sont signes cote firmware.
-     *
-     * [2026-08-03] `fb0_ret` et `afc_ret` RETIRES de cette ligne. Ils etaient
-     * declares (calypso_fbsb.h), remis a zero dans calypso_fbsb_reset(), imprimes
-     * ici — et INCREMENTES NULLE PART dans tout l'arbre. Ils valaient donc
-     * structurellement 0 a chaque impression, quoi que fasse le firmware.
-     *
-     * Pourquoi ca comptait : ce zero a ete lu comme une MESURE et cite comme tel
-     * dans au moins six endroits, dont le statut de reference lui-meme
-     * (doc/ETAT_ACTUEL.md §13.1, « Cause amont : fb0_att=22, fb0_ret=0 [...] la L1
-     * est encore en phase de SYNCHRONISATION »). La conclusion tiree de ce champ
-     * etait fausse : la console firmware montre FB0, FB1 puis SB qui aboutissent
-     * (BSIC=7, `Synchronize_TDMA`) — la L1 depasse bien la synchro.
-     *
-     * On RETIRE au lieu de cabler : il n'existe aucune notion de « retry » dans ce
-     * module, en inventer une serait fabriquer une mesure de plus. Un compteur
-     * absent est honnete ; un compteur fige a 0 ment. */
+    /* TOA and ANGLE are signed on the firmware side. */
     fprintf(stderr,
             "[fbsb] %s state=%s fb0_att=%u fb1_att=%u sb_att=%u "
             "data[](det=%d toa=%d pm=%d ang=%d snr=0x%04x) "

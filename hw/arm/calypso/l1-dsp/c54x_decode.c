@@ -1,36 +1,29 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * c54x_decode.c — Decodage des operandes : resolve_smem/lmem/xmem, conditions
+ * c54x_decode.c - operand decode: resolve_smem/lmem/xmem, condition codes.
  *
- * Extrait de calypso_c54x.c le 2026-09-18 (decoupage par role).
- * Carte des fichiers dans c54x_internal.h.
+ * Split out of calypso_c54x.c on 2026-09-18. File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
 
 uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
 {
     if (opcode & 0x80) {
-        /* Indirect addressing.
-         * Per SPRU131G §5.4.1 Table 5-5: bits 2:0 = ARF select the AR for
-         * THIS instruction. ARP (in ST0) is then updated to ARF for the
-         * NEXT direct-Smem reference. Earlier this code used arp(s) for
-         * cur_arp, which made every indirect insn operate on the
-         * PREVIOUS insn's ARF — off-by-one. Symptoms: BANZD *AR1- after
-         * STL *AR2+ would decrement AR2 instead of AR1 (BANZD test
-         * against AR2 stayed non-zero forever, AR1 frozen). Diagnosed
-         * via 5×500M-insn STATE-DUMP showing AR1=0x1c / AR2=0x2b0c
-         * frozen across 2B insns at PC=0xa2c2..0xa2ca. */
+        /* Indirect addressing. Per SPRU131G 5.4.1 Table 5-5, bits 2:0 (ARF)
+         * select the AR used by THIS instruction; ARP in ST0 is only then
+         * updated to ARF, for the NEXT direct-Smem reference. Driving the
+         * access from ARP instead of ARF is an off-by-one that makes every
+         * indirect instruction modify the PREVIOUS one's AR. */
         *indirect = true;
         int mod = (opcode >> 3) & 0x0F;
         int nar = opcode & 0x07;
         int cur_arp = nar;
         uint16_t addr = s->ar[cur_arp];
-        uint16_t ar_before = s->ar[cur_arp];  /* MOD-MISMATCH probe : base avant post-modify */
+        uint16_t ar_before = s->ar[cur_arp];  /* MOD-MISMATCH probe: base before post-modify */
 
-        /* PROBE 2026-05-31 convergence modes : 1er usage de chaque AR comme base
-         * d'adresse. Si la valeur == reset (AR0=0xff75/0x5aad, AR6=0/0xbae6,
-         * AR7=0/0x1e44) → read-before-write → reset load-bearing = driver de la
-         * divergence bin/c54x. À RETIRER. */
+        /* Probe: first use of each AR as an address base. A value still equal
+         * to its reset content means read-before-write, i.e. the reset value
+         * is load-bearing. Diagnostic only, to be removed. */
         {
             static uint8_t ar_used = 0;
             if (!(ar_used & (1 << cur_arp))) {
@@ -40,25 +33,20 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             }
         }
 
-        /* AR2-FLOOR guard : le pointeur d'écriture corrélateur (AR2) peut
-         * sous-déborder le buffer DARAM (0x0800) jusqu'à l'espace MMR
-         * (0x1E=XPC, 0x00=IMR) → clobber. WARN-log diag (token AR2-FLOOR) ;
-         * DROP expérimental (env CALYPSO_AR2_FLOOR_DROP=1) redirige l'accès
-         * vers un scratch pour voir si le corrélateur converge sans le crash. */
         if (cur_arp == 2 && addr < 0x0820) {
-            /* @BEQUILLE — AR2_FLOOR_DROP  (CALYPSO_AR2_FLOOR_DROP, EQ1, defaut OFF)
-             *   masque  : le calcul d'adresse d'AR2 dans le correlateur, qui sous-deborde le
-             *             buffer DARAM 0x0800 jusqu'a l'espace MMR (0x00=IMR, 0x1E=XPC) et le
-             *             clobbe. Le drop redirige l'acces vers 0xFFFF au lieu de corriger le
-             *             pointeur. NB : le LOG est gate par le jeton DEBUG=AR2-FLOOR, le DROP
-             *             ne l'est PAS.
-             *   retirer : quand AR2 reste dans [0x0800,0x2b28) sur tout le kernel FB
-             *             (compteur du jeton AR2-FLOOR a 0 sur un run complet).
+            /* @BEQUILLE - AR2_FLOOR_DROP  (CALYPSO_AR2_FLOOR_DROP, EQ1, default OFF)
+             *   masks  : the AR2 address computation in the correlator, which underflows
+             *            the 0x0800 DARAM buffer down into MMR space (0x00=IMR, 0x1E=XPC)
+             *            and clobbers it. The drop redirects the access to 0xFFFF instead
+             *            of fixing the pointer. Note the LOG is gated by the AR2-FLOOR
+             *            debug token, the DROP is NOT.
+             *   remove : once AR2 stays inside [0x0800,0x2b28) over the whole FB kernel
+             *            (AR2-FLOOR token counter at 0 on a full run).
              */
             static int ar2_drop = -1;
             if (ar2_drop < 0) {
                 const char *e = getenv("CALYPSO_AR2_FLOOR_DROP");
-                ar2_drop = (e && *e == '1') ? 1 : 0;  /* env-gated, OFF par défaut */
+                ar2_drop = (e && *e == '1') ? 1 : 0;
             }
             if (calypso_debug_enabled("AR2-FLOOR"))
                 C54_DBG("AR2-FLOOR",
@@ -66,7 +54,7 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
                     addr, s->pc, prog_fetch(s, s->pc), s->bk,
                     (unsigned long long)(s->a & 0xFFFFFFFFFFULL), s->insn_count);
             if (ar2_drop && addr < 0x0800)
-                addr = 0xFFFF;  /* scratch : empêche le clobber MMR (expérience) */
+                addr = 0xFFFF;  /* scratch address: keeps the write out of MMR space */
         }
 
         /* Post-modify */
@@ -82,13 +70,13 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         case 0x3: /* *+ARn */
             addr = ++s->ar[cur_arp];
             break;
-        /* MOD 4-11 : encodage canonique C54x (tic54x-dis.c:506-518, vérifié
-         * cross-run via sonde MOD-MISMATCH 2026-06-01 : QEMU divergeait sur
-         * 5/6/9/10/11 — signe inversé 5/6, mauvais op 9/10, wrap absent 11).
-         * Ordre réel : 4=-0B 5=-0 6=+0 7=+0B 8=-% 9=-0% 10=+% 11=+0%.
-         * Circulaire (8-11) via c54x_circ_ref → BK=0 reste LINÉAIRE (règle
-         * #6396 : STM #0,BK délibéré, confirmé par sonde BK-WR). */
-        case 0x4: /* *ARn-0B — retenue INVERSEE (fix 2026-08-22) */
+        /* MOD 4-11, canonical C54x order per binutils tic54x-dis.c:506-518:
+         * 4=-0B 5=-0 6=+0 7=+0B 8=-% 9=-0% 10=+% 11=+0%.
+         * Modes 4/7 are reverse-carry (bit-reversed) adds, used by the FB/SB
+         * correlator; CALYPSO_ISA_BITREV=0 reverts them to a plain +/-AR0.
+         * Circular modes 8-11 go through c54x_circ_ref, where BK=0 stays
+         * LINEAR: the firmware issues STM #0,BK deliberately. */
+        case 0x4: /* *ARn-0B - reverse carry */
             s->ar[cur_arp] = c54x_revcarry(s, s->ar[cur_arp], s->ar[0], 1);
             break;
         case 0x5: /* *ARn-0 */
@@ -97,13 +85,9 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         case 0x6: /* *ARn+0 */
             s->ar[cur_arp] += s->ar[0];
             break;
-        case 0x7: /* *ARn+0B — retenue INVERSEE (fix 2026-08-22) */
+        case 0x7: /* *ARn+0B - reverse carry */
             s->ar[cur_arp] = c54x_revcarry(s, s->ar[cur_arp], s->ar[0], 0);
             break;
-        /* GAP bitrev LEVE le 2026-08-22 : la sonde demandee est PDROM 0xf1b3
-         * `mar *AR2+0B`, dans le correlateur FB/SB. Modes 4/7 = retenue
-         * inversee (c54x_revcarry). Gate CALYPSO_ISA_BITREV=0 pour revenir
-         * au +/-AR0 plat. */
         case 0x8: /* *ARn-% (circular -1) */
             s->ar[cur_arp] = c54x_circ_ref(s->ar[cur_arp], -1, s->bk);
             break;
@@ -119,15 +103,14 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         /* Indirect modes 12..15 use a long-immediate operand from the next
          * program word. Encoding per tic54x-dis.c (MOD field = bits 6:3 of
          * the smem byte) and SPRU131G Table 5-9:
-         *   12 : *AR(x)(lk)        — addr = AR(x) + lk, NO modify
-         *   13 : *+AR(x)(lk)       — premod: AR(x) += lk; addr = AR(x)
-         *   14 : *+AR(x)(lk)%      — premod circular: AR(x) = circ(AR(x)+lk)
-         *   15 : *(lk)             — ABSOLUTE long address (lk itself)
+         *   12 : *AR(x)(lk)        - addr = AR(x) + lk, NO modify
+         *   13 : *+AR(x)(lk)       - premod: AR(x) += lk; addr = AR(x)
+         *   14 : *+AR(x)(lk)%      - premod circular: AR(x) = circ(AR(x)+lk)
+         *   15 : *(lk)             - ABSOLUTE long address (lk itself)
          *
-         * The bootloader at PROM0 0xb429 uses MOD=15 (`LDU *(0x0ffe), A`)
-         * to read BL_ADDR_LO. Misdecoding 15 as "AR + lk circular"
-         * produced AR0+0x0ffe instead of 0x0ffe — one of the multiple
-         * subtle off-by-AR bugs that left A=0 after the load. */
+         * MOD=15 is an ABSOLUTE address, not AR(x)+lk: the PROM0 bootloader
+         * at 0xb429 reads BL_ADDR_LO with `LDU *(0x0ffe), A`, and decoding it
+         * as AR-relative yields AR(x)+0x0ffe and loads garbage. */
         case 0xC: /* *AR(x)(lk) */
             addr = s->ar[cur_arp] + prog_fetch(s, s->pc + 1);
             s->lk_used = true;
@@ -137,7 +120,7 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             addr = s->ar[cur_arp];
             s->lk_used = true;
             break;
-        case 0xE: { /* *+AR(x)(lk)% — circular */
+        case 0xE: { /* *+AR(x)(lk)% - circular */
             uint16_t lk = prog_fetch(s, s->pc + 1);
             uint16_t v  = s->ar[cur_arp] + lk;
             if (s->bk) {
@@ -149,21 +132,20 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             s->lk_used = true;
             break;
         }
-        case 0xF: /* *(lk) — absolute address */
+        case 0xF: /* *(lk) - absolute address */
             addr = prog_fetch(s, s->pc + 1);
             s->lk_used = true;
             break;
         }
 
-        /* PROBE 2026-06-01 MOD-MISMATCH : delta silicium-correct EN PARALLÈLE
-         * (n'altère PAS l'exécution — pur compare). Confirme sur le flux réel
-         * que seuls mods 5/6/9/10/11 divergent ET que la firmware les touche.
-         * Réf : tic54x-dis.c:506-518 (MOD canonique), macros tic54x.h:97-98
-         * identiques à l'extraction QEMU. À RETIRER après validation du patch. */
+        /* MOD-MISMATCH probe: recompute the silicon-correct AR in parallel and
+         * compare. Pure observation, it must NOT alter execution. Reference:
+         * tic54x-dis.c:506-518 for the canonical MOD order. Diagnostic only,
+         * to be removed. */
         {
             int16_t  a0  = (int16_t)s->ar[0];
             uint16_t bk  = s->bk;
-            uint16_t sil;               /* AR attendu côté silicium */
+            uint16_t sil;               /* AR value expected on silicon */
             switch (mod) {
             case 0x0: sil = ar_before;                       break; /* *ar      */
             case 0x1: sil = (uint16_t)(ar_before - 1);       break; /* *ar-     */
@@ -179,14 +161,14 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             case 0xB: sil = c54x_circ_ref(ar_before, +a0, bk); break; /* *ar+0% */
             default:  sil = s->ar[cur_arp];                  break; /* 12-15 lk : skip */
             }
-            /* quels mods la firmware touche (1er hit chacun) */
+            /* which MOD encodings the firmware actually uses (first hit each) */
             static uint16_t mod_seen = 0;
             if (!(mod_seen & (1u << mod))) {
                 mod_seen |= (1u << mod);
                 fprintf(stderr, "[c54x] MOD-FIRSTHIT mod=%2d AR%d PC=0x%04x op=0x%04x insn=%u\n",
                         mod, cur_arp, s->pc, opcode, s->insn_count);
             }
-            /* divergence silicium vs QEMU (modes 0..11 seulement) */
+            /* silicon vs model divergence (modes 0..11 only) */
             if (mod <= 0xB && sil != s->ar[cur_arp]) {
                 static uint32_t mm_n[16] = {0};
                 if (mm_n[mod] < 8)
@@ -220,7 +202,7 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
 uint16_t resolve_lmem(C54xState *s, uint16_t opcode)
 {
     if (!(opcode & 0x80)) {
-        /* Direct (DP-relative) — dmad pair, no post-mod. */
+        /* Direct (DP-relative) - dmad pair, no post-mod. */
         uint16_t dp = s->st0 & ST0_DP_MASK;
         return (uint16_t)(((dp << 7) | (opcode & 0x7F)) & 0xFFFE);
     }
@@ -250,32 +232,31 @@ uint16_t resolve_lmem(C54xState *s, uint16_t opcode)
     return addr;
 }
 
-/* SP ledger for IRQ-asymmetry diag (web 2026-05-23).
- * Pushes/pops counted by SP delta sign in dispatch loop (c54x_run).
- * IRQ entries counted explicitly in c54x_interrupt_ex with word count.
- * Periodic dump in dispatch loop shows whether net_words ≈ 0 (balanced)
- * or drifts (indicates push/pop word-count asymmetry, e.g. IRQ entry
- * pushes 1 word but FRET pops 2 → drift -1/IRQ-cycle → SP wraps). */
+/* SP ledger for the IRQ push/pop asymmetry diagnostic. c54x_run counts
+ * pushes and pops from the sign of the SP delta; c54x_interrupt_ex counts
+ * IRQ entries with their word count. A net_words that drifts instead of
+ * staying near 0 means an asymmetry, e.g. IRQ entry pushing one word while
+ * FRET pops two, which walks SP until it wraps. */
 struct c54x_g_sp_ledger_s g_sp_ledger;
 
-/* Xmem operand decode per binutils tic54x.h (XMEM/XMOD/XARX macros) :
- *   XMEM(OP) = bits [7:4] of opcode (the Xmem 4-bit nibble)
- *   XMOD    = nibble bits [3:2] : 0=*AR, 1=*AR-, 2=*AR+, 3=*AR+0%
- *   XARX    = nibble bits [1:0] + 2 (= AR2..AR5 only, no AR0/AR1/AR6/AR7)
+/* Xmem operand decode, per the XMEM/XMOD/XARX macros of binutils tic54x.h:
+ *   XMEM(OP) = opcode bits [7:4], the 4-bit Xmem nibble
+ *   XMOD     = nibble bits [3:2] : 0=*AR, 1=*AR-, 2=*AR+, 3=*AR+0%
+ *   XARX     = nibble bits [1:0] + 2, so AR2..AR5 only
  *
- * Xmem is INDIRECT-ONLY (no DP-relative direct mode, unlike Smem). Using
- * resolve_smem on an Xmem operand mis-decodes the low byte as Smem direct
- * addressing whenever bit 7 is clear, which lands writes in MMR space
- * (0x00-0x1F) — empirically observed at PC=0x8a46 op=0x9918 (STL B,*AR2)
- * 2026-05-23, stomp SP=0x4800→0x0000 cascading to IMR=0 → DSP idle forever.
+ * Xmem is INDIRECT-ONLY: unlike Smem it has no DP-relative direct mode.
+ * Decoding an Xmem operand with resolve_smem reads the low byte as Smem
+ * direct addressing whenever bit 7 is clear and lands the write in MMR space
+ * (0x00-0x1F); one such write (PC=0x8a46, op=0x9918, STL B,*AR2) took
+ * SP from 0x4800 to 0x0000 and then IMR to 0, idling the DSP for good.
  *
- * Fix 2026-06-01 : xmod=3 (*AR+0%) désormais CIRCULAIRE modulo BK via
- * c54x_circ_ref (BK=0→linéaire, règle #6396). Appliqué à tous les handlers
- * duaux (resolve_xmem, MVDD, MAC D0-D9, MASA DB, SQDST DC) — était linéaire
- * `addr + AR0` → drift 16-bit (runaway AR2 @0xfa98, op 0xd3dc Ymem *AR2+0%).
- * Cohérent avec le handler ST||LD C8-CB qui wrappait déjà correctement.
- * NB : la convention 1/2 (±) diffère entre handlers (MVDD 1=- 2=+ vs MAC
- * 1=+ 2=-) — incohérence séparée NON traitée ici, à mesurer (sonde). */
+ * xmod=3 (*AR+0%) is CIRCULAR modulo BK via c54x_circ_ref, with BK=0 staying
+ * linear; a plain `addr + AR0` here drifts over 16 bits and runs AR2 away.
+ * The same rule applies to the other dual-operand handlers (MVDD, MAC D0-D9,
+ * MASA DB, SQDST DC, ST||LD C8-CB).
+ *
+ * Beware: the 1/2 sign convention is NOT uniform across those handlers
+ * (MVDD has 1=- 2=+, MAC has 1=+ 2=-). That inconsistency is unresolved. */
 uint16_t resolve_xmem(C54xState *s, uint16_t op)
 {
     uint8_t xmem  = (op >> 4) & 0xF;
@@ -286,30 +267,23 @@ uint16_t resolve_xmem(C54xState *s, uint16_t op)
     case 0: break;
     case 1: s->ar[xar] = addr - 1; break;
     case 2: s->ar[xar] = addr + 1; break;
-    case 3: s->ar[xar] = c54x_circ_ref(addr, +(int16_t)s->ar[0], s->bk); break; /* *AR+0% circulaire modulo BK (BK=0→linéaire) — fix 2026-06-01 */
+    case 3: s->ar[xar] = c54x_circ_ref(addr, +(int16_t)s->ar[0], s->bk); break; /* *AR+0%, circular modulo BK (BK=0 -> linear) */
     }
     return addr;
 }
 
-/* ================================================================
- * Instruction execution
- * ================================================================ */
-
-/* Execute one instruction. Returns number of words consumed (1 or 2). */
-/* PC ring buffer for pre-IDLE trace */
+/* PC ring buffer for the pre-IDLE trace. */
 uint16_t pc_ring[256];
 int pc_ring_idx = 0;
 
-/* Évalue une condition C54x depuis l'octet bas de l'opcode, per binutils
- * condition_codes[] (opcodes/tic54x-opc.c) : CC1=0x40 (test accu), CCB=0x08
- * (accu B sinon A), test bits[2:0] = EQ=5 NEQ=4 LT=3 LEQ=7 GT=6 GEQ=2 ;
- * AOV=0x70 ANOV=0x60 ; TC=0x30 NTC=0x20 ; C=0x0C NC=0x08 ; UNC=0x00.
- * Identique à l'évaluation du handler RC/RCD (correcte). Remplace l'ancien
- * décode (op>>4)&0xF des handlers CC/CCD qui lisait le MAUVAIS champ (seuls
- * UNC/AEQ justes par coïncidence ; NEQ/LT/LEQ/GT/GEQ/TC/C faux) → mauvais
- * call/no-call dans la power-scan 0xb1xx (CC[TC] f930) → push manquants →
- * over-pop SP → orphelin 0x80fd @0x94f3 → self-CALA 0x70c3 (=28868).
- * cf doc/SP_CATASTROPHE_70c4_SEQUENCE.md, vérifié sonde CC-MISMATCH. */
+/* Evaluate a C54x condition from the LOW byte of the opcode, per the
+ * condition_codes[] table of binutils opcodes/tic54x-opc.c:
+ *   CC1=0x40 selects an accumulator test, CCB=0x08 selects B instead of A,
+ *   test bits[2:0] = EQ 5, NEQ 4, LT 3, LEQ 7, GT 6, GEQ 2;
+ *   AOV=0x70 ANOV=0x60; TC=0x30 NTC=0x20; C=0x0C NC=0x08; UNC=0x00.
+ * The condition lives in the low byte, not in (op>>4)&0xF: that field only
+ * agrees for UNC and AEQ, and getting it wrong flips conditional calls, so
+ * pushes go missing and SP is over-popped into a runaway return address. */
 bool c54x_cond_true(C54xState *s, uint8_t cc)
 {
     if (cc == 0x00) return true;                       /* UNC */
@@ -336,42 +310,41 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
     return true;
 }
 
-/* Faithful per-instruction interrupt LEVEL check (gated CALYPSO_C54X_IRQ_LEVEL).
- * The base model services interrupts only at the c54x_interrupt_ex call edge: an
- * IFR bit latched while INTM=1 is never taken later. Real C54x re-checks pending
- * unmasked interrupts at each instruction boundary. This restores that, so an
- * armed frame IT (INT3/bit3) fires once INTM drops -> native frame ISR runs. */
-/* === Frame-IT LEVEL hold + PRIO (2026-07-25) ============================
- * La frame-IT (bit12/vec28, scheduler 0x7234 -> kernel FB) est posee en EDGE par
- * c54x_interrupt_ex a chaque trame. Mesure : INTM=1 ~permanent (wait-loop 0xdde6
- * + sections critiques 0xb52x) -> la fenetre INTM=0 de 5 insns coincide rarement
- * avec bit12 pendant -> vec28 dispatchee 80x sur ~36000 trames -> kernel FB affame
- * (AR5 jamais 0x2a00, fb0_att=0). Deux correctifs GATES :
- *  - LEVEL : maintenir bit12 asserte dans l IFR jusqu a ce que vec28 VECTORISE
- *            (re-assert chaque insn), pour que la prochaine transition INTM 1->0
- *            l attrape a coup sur (= "vectoriser a la transition, sinon garder").
- *  - PRIO  : quand bit12 ET un bit de priorite plus basse (ex bit5/BRINT0) pendent
- *            dans la meme fenetre, prendre bit12 (frame) en 1er au lieu du ctz brut,
- *            sinon BRINT0 vole la fenetre rare et re-masque (INTM=1). */
+/* Per-instruction interrupt LEVEL check, gated by CALYPSO_C54X_IRQ_LEVEL.
+ * The base model only services interrupts at the c54x_interrupt_ex call edge,
+ * so an IFR bit latched while INTM=1 is never taken afterwards. Real silicon
+ * re-checks pending unmasked interrupts at every instruction boundary.
+ *
+ * This matters for the frame IT (bit12 / vector 28), which c54x_interrupt_ex
+ * raises as an EDGE once per frame. The firmware keeps INTM=1 nearly all the
+ * time (wait loop at 0xdde6 plus the critical sections around 0xb52x), and its
+ * 5-instruction INTM=0 window rarely coincides with bit12 being pending:
+ * vector 28 was dispatched 80 times over ~36000 frames, starving the FB
+ * kernel. Two gated workarounds follow from that measurement:
+ *  - LEVEL: hold bit12 asserted in the IFR, re-asserting it every instruction,
+ *    until vector 28 actually vectors, so the next INTM 1->0 transition cannot
+ *    miss it.
+ *  - PRIO: when bit12 and a lower-priority bit (e.g. bit5/BRINT0) are pending
+ *    in the same window, take bit12 first instead of the raw ctz, otherwise
+ *    BRINT0 steals the rare window and re-masks with INTM=1. */
 bool g_frame_it_level = false;
 
-/* [2026-07-30] IFR-CLEAR-WHO — qui efface un bit demasque de l'IFR ?
+/* [2026-07-30] IFR-CLEAR-WHO: name every site that clears an IFR bit.
  *
- * Gate CALYPSO_IFR_CLEAR_WHO (defaut 1, plafonne). Repond a la question laissee
- * ouverte par LEVELCHK-WINDOW : la fenetre INTM=0 est ouverte 99 % du temps et
- * `intm0+pend` vaut 0 — donc l'IT pendante DISPARAIT avant que la fenetre s'ouvre.
- * Les six sites d'effacement de l'IFR passent desormais par ici, avec leur nom.
+ * All IFR clear sites funnel through here and pass their own name, because a
+ * pending interrupt can vanish before the INTM=0 window opens: the window is
+ * open 99% of the time, yet `intm0+pend` measures 0.
  *
- * On ne logue que les bits DEMASQUES (IMR a 1) : effacer un bit masque est sans
- * consequence. Un effacement par vectorisation est LEGITIME — c'est le nom du
- * site qui le dit ("vector-*"). Un effacement depuis "mmio-write" sur un bit
- * demasque et non servi est, lui, une perte seche.
+ * Only UNMASKED bits (IMR set) are logged; clearing a masked bit is harmless.
+ * A clear from a "vector-*" site is legitimate, the interrupt was serviced.
+ * A clear from "mmio-write" on an unmasked, unserviced bit is a lost
+ * interrupt. Gated by CALYPSO_IFR_CLEAR_WHO (default on), log rate capped.
  */
 void c54x_ifr_clear(C54xState *s, uint16_t mask, const char *site)
 {
     uint16_t before = s->ifr;
     s->ifr &= (uint16_t)~mask;
-    uint16_t perdus = (uint16_t)(before & ~s->ifr & s->imr);   /* demasques seulement */
+    uint16_t perdus = (uint16_t)(before & ~s->ifr & s->imr);   /* unmasked bits only */
     if (!perdus) {
         return;
     }
@@ -392,8 +365,8 @@ void c54x_ifr_clear(C54xState *s, uint16_t mask, const char *site)
             continue;
         }
         par_bit[b]++;
-        /* bit 5 = BRINT0 (livraison I/Q par le BSP) et bit 12 = frame : les deux
-         * qui nous interessent. Les 20 premiers de chaque, puis periodique. */
+        /* bit 5 = BRINT0 (I/Q delivery by the BSP) and bit 12 = frame are the
+         * two bits of interest: log the first 20 of each, then periodically. */
         bool cible = (b == 5 || b == 12);
         if ((cible && par_bit[b] <= 20) || (par_bit[b] % 5000) == 0) {
             nlog++;
@@ -411,5 +384,3 @@ void c54x_ifr_clear(C54xState *s, uint16_t mask, const char *site)
 }
 
 
-/* Prototype utilise par le hook de transition INTM (c54x_interrupt_ex vient de
- * calypso_c54x.h). */

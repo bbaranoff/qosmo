@@ -2,7 +2,7 @@
 #ifndef QOSMO_DOUBLURE_TIMER_H
 #define QOSMO_DOUBLURE_TIMER_H
 #include <stdint.h>
-/* Les timers sont inertes hors QEMU : c'est le harnais qui bat la mesure. */
+/* Timers are inert outside QEMU: the harness drives the beat. */
 typedef struct QEMUTimer { int vide; } QEMUTimer;
 typedef enum { QEMU_CLOCK_REALTIME, QEMU_CLOCK_VIRTUAL, QEMU_CLOCK_HOST } QEMUClockType;
 #define SCALE_NS 1

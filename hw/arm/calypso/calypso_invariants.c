@@ -1,13 +1,13 @@
 /*
  * calypso_invariants.c — screaming invariants + run manifest.
  *
- * Philosophy (2026-07-25) : internal probes raise RESOLUTION, not INDEPENDENCE
- * — a hole in the BSP model is a hole in the BSP probe. So this file holds two
- * things that DO earn their keep :
- *   1. a run manifest (every active CALYPSO_* forcing, logged once) ;
+ * Internal probes raise RESOLUTION, not INDEPENDENCE: a hole in the BSP model
+ * is a hole in the BSP probe. Only two things earn their keep on those terms,
+ * and they are what this file holds:
+ *   1. a run manifest (every active CALYPSO_* forcing, logged once);
  *   2. invariants that scream on their own and act as a non-regression suite.
- * External TRUTH (is the DSP output valid GSM?) is a separate matter and cannot
- * come from this code — that is GSMTAP -> a decoder we did not write.
+ * External TRUTH (is the DSP output valid GSM?) cannot come from this code —
+ * that is GSMTAP into a decoder we did not write.
  */
 #include "qemu/osdep.h"
 #include "hw/arm/calypso/calypso_invariants.h"
@@ -23,7 +23,7 @@ static int inv_on(void)
 {
     if (inv_enabled < 0) {
         const char *e = getenv("CALYPSO_INVARIANTS");
-        inv_enabled = (e && e[0] == '1') ? 1 : 0;   /* DEFAUT OFF (securite boot) */
+        inv_enabled = (e && e[0] == '1') ? 1 : 0;   /* default OFF (boot safety) */
     }
     return inv_enabled;
 }
@@ -74,7 +74,7 @@ bool calypso_invariant(const char *tag, bool ok, const char *fmt, ...)
 
 void calypso_manifest_once(void)
 {
-    if (!inv_on()) { return; }   /* gate defaut OFF */
+    if (!inv_on()) { return; }   /* gate defaults to OFF */
     static int done;
     if (done) {
         return;

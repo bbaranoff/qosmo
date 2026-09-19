@@ -23,7 +23,7 @@
 
 /* calypso_trx.c implements the actual frame work (DSP run, IRQs, UART) */
 extern void calypso_tint0_do_tick(uint32_t fn);
-/* orch CLK→BTS is now driven from TINT0 (2× rate via internal half-tick). */
+/* The orch CLK->BTS is driven from TINT0, at 2x rate via an internal half-tick. */
 
 /* ---- State ---- */
 static struct {
@@ -38,22 +38,19 @@ static void tint0_tick_cb(void *opaque)
 {
     tint0.fn = (tint0.fn + 1) % GSM_HYPERFRAME;
 
-    /* Removed 2026-05-16 : compteur `[tint0]` retiré — dans la machine
-     * Calypso actuelle, calypso_tint0_start() n'est jamais appelé
-     * (le tick virtual est piloté par calypso_tdma_tick dans
-     * calypso_trx.c). Si tu armes tint0 plus tard pour de vrai, remets
-     * un compteur ici. Voir REPORT_CLAUDE_WEB_20260515_TIMING.md. */
+    /* In the current Calypso machine calypso_tint0_start() is never called:
+     * the frame tick comes from calypso_tdma_tick() in calypso_trx.c. */
 
     /* No forced page tic-toc here: the DSP itself writes d_dsp_page
-     * each frame (PC=0xf321 / 0xf5ec) — the trx api hook mirrors the
+     * each frame (PC=0xf321 / 0xf5ec); the trx api hook mirrors the
      * value into ARM space. We let the firmware drive the toggle. */
 
     /* Delegate frame work to calypso_trx */
     calypso_tint0_do_tick(tint0.fn);
 
-    /* Re-arm timer — gated par CALYPSO_PCB_TICK_THREADS. Si threading
-     * actif (= pcb spawn tint0 thread qui self-paces), on N'arme PAS le
-     * QEMUTimer pour éviter double-tick. */
+    /* Re-arm the timer, gated by CALYPSO_PCB_TICK_THREADS. When threading is
+     * active the PCB spawns a self-pacing tint0 thread, so the QEMUTimer must
+     * NOT be re-armed or every frame ticks twice. */
     {
         static int pcb_threaded = -1;
         if (pcb_threaded < 0) {
@@ -70,8 +67,8 @@ static void tint0_tick_cb(void *opaque)
 qemu_notify_event();
 }
 
-/* Public invoker pour pcb tick thread — call la même body que le QEMUTimer
- * callback. À appeler avec BQL held. */
+/* Public invoker for the PCB tick thread: runs the same body as the QEMUTimer
+ * callback. Call it with the BQL held. */
 void calypso_tint0_tick_invoke(void);
 void calypso_tint0_tick_invoke(void)
 {
@@ -89,14 +86,12 @@ void calypso_tint0_start(void)
     }
 
     tint0.running = true;
-    /* Do NOT force tint0.fn = 0 here. A real GSM BTS never restarts the
-     * frame counter at 0 — it only ever advances. Resetting on every
-     * TINT0 start makes the firmware believe it just synchronized to a
-     * fresh hyperframe each run, which is the "fn injection" hack the
-     * user flagged 2026-04-07 night. Whoever owns the master clock
-     * (calypso_tint0_set_fn from a network-derived source) should seed
-     * fn before calling start; otherwise it inherits whatever value the
-     * static struct holds (0 on first boot only). */
+    /* Do NOT force tint0.fn = 0 here. A real GSM BTS never restarts the frame
+     * counter at 0, it only advances; resetting it on every TINT0 start makes
+     * the firmware believe it just synchronized to a fresh hyperframe. Whoever
+     * owns the master clock seeds fn through calypso_tint0_set_fn() from a
+     * network-derived source before calling start; otherwise fn keeps whatever
+     * the static struct holds (0 on first boot only). */
     TINT0_LOG("started (period=%.3f ms, IFR bit %d, vec %d) fn=%u",
               TINT0_PERIOD_NS / 1e6, TINT0_IFR_BIT, TINT0_VEC, tint0.fn);
     timer_mod_ns(tint0.timer,
