@@ -66,9 +66,9 @@ uint16_t calypso_bsp_get_daram_addr(void);
 uint32_t calypso_bsp_get_last_fn(void);
 uint16_t calypso_bsp_get_daram_len(void);
 
-/* Reference probe: compares DARAM against the burst rx_burst was handed.
- * Returns the number of identical words, or -1 if no burst was recorded. */
-int calypso_bsp_verif_compare(uint32_t *fn, uint16_t *addr, int *n);
+/* Reference probe: compares DARAM against the last bursts the BSP was handed;
+ * *age names which one matched best (0 = this frame). -1 if none recorded. */
+int calypso_bsp_verif_compare(uint32_t *fn, uint16_t *addr, int *n, int *age);
 uint8_t  calypso_bsp_get_last_att(void);
 
 /* Send UL burst via UDP to BTS */

@@ -117,6 +117,8 @@ static struct {
     bool     drr_valid;
 
     unsigned n_burst, n_drr_rd, n_spcr_rd, n_spcr_wr, n_int, n_dma, n_overrun;
+    unsigned n_wr_arme;      /* SPCR writes that CLEAR a receive mask */
+    unsigned n_wr_rrst_on;   /* SPCR writes that release RRST */
 
     /* [2026-08-04] @BEQUILLE RIF_BACKPRESSURE: bursts refused for lack of
      * room, and bursts forced through by the anti-stall valve. `bp_run` =
@@ -324,7 +326,10 @@ bool calypso_rif_portw(C54xState *s, uint16_t pa, uint16_t val)
             rif.stage_pos = rif.stage_n;
             rif.drr_valid = false;
         }
-        if (rif.n_spcr_wr++ < 20)
+        rif.n_spcr_wr++;
+        if (!(val & SPCR_RINT_MASK) || !(val & SPCR_RDMA_MASK)) rif.n_wr_arme++;
+        if (val & SPCR_RRST) rif.n_wr_rrst_on++;
+        if (rif.n_spcr_wr <= 20 || (rif.n_spcr_wr % 200) == 0)
             fprintf(stderr, "[rif] SPCR write #%u 0x%04x -> RRST=%d THRESHOLD=%d "
                     "RINT_MASK=%d RDMA_MASK=%d XINT_MASK=%d PC=0x%04x\n",
                     rif.n_spcr_wr, val, !!(val & SPCR_RRST), rif_threshold(),
@@ -445,11 +450,17 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     }
     if (rdma) {
         rif.n_dma++;
-        /* The end-of-DMA request of §3.7.1 is served, not just counted. No
-         * effect while CALYPSO_RHEA_DMA_XFER=0 (default). */
+        /* The end-of-DMA request of §3.7.1 is served, not just counted. */
         calypso_rhea_dma_rx_request(s);
     }
 
+    if (rif.n_burst <= 10 || (rif.n_burst % 500) == 0)
+        fprintf(stderr, "[rif] BILAN bursts=%u notifies=%u (IT=%u DMA=%u) muets=%u ; "
+                "ecritures SPCR=%u dont %u liberent un masque de reception, "
+                "%u relachent RRST\n",
+                rif.n_burst, rif.n_int + rif.n_dma, rif.n_int, rif.n_dma,
+                rif.n_burst - rif.n_int - rif.n_dma,
+                rif.n_spcr_wr, rif.n_wr_arme, rif.n_wr_rrst_on);
     if (rif.n_burst <= 10 || (rif.n_burst % 500) == 0)
         fprintf(stderr, "[rif] burst #%u n=%d -> FIFO %d/%d ; RINT_MASK=%d "
                 "RDMA_MASK=%d => %s (IT=%u DMA=%u overrun=%u)\n",
