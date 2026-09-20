@@ -168,7 +168,7 @@ static void log_ctrl(int n, uint16_t v)
 {
     fprintf(stderr, "[rhea-dma] DMA%d_CTRL <- 0x%04x : ENABLE=%d ONE_SHOT=%d "
             "FIFO_MODE=%d PAGE=%d MAS=%d(%s) DMA_START=%d IRQ_MODE=%d DIRECTION=%d(%s) "
-            "PRIORITY=%d\n",
+            "PRIORITY=%d PC=0x%04x\n",
             n + 1, v,
             !!(v & CTRL_ENABLE), !!(v & CTRL_ONE_SHOT), !!(v & CTRL_FIFO_MODE),
             !!(v & CTRL_CURRENT_PAGE), !!(v & CTRL_MAS),
@@ -176,7 +176,7 @@ static void log_ctrl(int n, uint16_t v)
             !!(v & CTRL_DMA_START), !!(v & CTRL_IRQ_MODE),
             !!(v & CTRL_DIRECTION),
             (v & CTRL_DIRECTION) ? "Rhea->API" : "API->Rhea",
-            (v >> 11) & 3);
+            (v >> 11) & 3, rd_dsp ? (rd_dsp->pc & 0xffff) : 0);
 }
 
 uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
@@ -274,8 +274,8 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
             break;
         case RD_ALGTH:
             rd.ch[n].algth = v & 0x0FFF;
-            fprintf(stderr, "[rhea-dma] DMA%d_ALGTH <- %u octets (= %u mots de page API)\n",
-                    n + 1, v & 0xFFF, (v & 0xFFF) / 2);
+            fprintf(stderr, "[rhea-dma] DMA%d_ALGTH <- %u octets (= %u mots de page API) PC=0x%04x\n",
+                    n + 1, v & 0xFFF, (v & 0xFFF) / 2, rd_dsp ? (rd_dsp->pc & 0xffff) : 0);
             break;
         case RD_CTRL: {
             uint16_t keep = rd.ch[n].ctrl & CTRL_RO_MASK;

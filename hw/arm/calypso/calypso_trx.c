@@ -596,7 +596,26 @@ static void pont_echange(CalypsoTRX *s)
             }
         }
     }
-    if (libre && pont_send(s, PONT_TICK, s->fn, s->dsp_page, s->tpu_regs[TPU_OFFSET / 2])) {
+    /* [2026-09-20] DSP FRAME INTERRUPT = TPU_CTRL_DSP_EN, ONE-SHOT. The
+     * firmware raises it in dsp_end_scenario() (tpu_dsp_frameirq_enable(),
+     * set again on EVERY scenario) and never lowers it; the ROM never clears
+     * d_task_md nor d_dsp_page, and l1_sync() only flips the write page on
+     * frames carrying a DSP item. So a frame interrupt on every tick made the
+     * ROM re-read the SAME page for 10+ frames: the FB task restarted at each
+     * FCCH and the SB job never got the channel (0xaba4 dispatched, 0xb219
+     * never reached, no 764-byte window). Bit 16 of TICK.b says whether the
+     * ARM armed the interrupt since the last tick; DSP_EN is consumed here.
+     * ICTRL_DSP_FRAME is active-low (tpu_frame_irq_en). */
+    uint32_t b = s->dsp_page;
+    if (libre) {
+        bool arme = (s->tpu_regs[TPU_CTRL / 2] & TPU_CTRL_DSP_EN) &&
+                    !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_DSP_FRAME);
+        if (arme) {
+            b |= CALYPSO_PONT_TICK_IRQ_TRAME;
+            s->tpu_regs[TPU_CTRL / 2] &= (uint16_t)~TPU_CTRL_DSP_EN;
+        }
+    }
+    if (libre && pont_send(s, PONT_TICK, s->fn, b, s->tpu_regs[TPU_OFFSET / 2])) {
         s->pont_pending = true;
     }
 }

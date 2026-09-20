@@ -58,6 +58,10 @@ enum CalypsoPontType {
 #define PONT_DONE_IDLE      (1u << 1)   /* le DSP est en IDLE apres la trame   */
 #define PONT_DONE_INIT      (1u << 2)   /* boot termine (premier IDLE atteint) */
 #define PONT_DONE_RUNNING   (1u << 3)   /* dsp->running                         */
+/* TICK.b : bit 0 = page W annoncee par l'ARM (d_dsp_page & 1), bit 16 = l'ARM a
+ * arme l'interruption trame du DSP (TPU_CTRL_DSP_EN, a usage unique) depuis le
+ * tick precedent. Sans ce bit le DSP ne recoit pas d'interruption trame. */
+#define CALYPSO_PONT_TICK_IRQ_TRAME (1u << 16)
 
 typedef struct {
     uint32_t type;
