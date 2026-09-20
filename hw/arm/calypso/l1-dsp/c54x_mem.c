@@ -21,6 +21,8 @@ int      g_fbwatch_on = -1;
 
 uint16_t data_read(C54xState *s, uint16_t addr)
 {
+    if (c54x_rapide)                       /* see calypso_c54x.h */
+        return data_read_locked(s, addr);
     /* Mailbox monitor: logs the value as found in memory on entry. The few cells
      * synthesized further down (FB-STREAM) show up on the write side anyway. */
     calypso_mbx(MBX_DSP_RD, addr, s->data[addr], 0, s->pc, 0, s->insn_count);
@@ -1050,6 +1052,16 @@ unsigned g_toa_seq = 0;
 
 void data_write(C54xState *s, uint16_t addr, uint16_t val)
 {
+    if (c54x_rapide) {                     /* see calypso_c54x.h */
+        /* the one functional substitution of the slow path: a_pm from the
+         * measured downlink magnitude (CALYPSO_PM_RSSI, default 1) */
+        static int rssi_on = -1;
+        if (rssi_on < 0) rssi_on = calypso_gate("CALYPSO_PM_RSSI", 1);
+        if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) || (addr >= 0x0848 && addr <= 0x084A)))
+            val = calypso_bsp_rssi_apm();
+        data_write_locked(s, addr, val);
+        return;
+    }
     scratchwr_note(s, addr, val, "data");
     {   /* HANDLER-WATCH - CALYPSO_DISPATCH_PROBE=1, read-only.
          *

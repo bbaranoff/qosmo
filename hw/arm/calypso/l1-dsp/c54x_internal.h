@@ -23,6 +23,7 @@
 
 
 #include "calypso_c54x.h"
+extern int c54x_rapide;   /* fast path, see calypso_c54x.h */
 #include "calypso_rif.h"
 #include "calypso_rhea_dma.h"
 #include "hw/arm/calypso/calypso_xio.h"   /* SAM/HOM arbitration */

@@ -1444,8 +1444,10 @@ int c54x_exec_one(C54xState *s)
          * the correlator reads [0..0x3A3], APIRAM means the samples arrive
          * through the ARM-driven API RAM, WRAP means it runs on the PROM1 mirror
          * wrap, OTHER means an uncatalogued region. */
-        read_stats_trigger_check(s);
-        throughput_tick(s->insn_count);
+        if (!c54x_rapide) {
+            read_stats_trigger_check(s);
+            throughput_tick(s->insn_count);
+        }
         /* WAIT-A21A probe: at PC=0xa21a, snapshots INTM, IMR and IFR.
          *   INTM=1, IFR=0,  IMR set -> the hardware is simply silent
          *   INTM=1, IFR!=0, IMR set -> a pending IRQ is being blocked (bug)

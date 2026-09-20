@@ -191,7 +191,15 @@ uint16_t calypso_bsp_rssi_apm(void)
  * samples against a frame boundary that does not match the modulator phase
  * (→ d_fb_det stays 0 indefinitely). */
 #define BSP_NUM_TN     8                 /* one queue per timeslot */
-#define BSP_QUEUE_LEN  128               /* lookahead depth per TN */
+/* [2026-09-20] 128 -> 8192. With a real BTS the bursts arrive at 217 frames/s
+ * while the emulated DSP consumes ~100/s; at 128 slots the queue overflowed
+ * every second and dropped the OLDEST bursts, so the stream the ROM saw had
+ * holes: FCCH spacings of 4, 26, 18 frames instead of 10 and the SCH never 1
+ * frame after the FCCH it predicted (measured: 88 SB attempts, 0 decoded).
+ * 8192 per timeslot holds ~70 s of the deficit; the stream stays coherent,
+ * only late, which is what acquisition needs (the SB sets the firmware time
+ * in stream time). 8 x 8192 x 780 B = 51 MB of BSS. */
+#define BSP_QUEUE_LEN  8192              /* lookahead depth per TN */
 /* Match window: the real BSP captures samples around BDLENA, so an exact FN
  * match is a QEMU artefact. 64 frames covers the BTS scheduler lookahead
  * (measured delta 1..139, mean ~50; a window of 4 left 99 % of bursts stale
@@ -384,6 +392,9 @@ static void bsp_enqueue(uint8_t tn, uint32_t fn, const int16_t *iq, int n)
     } else {
         idx = oldest_idx;
         bsp.bursts_dropped_queue_full++;
+        if (bsp.bursts_dropped_queue_full == 1 || (bsp.bursts_dropped_queue_full % 10000) == 0)
+            BSP_LOG("FILE PLEINE tn=%u : %llu bursts jetes (le DSP consomme moins vite que le BTS n'emet)",
+                    tn, (unsigned long long)bsp.bursts_dropped_queue_full);
     }
     BspBurstSlot *s = &qq->slot[idx];
     memcpy(s->iq, iq, n * sizeof(int16_t));

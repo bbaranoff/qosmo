@@ -13,6 +13,8 @@
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
+int c54x_rapide = 0;
+
 static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
 {
     static int     ff_enabled = -1;
@@ -1385,6 +1387,7 @@ int c54x_run(C54xState *s, int n_insns)
                 srt_log++;
             }
         }
+        if (!c54x_rapide) {   /* PROM3-VISIT probe */
         /* PROM3-VISIT probe. Counts DSP visits to the candidate SB-decode
          * entries 0x8167, 0x81ff and 0x82b8 (PROM3 SB dispatch candidates).
          * Logs the first visit only (insn_count plus caller from the ring),
@@ -1435,6 +1438,7 @@ int c54x_run(C54xState *s, int n_insns)
                             (unsigned long long)v82b8, s->insn_count);
             }
         }
+        }   /* !c54x_rapide */
         /* Top-of-loop SP chokepoint. The end-of-loop SP hook is bypassed by
          * every instruction that exits early (goto unimpl, return, continue, a
          * handler that leaves the dispatch chain): the SP write happens but is
@@ -1445,6 +1449,7 @@ int c54x_run(C54xState *s, int n_insns)
          * it with the previous iteration's value is bypass-proof by
          * construction - it watches the VALUE at a chokepoint, not the write
          * sites. The statics persist across c54x_run calls. */
+        if (!c54x_rapide) {   /* per-instruction SP/A/AR6/MVPD/correlator probes */
         {
             static uint16_t topgate_last_sp = 0;
             static uint16_t topgate_last_pc = 0;
@@ -1533,6 +1538,7 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        }   /* !c54x_rapide */
 
         /* DSP idle fast-forward — see dsp_idle_fast_forward() comment.
          * Skips MAC simulation when DSP is in its empty-task-slot
@@ -2747,6 +2753,7 @@ int c54x_run(C54xState *s, int n_insns)
         }
         /* CORR-ENTRY tracker (CALYPSO_CORRELATOR_TRACE=1): captures the
          * out -> in transition of the FB-det range [0x8d00..0x9000). */
+        if (!c54x_rapide) {
         corr_entry_track(s->pc, s);
         /* FBDB-PROBE (CALYPSO_FBDB_PROBE=1): traces B at 0xfbd9, A at 0xfbdb
          * (after the F2xx SUB) and A at 0xfbf3 (before STLM A,AR4). */
@@ -2758,6 +2765,7 @@ int c54x_run(C54xState *s, int n_insns)
         /* STUCK-PROBE (CALYPSO_STUCK_PROBE=1): PC and XPC histogram while
          * INTM=1 and BRINT0 is pending. */
         stuck_probe_check(s);
+        }
 
         /* CALA-70C3 forensic probes. The DSP loops for ever on CALA A at
          * PROM0[0x70c3] with A = 0x0001_70c3, a self-reference. A_H = 0x0001
@@ -5864,7 +5872,7 @@ int c54x_run(C54xState *s, int n_insns)
 
         /* INT3-CYCLE-TRACE (CALYPSO_INT3_CYCLE_TRACE=1): records the branch
          * decisions taken during the INT3 ISR cycle. */
-        int3_cycle_track_branch(s, exec_pc, exec_op, consumed);
+        if (!c54x_rapide) int3_cycle_track_branch(s, exec_pc, exec_op, consumed);
 
         /* SP changes, logged only after init (insn > 490M). */
         if (s->sp != sp_before && s->insn_count > 490000000) {
@@ -5884,6 +5892,7 @@ int c54x_run(C54xState *s, int n_insns)
          * loses one word per pair). On by default, a few branches per
          * instruction. */
         #define SP_FLOOR 0x0080
+        if (!c54x_rapide)   /* SP-delta stats, A-write ring, transfer ring, NOP guard, SP floor */
         {
             static int sp_floor_tripped = 0;
             static uint64_t sp_delta_pushf = 0;  /* delta == -2 */
