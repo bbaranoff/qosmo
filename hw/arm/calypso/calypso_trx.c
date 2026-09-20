@@ -643,7 +643,19 @@ static void tdma_tick(void *opaque)
                 s->pont_pending = false; s->pont_frames++;
                 if (m.a & PONT_DONE_API_IRQ) { s->pont_api_irqs++; qemu_irq_raise(s->irqs[CALYPSO_IRQ_API]); }
             } else {
-                /* DSP not ready yet: do not advance, retry soon */
+                /* DSP not ready yet: do not advance, retry soon.
+                 * [2026-09-20] The UARTs are pumped by this tick (below) and
+                 * do not depend on the DSP: keep serving them here, or the
+                 * serial link only moves at the DSP's pace and osmocon's
+                 * romload, which times out per block, stalls at 38-55 %. */
+                if (g_uart_modem) {
+                    calypso_uart_poll_backend(g_uart_modem);
+                    calypso_uart_kick_rx(g_uart_modem);
+                }
+                if (g_uart_irda) {
+                    calypso_uart_poll_backend(g_uart_irda);
+                    calypso_uart_kick_rx(g_uart_irda);
+                }
                 timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 8);
                 return;
             }
