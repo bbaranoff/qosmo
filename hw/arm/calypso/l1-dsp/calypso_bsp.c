@@ -1673,7 +1673,15 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * here (no signal on TS1..TS7), so the stream keeps the frame's length.
      * A caller that delivers all eight timeslots itself passes tn != 0 for the
      * others and is left alone. */
-    if (pleine && continu && tn == 0 && n_int16 <= 2 * 157) {
+    /* [2026-09-20] A source that delivers the other timeslots itself (pont.py
+     * --dsp-port forwards all eight TRXD bursts of every frame) must not get
+     * the seven fillers on top: the stream then carried 15 timeslots per
+     * frame, the ROM's frame counting and TOA were off by 2x and the DSP did
+     * twice the DMA/ISR work per frame. Remembered from the first tn != 0
+     * burst seen. */
+    static bool source_toutes_ts;
+    if (tn != 0) source_toutes_ts = true;
+    if (pleine && continu && tn == 0 && n_int16 <= 2 * 157 && !source_toutes_ts) {
         for (int ts = 1; ts < 8; ts++)
             c54x_bsp_load(bsp.dsp, g_remplissage, 2 * (156 + ((ts == 3 || ts == 7) ? 1 : 0)));
     }
