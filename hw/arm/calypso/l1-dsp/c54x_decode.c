@@ -304,8 +304,9 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
         int64_t acc = (cc & 0x08) ? sext40(s->b) : sext40(s->a);
         bool ov = (cc & 0x08) ? !!(s->st0 & (1 << 9))  /* OVB */
                               : !!(s->st0 & (1 << 8));  /* OVA */
-        if ((cc & 0x70) == 0x70) return ov;            /* AOV/BOV  */
-        if ((cc & 0x70) == 0x60) return !ov;           /* ANOV/BNOV */
+        /* [2026-09-21] OVA/OVB are cleared once a conditional tests them */
+        if ((cc & 0x70) == 0x70) { s->st0 &= (cc & 0x08) ? ~(1 << 9) : ~(1 << 8); return ov; }    /* AOV/BOV  */
+        if ((cc & 0x70) == 0x60) { s->st0 &= (cc & 0x08) ? ~(1 << 9) : ~(1 << 8); return !ov; }   /* ANOV/BNOV */
         switch (cc & 0x07) {
         case 0x05: return acc == 0;                    /* EQ  */
         case 0x04: return acc != 0;                    /* NEQ */

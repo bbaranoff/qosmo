@@ -214,6 +214,19 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
  * ⚠️ The SXM-dependent fill belongs to the same SPRU172C rule and is applied
  * here too; a right shift is arithmetic only when SXM=1.
  * ═══════════════════════════════════════════════════════════════════════════ */
+/* [2026-09-21] Carry of the 40-bit adder, SPRU172C: ADD sets C on a carry out
+ * of the accumulator, SUB (A + ~B + 1) resets C on a borrow. */
+static inline void c54x_carry_add40(C54xState *s, int64_t a, int64_t b)
+{
+    uint64_t ua = (uint64_t)a & 0xFFFFFFFFFFULL, ub = (uint64_t)b & 0xFFFFFFFFFFULL;
+    if (((ua + ub) >> 40) & 1) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
+}
+static inline void c54x_carry_sub40(C54xState *s, int64_t a, int64_t b)
+{
+    uint64_t ua = (uint64_t)a & 0xFFFFFFFFFFULL, ub = (uint64_t)b & 0xFFFFFFFFFFULL;
+    if (ua >= ub) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
+}
+
 static void c54x_sfta_exec(C54xState *s, uint16_t op)
 {
     int src, dst;
@@ -222,8 +235,11 @@ static void c54x_sfta_exec(C54xState *s, uint16_t op)
     if (shift > 15) shift -= 32;
     int64_t sv = sext40(src ? s->b : s->a);
 
+    /* [2026-09-21] left shift: C = the last bit shifted out of bit 31, i.e.
+     * src(32 - SHIFT) (SPRU172C SFTA example: 80AA001234 << 5 -> C = 1, the
+     * bit 27); bit 39 - SHIFT read 0 there. isa_test 188. */
     int cbit = (shift < 0) ? (int)((sv >> ((-shift) - 1)) & 1)
-                           : (int)((sv >> (39 - shift)) & 1);
+             : (shift > 0) ? (int)((sv >> (32 - shift)) & 1) : ((s->st0 & ST0_C) ? 1 : 0);
     if (cbit) s->st0 |= ST0_C;
     else      s->st0 &= ~ST0_C;
 
@@ -1599,10 +1615,10 @@ int c54x_exec_one(C54xState *s)
             else if (cc == 0x4A) cond = (sext40(s->b) >= 0);          /* BGEQ */
             else if (cc == 0x4B) cond = (sext40(s->b) < 0);           /* BLT */
             else if (cc == 0x4F) cond = (sext40(s->b) <= 0);          /* BLEQ */
-            else if (cc == 0x70) cond = (s->st0 & ST0_OVA) != 0;     /* AOV */
-            else if (cc == 0x60) cond = !(s->st0 & ST0_OVA);          /* ANOV */
-            else if (cc == 0x78) cond = (s->st0 & ST0_OVB) != 0;     /* BOV */
-            else if (cc == 0x68) cond = !(s->st0 & ST0_OVB);          /* BNOV */
+            else if (cc == 0x70) { cond = (s->st0 & ST0_OVA) != 0; s->st0 &= ~ST0_OVA; }    /* AOV, cleared once tested */
+            else if (cc == 0x60) { cond = !(s->st0 & ST0_OVA);       s->st0 &= ~ST0_OVA; }    /* ANOV */
+            else if (cc == 0x78) { cond = (s->st0 & ST0_OVB) != 0; s->st0 &= ~ST0_OVB; }    /* BOV */
+            else if (cc == 0x68) { cond = !(s->st0 & ST0_OVB);       s->st0 &= ~ST0_OVB; }    /* BNOV */
             else {
                 /* Combined conditions: OR the individual condition bits */
                 cond = false;
@@ -2094,7 +2110,7 @@ int c54x_exec_one(C54xState *s)
                  * at the edge (index 43), the 78 bits were misframed and the SB CRC
                  * failed. */
                 int64_t sa = sext40(s->a), sb = sext40(s->b);
-                int a_is_max = (sa >= sb);
+                int a_is_max = (sa > sb);     /* [2026-09-21] equal: dst = B, C = 1 (isa_test 128 for MIN) */
                 int64_t mx = a_is_max ? sa : sb;
                 if ((op >> 8) & 1) s->b = sext40(mx); else s->a = sext40(mx);
                 if (a_is_max) s->st0 &= ~ST0_C; else s->st0 |= ST0_C;
@@ -2108,7 +2124,7 @@ int c54x_exec_one(C54xState *s)
                  * dst = min(A,B); C=0 when the min is A, C=1 otherwise. Same
                  * destination bit as MAX above. */
                 int64_t sa = sext40(s->a), sb = sext40(s->b);
-                int a_is_min = (sa <= sb);
+                int a_is_min = (sa < sb);     /* [2026-09-21] equal: dst = B, C = 1 (isa_test 128) */
                 int64_t mn = a_is_min ? sa : sb;
                 if ((op >> 8) & 1) s->b = sext40(mn); else s->a = sext40(mn);
                 if (a_is_min) s->st0 &= ~ST0_C; else s->st0 |= ST0_C;
@@ -2284,9 +2300,11 @@ int c54x_exec_one(C54xState *s)
             /* F49F/F59F: RND src (round, mask FCFF, 1 word). binutils:
              * "rnd" 1,1,2, 0xF49F, 0xFCFF, {OP_SRC,OPT|OP_DST}. */
             if ((op & 0xFCFF) == 0xF49F) {
-                int src = (op >> 8) & 1;
-                int64_t *acc = src ? &s->b : &s->a;
-                *acc = sext40(*acc + 0x8000);
+                /* [2026-09-21] src/dst bits as for NEG/ABS (c54x_f4_srcdst):
+                 * `RND A, B` (F59F) rounded B into B. isa_test 170. */
+                int src, dst; c54x_f4_srcdst(op, &src, &dst);
+                int64_t v = sext40((src ? s->b : s->a) + 0x8000);
+                if (dst) s->b = v; else s->a = v;
                 return consumed + s->lk_used;
             }
 
@@ -2321,7 +2339,9 @@ int c54x_exec_one(C54xState *s)
                 int shift = op & 0x1F; if (shift > 15) shift -= 32;
                 int64_t sv = sext40(src ? s->b : s->a);
                 if (shift >= 0) sv <<= shift; else sv >>= (-shift);
-                if (dst) s->b = sext40(s->b + sv); else s->a = sext40(s->a + sv);
+                int64_t dv = sext40(dst ? s->b : s->a);
+                c54x_carry_add40(s, dv, sv);                     /* [2026-09-21] isa_test 6 */
+                if (dst) s->b = sext40(dv + sv); else s->a = sext40(dv + sv);
                 return consumed + s->lk_used;
             }
 
@@ -2330,7 +2350,9 @@ int c54x_exec_one(C54xState *s)
                 int shift = op & 0x1F; if (shift > 15) shift -= 32;
                 int64_t sv = sext40(src ? s->b : s->a);
                 if (shift >= 0) sv <<= shift; else sv >>= (-shift);
-                if (dst) s->b = sext40(s->b - sv); else s->a = sext40(s->a - sv);
+                int64_t dv = sext40(dst ? s->b : s->a);
+                c54x_carry_sub40(s, dv, sv);                     /* [2026-09-21] isa_test 227 */
+                if (dst) s->b = sext40(dv - sv); else s->a = sext40(dv - sv);
                 return consumed + s->lk_used;
             }
 
@@ -5519,7 +5541,11 @@ int c54x_exec_one(C54xState *s)
             v = (ts >= 0) ? (v << ts) : (v >> -ts);
         }
         {
+            /* [2026-09-21] SUBB subtracts the BORROW, the logical inverse of C
+             * (SPRU172C example: A=6, C=0, SUBB 6 -> A=-1 ; B=..06, C=1, SUBB 6
+             * -> B=..00). isa_test 229/230. ADDC adds C. */
             int64_t c = with_carry ? ((s->st0 & ST0_C) ? 1 : 0) : 0;
+            if (is_sub && with_carry) c = 1 - c;
             if (is_sub) {
                 if (dst) s->b = sext40(s->b - v - c);
                 else     s->a = sext40(s->a - v - c);

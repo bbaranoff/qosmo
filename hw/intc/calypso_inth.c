@@ -69,6 +69,7 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
     case 0x80:
     {
         uint16_t num = s->ith_v;
+        s->last_num = num;
 
         if (num == 4 || num == 5 || num == 15) {
             s->levels &= ~(1u << num);
@@ -140,6 +141,9 @@ static void calypso_inth_write(void *opaque, hwaddr offset, uint64_t value,
 
             s->rr_start = (svc + 1) % CALYPSO_INTH_NUM_IRQS;
         }
+        if ((value & 1) && s->last_num == 4) {
+            s->frame_eoi++;          /* l1_sync() of the firmware is over */
+        }
         calypso_inth_update(s);
         break;
     }
@@ -193,6 +197,16 @@ void calypso_inth_arm_ack(void)
     }
 }
 
+uint64_t calypso_inth_frame_eoi(void)
+{
+    return g_inth ? g_inth->frame_eoi : 0;
+}
+
+bool calypso_inth_irq_masked(int irq)
+{
+    return !g_inth || (g_inth->mask & (1u << irq));
+}
+
 static void calypso_inth_realize(DeviceState *dev, Error **errp)
 {
     g_inth = CALYPSO_INTH(dev);
@@ -217,6 +231,8 @@ static void calypso_inth_reset(DeviceState *dev)
     s->ith_v = 0;
     s->fiq_v = 0;
     s->rr_start = 0;
+    s->last_num = 0;
+    s->frame_eoi = 0;
     memset(s->ilr, 0, sizeof(s->ilr));
 }
 

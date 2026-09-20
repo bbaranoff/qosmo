@@ -11,6 +11,7 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
 #include "hw/arm/calypso/calypso_trx.h"
+#include "hw/arm/calypso/calypso_inth.h"
 /* l1-dsp/ is only linked under --enable-l1-dsp: WEAK symbol, tested before the
  * call, so this file stays common to both L1s (see the l1-dsp island). */
 extern void calypso_twl3025_set_afc_dac(int16_t dac_value) __attribute__((weak));
@@ -77,6 +78,19 @@ typedef struct CalypsoTRX {
     unsigned fn_offset_n;
     bool fn_synced;
     bool tdma_running;
+    /* [2026-09-21] ARM FIRST (lock-step): the TICK of frame N is handed to the
+     * DSP only once the firmware's l1_sync(N) is over (INTH end of service of
+     * the frame IRQ). The TICK parameters are latched when the frame IRQ is
+     * raised: DSP_EN and d_dsp_page then still describe the scenario the ARM
+     * ended in frame N-1, i.e. the one the DSP must run in frame N.
+     * [2026-09-21] Two phases: TICK before the ARM IRQ (the ROM's ISR reads
+     * the page of N-1 and writes the R page), PONT_GO after l1_sync(N). */
+    int      tick_phase;        /* 0: frame start, 1: waiting for phase A + the ARM's l1_sync */
+    bool     deux_phases;       /* set while pont_echange() must flag the TICK */
+    bool     phase_a_recue;     /* DONE|PHASE_A of this frame collected */
+    bool     go_inutile;        /* single-phase DSP answered a final DONE already */
+    uint64_t eoi_cible;         /* frame_eoi to reach before the TICK goes out */
+    unsigned eoi_attentes, eoi_timeouts;
     uint8_t burst_ring[8];
     unsigned burst_w, burst_r;
     uint16_t burst_cur;
@@ -570,6 +584,19 @@ static void *wall_clock_loop(void *arg)
     return NULL;
 }
 
+/* TICK.b: d_dsp_page plus the one-shot DSP frame interrupt bit, consumed here. */
+static uint32_t pont_tick_b(CalypsoTRX *s)
+{
+    uint32_t b = s->dsp_page;
+    bool arme = (s->tpu_regs[TPU_CTRL / 2] & TPU_CTRL_DSP_EN) &&
+                !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_DSP_FRAME);
+    if (arme) {
+        b |= CALYPSO_PONT_TICK_IRQ_TRAME;
+        s->tpu_regs[TPU_CTRL / 2] &= (uint16_t)~TPU_CTRL_DSP_EN;
+    }
+    return b;
+}
+
 /* One TICK/DONE exchange with the external DSP: collect the previous frame's
  * DONE without blocking, then send this frame's TICK if the DSP is idle. */
 static void pont_echange(CalypsoTRX *s)
@@ -608,16 +635,25 @@ static void pont_echange(CalypsoTRX *s)
      * ICTRL_DSP_FRAME is active-low (tpu_frame_irq_en). */
     uint32_t b = s->dsp_page;
     if (libre) {
-        bool arme = (s->tpu_regs[TPU_CTRL / 2] & TPU_CTRL_DSP_EN) &&
-                    !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_DSP_FRAME);
-        if (arme) {
-            b |= CALYPSO_PONT_TICK_IRQ_TRAME;
-            s->tpu_regs[TPU_CTRL / 2] &= (uint16_t)~TPU_CTRL_DSP_EN;
+        b = pont_tick_b(s);
+        if (s->deux_phases) {
+            b |= CALYPSO_PONT_TICK_DEUX_PHASES;
         }
     }
     if (libre && pont_send(s, PONT_TICK, s->fn, b, s->tpu_regs[TPU_OFFSET / 2])) {
         s->pont_pending = true;
     }
+}
+
+static bool arm_first(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *ls = getenv("CALYPSO_PONT_LOCKSTEP");
+        const char *e = getenv("CALYPSO_PONT_ARM_FIRST");
+        v = (ls && *ls == '1' && !(e && *e == '0')) ? 1 : 0;
+    }
+    return v;
 }
 
 /* Before the firmware enables the TPU (which starts tdma_tick) the external
@@ -639,11 +675,82 @@ static void pont_boot_tick(void *opaque)
     timer_mod_ns(s->pont_boot_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
 }
 
+static void tdma_pacer(CalypsoTRX *s);
+
 static void tdma_tick(void *opaque)
 {
     CalypsoTRX *s = opaque;
     if (!runstate_is_running()) {
         timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
+        return;
+    }
+    /* [2026-09-21] ARM FIRST, phase 1: the frame IRQ of frame fn went to the
+     * ARM; hand the frame to the DSP once l1_sync(fn) is over. Measured before
+     * this: the DSP wrote the R page of burst N while the ARM was still
+     * reading burst N-2 from it (prim_rx_nb.c "BURST ID 2!=0", "EMPTY"),
+     * with a lag that drifted with the ARM's load. On silicon the ARM reads at
+     * the frame start and the DSP writes after the burst, later in the frame. */
+    if (s->tick_phase == 1) {
+        if (!s->phase_a_recue) {
+            CalypsoPontMsg m;
+            if (pont_recv(s, &m, 0) && m.type == PONT_DONE) {
+                if (m.a & PONT_DONE_PHASE_A) {
+                    s->phase_a_recue = true;
+                } else {
+                    /* single-phase DSP: this is the final DONE */
+                    s->pont_pending = false; s->pont_frames++;
+                    s->phase_a_recue = true; s->go_inutile = true;
+                    if (m.a & PONT_DONE_API_IRQ) { s->pont_api_irqs++; qemu_irq_raise(s->irqs[CALYPSO_IRQ_API]); }
+                }
+            }
+            if (s->phase_a_recue) {
+                /* the ROM's ISR is over (page read, R page header written):
+                 * now the ARM's frame, l1_sync(fn) */
+                if (s->eoi_cible < calypso_inth_frame_eoi()) s->eoi_cible = calypso_inth_frame_eoi();
+                s->eoi_cible += 1;
+                calypso_timer_lost_frame_tick(s->fn);
+                qemu_irq_raise(s->irqs[CALYPSO_IRQ_TPU_FRAME]);
+                timer_mod_ns(s->frame_irq_timer,
+                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + FRAME_IRQ_PULSE_NS);
+            }
+        }
+        bool fini = s->phase_a_recue &&
+                    (calypso_inth_frame_eoi() >= s->eoi_cible ||
+                     calypso_inth_irq_masked(CALYPSO_IRQ_TPU_FRAME));
+        if (!fini && ++s->eoi_attentes < 256) {
+            if (g_uart_modem) {
+                calypso_uart_poll_backend(g_uart_modem);
+                calypso_uart_kick_rx(g_uart_modem);
+            }
+            if (g_uart_irda) {
+                calypso_uart_poll_backend(g_uart_irda);
+                calypso_uart_kick_rx(g_uart_irda);
+            }
+            timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 16);
+            return;
+        }
+        if (!fini) {
+            if (!s->phase_a_recue) {
+                /* no ISR answer: give the ARM its frame anyway, do not stall */
+                calypso_timer_lost_frame_tick(s->fn);
+                qemu_irq_raise(s->irqs[CALYPSO_IRQ_TPU_FRAME]);
+                timer_mod_ns(s->frame_irq_timer,
+                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + FRAME_IRQ_PULSE_NS);
+            }
+            s->eoi_cible = calypso_inth_frame_eoi();   /* resync after a lost frame IRQ */
+            if (++s->eoi_timeouts == 1 || (s->eoi_timeouts % 2170) == 0) {
+                fprintf(stderr, "[trx] pont DSP : phase A %s, l1_sync de l'ARM %s apres 256 attentes "
+                        "(fn=%u, %u fois), GO envoye quand meme\n",
+                        s->phase_a_recue ? "recue" : "PAS recue",
+                        calypso_inth_frame_eoi() >= s->eoi_cible ? "finie" : "PAS finie",
+                        s->fn, s->eoi_timeouts);
+            }
+        }
+        s->tick_phase = 0;
+        if (!s->go_inutile) {
+            pont_send(s, PONT_GO, s->fn, 0, 0);
+        }
+        tdma_pacer(s);
         return;
     }
     /* [2026-09-17] DSP LOCK-STEP (CALYPSO_PONT_LOCKSTEP=1): advance the frame
@@ -739,17 +846,40 @@ static void tdma_tick(void *opaque)
          * collected at tick N+1 without blocking; if it is missing the DSP is
          * late and this tick is skipped for it. Cost: the API IRQ arrives one
          * frame later than with the internal DSP. */
+        /* ARM FIRST: the TICK goes out now (phase A, the ROM's frame ISR),
+         * the burst only after l1_sync(fn), with PONT_GO (phase B). */
+        if (arm_first()) {
+            s->deux_phases = true;
+        }
         pont_echange(s);
+        s->deux_phases = false;
     } else {
         *api_wp(s->dsp_page, WP_D_TASK_RA) = 0;
         *api_wp(s->dsp_page, WP_D_TASK_U) = 0;
     }
 
+    if (s->pont && s->pont_fd >= 0 && arm_first() && s->pont_pending) {
+        /* Two phases: the ARM frame IRQ waits for DONE|PHASE_A (the ROM's ISR
+         * has read its page), then l1_sync(fn), then PONT_GO. The EOI target
+         * is cumulative: one end of service per frame IRQ raised, so a lagging
+         * l1_sync(N-1) cannot pass for l1_sync(N). Resynchronised on timeout. */
+        s->eoi_attentes = 0;
+        s->phase_a_recue = false;
+        s->go_inutile = false;
+        s->tick_phase = 1;
+        timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 16);
+        return;
+    }
     calypso_timer_lost_frame_tick(s->fn);
     qemu_irq_raise(s->irqs[CALYPSO_IRQ_TPU_FRAME]);
     timer_mod_ns(s->frame_irq_timer,
                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + FRAME_IRQ_PULSE_NS);
+    tdma_pacer(s);
+}
 
+/* Next frame at the TDMA pace of the wall clock (or as soon as we are late). */
+static void tdma_pacer(CalypsoTRX *s)
+{
     static int64_t target;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     if (target == 0) {

@@ -3766,6 +3766,34 @@ int c54x_run(C54xState *s, int n_insns)
         uint16_t t_avant_piste = s->t; uint16_t pc_avant_piste = s->pc;
         int64_t a_avant_piste = s->a, b_avant_piste = s->b;
         consumed = c54x_exec_one(s);
+        /* [2026-09-21] OVERFLOW AND OVM. The core computed 40-bit results and
+         * never set OVA/OVB nor honoured OVM (grep: OVM appeared in comments
+         * only). On silicon every ALU/MAC/shift result that leaves the 32-bit
+         * range sets OVdst and, with OVM=1, is saturated to 0x7FFFFFFF /
+         * 0xFF80000000 (SPRU172C 3.x "overflow handling"). The normal-burst
+         * demodulator of the ROM sets and resets OVM 20 times per burst and
+         * SATs 214 times: its arithmetic relies on this. Measured before the
+         * fix: the demod of a normal burst was perfect or random depending on
+         * the data (bursts 2 of SI3, 1 of SI1/SI4 only), the same burst in
+         * four positions gave four results, and the ISA scorecard failed NEG,
+         * ABS, RND on exactly these semantics. Applied after the instruction
+         * on the accumulator(s) it wrote; dual 16-bit mode (C16) is exempt
+         * ("unsaturated"). CALYPSO_C54X_OVM=0 restores the old behaviour. */
+        {
+            static int ovm_on = -1;
+            if (ovm_on < 0) { const char *e = getenv("CALYPSO_C54X_OVM"); ovm_on = (e && *e == '0') ? 0 : 1; }
+            if (ovm_on && !(s->st1 & ST1_C16)) {
+                for (int k = 0; k < 2; k++) {
+                    int64_t *acc = k ? &s->b : &s->a;
+                    if (*acc == (k ? b_avant_piste : a_avant_piste)) continue;
+                    int64_t v = sext40(*acc);
+                    if (v > 0x7FFFFFFFLL || v < -0x80000000LL) {
+                        s->st0 |= k ? ST0_OVB : ST0_OVA;
+                        if (s->st1 & ST1_OVM) *acc = (v < 0) ? (int64_t)0xFF80000000LL : 0x7FFFFFFFLL;
+                    }
+                }
+            }
+        }
         /* PISTE-T: logs EVERY change of the T register inside an instruction
          * window (CALYPSO_T_LO / CALYPSO_T_HI, in insns). Motivation: every
          * mpy of the SB chain computes T*Smem with T == 0 while the memory

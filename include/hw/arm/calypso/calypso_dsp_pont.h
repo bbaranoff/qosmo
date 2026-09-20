@@ -50,6 +50,7 @@ enum CalypsoPontType {
     PONT_RESET    = 3,  /* QEMU -> DSP : l'ARM a ecrit DL_STATUS (a = valeur)   */
     PONT_TICK     = 4,  /* QEMU -> DSP : une trame TDMA, a = fn, b = d_dsp_page */
     PONT_DONE     = 5,  /* DSP -> QEMU : trame jouee, a = drapeaux, b = insns    */
+    PONT_GO       = 6,  /* QEMU -> DSP : l1_sync de l'ARM finie, livrer le burst (2 phases) */
     PONT_BYE      = 6,  /* l'un ou l'autre : fin propre                          */
 };
 
@@ -62,6 +63,15 @@ enum CalypsoPontType {
  * arme l'interruption trame du DSP (TPU_CTRL_DSP_EN, a usage unique) depuis le
  * tick precedent. Sans ce bit le DSP ne recoit pas d'interruption trame. */
 #define CALYPSO_PONT_TICK_IRQ_TRAME (1u << 16)
+/* [2026-09-21] TICK EN DEUX PHASES (bit 17). La ROM demodule le burst de la
+ * trame N et ecrit la page R dans son ISR de trame N+1, PUIS lit la page W ;
+ * l'ARM lit cette page R dans l1_sync(N+1) et poste la page W de N+2. L'ordre
+ * silicium dans une trame est donc : ISR DSP (resultats + dispatch) ->
+ * l1_sync ARM -> reception du burst. Avec ce bit le DSP joue l'ISR jusqu'a
+ * l'armement de la fenetre RX, repond DONE|PONT_DONE_PHASE_A, et attend
+ * PONT_GO (envoye quand l1_sync est finie) pour livrer le burst et finir. */
+#define CALYPSO_PONT_TICK_DEUX_PHASES (1u << 17)
+#define PONT_DONE_PHASE_A   (1u << 4)   /* ISR jouee, burst pas encore livre : attend PONT_GO */
 
 typedef struct {
     uint32_t type;
