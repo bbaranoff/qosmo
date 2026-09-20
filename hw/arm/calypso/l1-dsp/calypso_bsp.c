@@ -46,6 +46,7 @@ static uint32_t d_rach_word_offset(void);
 static int rach_force_bsic(void);
 
 #include "hw/arm/calypso/calypso_debug.h"
+#include "calypso_gmsk.h"
 
 /* DARAM write stamp, published for the c54x memory dump. */
 unsigned calypso_daram_last_fn;
@@ -853,19 +854,15 @@ static void bsp_trxd_readable(void *opaque)
     } else {
         /* Q15 full-scale amplitude: real BSP/IOTA delivers near-full-range Q15
          * samples. ±0x7FFE keeps one bit of headroom below INT16_MIN. */
-        static const int16_t cos_tab[4] = { 0x7FFE, 0, -0x7FFE, 0 };
-        static const int16_t sin_tab[4] = { 0, 0x7FFE, 0, -0x7FFE };
-        int phase_idx = 0;
-        for (int i = 0; i < nbits; i++) {
-            /* Emit BEFORE advancing, so the first sample is at phase 0 rather
-             * than pi/2. Advance-then-emit shifted the whole burst by 90
-             * degrees, putting the DSP coherent correlation in quadrature
-             * instead of in-phase: d_fb_det came out mostly negative
-             * (+23k, an occasional +20k, then four consecutive -5k). */
-            iq[iq_count++] = cos_tab[phase_idx];  /* I — phase_idx before advance */
-            iq[iq_count++] = sin_tab[phase_idx];  /* Q */
-            phase_idx = (phase_idx + (bits[i] ? 3 : 1)) & 3;
-        }
+        /* [2026-09-20] GMSK (BT = 0.3, one sample per symbol at the symbol
+         * centre), the same modulator as the synthetic cell of c54x_exe. The
+         * hard +-90-degree MSK used before (I/Q on the phase points, full scale)
+         * let the ROM find the FCCH tone but not decode the SCH: replayed on the
+         * c54x_exe bench with that modulation, 1 CRC OK on 81 SB attempts
+         * against 27 on 76 with GMSK, and the FB frequency estimate wandered to
+         * +1050 Hz. Amplitude 30000 as the synthetic cell. */
+        gmsk_moduler(bits, nbits, 30000, 0.0, 0.5, iq + iq_count);
+        iq_count += 2 * nbits;
 
         /* WINDOW WIDENING — CALYPSO_BSP_RX_WINDOW.
          *
@@ -910,9 +907,8 @@ static void bsp_trxd_readable(void *opaque)
                             win, nbits, win - nbits);
             }
             for (int g = nbits; g < win && iq_count + 1 < BSP_IQ_MAX_I16; g++) {
-                iq[iq_count++] = cos_tab[phase_idx];
-                iq[iq_count++] = sin_tab[phase_idx];
-                phase_idx = (phase_idx + 3) & 3;   /* guard bit = 1 */
+                iq[iq_count++] = 0;                 /* guard: silence */
+                iq[iq_count++] = 0;
             }
         }
     }
