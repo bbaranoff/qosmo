@@ -193,9 +193,15 @@ double calypso_twl3025_get_afc_phase_step(void)
      * 4095 (+34 kHz) instead of converging: it does not match the sign of the
      * emulated DSP freq_error measurement. A/B with
      * CALYPSO_TWL3025_AFC_SIGN_OLD=1 to restore the old minus sign. */
-    static int sign_old = -1;
-    if (sign_old < 0) sign_old = getenv("CALYPSO_TWL3025_AFC_SIGN_OLD") ? 1 : 0;
-    return (sign_old ? -1.0 : 1.0) * 2.0 * M_PI * hz / GSM_SAMPLE_RATE_HZ;
+    /* [2026-09-20] Sign is MINUS again. The 2026-08-22 flip to plus was measured
+     * against a DSP whose FB angle was garbage (ADD/SUB Smem,16, the 0xF4 group
+     * and CPL addressing were wrong, see c54x_exe tools/isa_test). With the ISA
+     * fixed, plus is POSITIVE feedback on the deterministic replay (df -146 ->
+     * -182 -> -456 -> -799 -> -1714 -> -3421 Hz, doubling per FB) and minus
+     * converges to |df| < 110 Hz. CALYPSO_TWL3025_AFC_SIGN_PLUS=1 for A/B. */
+    static int sign_plus = -1;
+    if (sign_plus < 0) sign_plus = getenv("CALYPSO_TWL3025_AFC_SIGN_PLUS") ? 1 : 0;
+    return (sign_plus ? 1.0 : -1.0) * 2.0 * M_PI * hz / GSM_SAMPLE_RATE_HZ;
 }
 
 void calypso_twl3025_apply_phase(int16_t *iq_samples, int n_samples,

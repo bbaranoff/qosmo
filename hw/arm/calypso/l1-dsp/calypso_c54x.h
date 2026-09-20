@@ -86,7 +86,9 @@
 #define ST1_INTM     (1 << 11)
 #define ST1_HM       (1 << 12)
 #define ST1_XF       (1 << 13)
-#define ST1_BRAF     (1 << 14)
+#define ST1_CPL      (1 << 14)  /* compiler mode: direct addressing is SP-relative */
+#define ST1_BRAF     (1 << 15)  /* block-repeat active. [2026-09-20] Was (1 << 14):
+                                 * every RPTB/RPTBD raised CPL instead of BRAF. */
 
 /* PMST bit positions (per SPRU131: SST=0 SMUL=1 CLKOFF=2 DROM=3 APTS=4 OVLY=5 MP/MC=6) */
 #define PMST_SST     (1 << 0)

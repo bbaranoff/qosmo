@@ -41,5 +41,7 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n);
  * and refills the FIFO from staging, exactly as a DRR read does. No side effect
  * on SPCR: notification is the caller's decision, not the RIF's. */
 int calypso_rif_drain(uint16_t *dst, int max);
+int calypso_rif_level(void);
+void calypso_rif_flush(void);   /* [2026-09-20] receive window closed: drop the rest */
 
 #endif /* CALYPSO_RIF_H */

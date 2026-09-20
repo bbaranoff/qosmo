@@ -49,6 +49,9 @@ static int rach_force_bsic(void);
 
 /* DARAM write stamp, published for the c54x memory dump. */
 unsigned calypso_daram_last_fn;
+/* [2026-09-19] fn du dernier burst effectivement remis au BSP, pour mesurer
+ * l'ecart entre le DEPOT et l'EVALUATION par la tache DSP (sonde DECALAGE). */
+unsigned g_depot_fn, g_depot_seq;
 unsigned calypso_daram_wr_count;
 #define BSP_LOG(fmt, ...) \
     do { if (calypso_debug_enabled("BSP")) \
@@ -507,9 +510,17 @@ static struct {
     int      n;
     uint16_t addr;
     uint32_t fn;
+    uint16_t page;   /* d_dsp_page as it stood when the burst was handed over */
 } bsp_verif_h[BSP_VERIF_HIST];
 static unsigned bsp_verif_pos;   /* next slot to write */
 static int      bsp_verif_plein; /* how many slots hold a burst */
+
+/* d_dsp_page of the burst the last compare() matched. Sampled per burst, so a
+ * [verif] line can state the page EXACTLY instead of interpolating it from the
+ * every-37th [bsp-page] trace — which is what made the first page/address
+ * correlation unreadable. */
+static uint16_t bsp_verif_last_page;
+uint16_t calypso_bsp_verif_last_page(void) { return bsp_verif_last_page; }
 
 /* Compare DARAM against each recorded burst and return the best match. *age is
  * 0 for the burst handed over on this frame, 1 for the previous one, and so on;
@@ -528,6 +539,7 @@ int calypso_bsp_verif_compare(uint32_t *fn, uint16_t *addr, int *n, int *age)
         if (ident > best) { best = ident; best_age = a; }
     }
     unsigned b = (bsp_verif_pos + BSP_VERIF_HIST - 1 - (unsigned)best_age) % BSP_VERIF_HIST;
+    bsp_verif_last_page = bsp_verif_h[b].page;
     if (fn)   *fn   = bsp_verif_h[b].fn;
     if (addr) *addr = bsp_verif_h[b].addr;
     if (n)    *n    = bsp_verif_h[b].n;
@@ -1286,10 +1298,27 @@ skip_udp_listener:
 
 /* ---- DL burst → DSP DARAM ---- */
 
+/* TS1..TS7 filler (see calypso_bsp_set_remplissage): a dummy burst padded to a
+ * 157-symbol timeslot with guard silence; zeros until the bench registers one. */
+static uint16_t g_remplissage[2 * 157];
+void calypso_bsp_set_remplissage(const int16_t *iq, int n_int16)
+{
+    memset(g_remplissage, 0, sizeof g_remplissage);
+    if (!iq || n_int16 <= 0) return;
+    if (n_int16 > 2 * 157) n_int16 = 2 * 157;
+    for (int i = 0; i < n_int16; i++) g_remplissage[i] = (uint16_t)iq[i];
+}
+
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16)
 {
     bsp.bursts_seen++;
+    /* [2026-09-19] Publish the frame of the burst being handed over. The global
+     * existed (c54x_internal.h) but nothing ever wrote it, so every consumer
+     * read 0 — including the rhea-dma transfer trace, which could not be lined
+     * up with the firmware's "=>FB @ FNR X" for want of a frame number. */
+    calypso_daram_last_fn = (unsigned)fn;
+    g_depot_fn = (unsigned)fn; g_depot_seq++;
     /* Liveness marker for the rx_burst path (CALYPSO_DEBUG=BSP-RXBURST). */
     {
         static unsigned rxb_n;
@@ -1306,6 +1335,27 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         return;
     }
     if (n_int16 <= 0 || iq == NULL) return;
+
+    /* [2026-09-20] FULL TIMESLOT. A bare 148-symbol burst (296 words) is padded
+     * with the 8.25 guard symbols of its timeslot (156 symbols, 157 on
+     * timeslots 3 and 7 so a frame is exactly 1250) whenever DMA2 runs in
+     * continuous mode, i.e. during the FB search. There the RIF is a continuous
+     * stream over the WHOLE frame (the firmware divides the ROM's ToA by
+     * BITS_PER_TDMA = 1250, tpu.h) and the ROM counts what it consumes. The
+     * one-shot SB window keeps the block it is given (190 samples with the
+     * margins). CALYPSO_BSP_TRAME_PLEINE=0 disables. */
+    static int pleine = -1;
+    if (pleine < 0) { const char *e = getenv("CALYPSO_BSP_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
+    const bool continu = !calypso_rhea_dma_one_shot();
+    {
+        static int16_t plein[2 * 157];
+        if (pleine && n_int16 <= 296 && continu) {
+            int cible = 2 * (156 + ((tn == 3 || tn == 7) ? 1 : 0));
+            memcpy(plein, iq, (size_t)n_int16 * sizeof(int16_t));
+            memset(plein + n_int16, 0, (size_t)(cible - n_int16) * sizeof(int16_t));
+            iq = plein; n_int16 = cible;
+        }
+    }
 
     /* FOLLOW THE DMA AAD (CALYPSO_BSP_AAD_FOLLOW, default 1). bsp.daram_addr is
      * an env constant (0x2a00) that was never programmed from the address the
@@ -1345,6 +1395,56 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
             }
         }
     }
+    /* [2026-09-19] FOLLOW THE PAGE (CALYPSO_BSP_PAGE_FOLLOW, default 0 — an
+     * experiment, not a behaviour).
+     *
+     * Measured with CALYPSO_BSP_VERIF over 4000 bursts: the address the burst
+     * is deposited at is statistically INDEPENDENT of the page the DSP task is
+     * about to read. Crossing each comparison with d_dsp_page gave
+     *
+     *     w_page=0 -> 0x0cce 2340x, 0x0e4e 272x, 0x2a00 222x
+     *     w_page=1 -> 0x0cce 1024x, 0x0e4e 142x
+     *
+     * the same ~89% share to 0x0cce either way, while the DSP does alternate
+     * its pages properly (d_dsp_page cycles 0x0002/0x0003, never 0x0001). The
+     * burst was found intact in DARAM in 0.4% of cases, and not at all in 46%.
+     * On silicon the API buffer ping-pongs with that bit; here it does not, so
+     * the task reads a page the samples never reached.
+     *
+     * This deposits at base + w_page*stride while the GSM task is active. The
+     * base is the LOWEST address the AAD has shown (0x0cce on this bench, the
+     * page-0 buffer) and the stride defaults to the observed 0x180 = 384 words
+     * separating the two buffers. CALYPSO_BSP_PAGE_STRIDE overrides it and
+     * accepts a NEGATIVE value, which tests the inverted page mapping. */
+    {
+        static int pfollow = -1;
+        static long stride;
+        static uint16_t base0;
+        if (pfollow < 0) {
+            const char *e = getenv("CALYPSO_BSP_PAGE_FOLLOW");
+            pfollow = (e && *e && *e != '0') ? 1 : 0;
+            const char *st = getenv("CALYPSO_BSP_PAGE_STRIDE");
+            stride = (st && *st) ? strtol(st, NULL, 0) : 0x180;
+        }
+        if (pfollow && bsp.dsp && bsp.dsp->api_ram && bsp.daram_addr) {
+            uint16_t pg = bsp.dsp->api_ram[0x08D4 - 0x0800];
+            if (!base0 || bsp.daram_addr < base0) base0 = bsp.daram_addr;
+            if (pg & 2) {                       /* B_GSM_TASK: a task is armed */
+                uint16_t cible = (uint16_t)(base0 + ((pg & 1) ? stride : 0));
+                if (cible != bsp.daram_addr) {
+                    static unsigned nl;
+                    if (nl < 8) {
+                        BSP_LOG("PAGE_FOLLOW : w_page=%d -> depot en 0x%04x "
+                                "(AAD disait 0x%04x, base 0x%04x, pas %+ld)",
+                                (int)(pg & 1), cible, bsp.daram_addr, base0, stride);
+                        nl++;
+                    }
+                    bsp.daram_addr = cible;
+                }
+            }
+        }
+    }
+
     if (bsp.daram_addr == 0) {
         if (bsp.bursts_seen <= 5) {
             BSP_LOG("rx_burst fn=%u tn=%u n=%d (target unset)",
@@ -1448,6 +1548,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
       uint16_t _mdf = c54x_task_md(bsp.dsp);
       int _fbsbf = (_mdf == 5 || _mdf == 6 || _mdf == 8 || _mdf == 9);
       if (_fbf && _fbsbf && bsp.dsp) {
+          { static unsigned _n; if (_n++ == 0) fprintf(stderr, "[bequille] RX_FBFLAGS ACTIF\n"); }
           bsp.dsp->data[0x3fad] |= 0x8000;   /* master kernel gate  @0x8754 */
           calypso_rxfb_fired = 1;   /* arms the 0x8753 probe on the c54x side */
           bsp.dsp->data[0x3faa] |= 0x0104;   /* bit2+bit8           @0x886b/85/98 */
@@ -1468,7 +1569,9 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
            *             never reached without CALYPSO_RX_FBFLAGS.
            */
           { static int _pt = -1; if (_pt < 0) { const char *_pe = getenv("CALYPSO_POKE_TASK_MD"); _pt = _pe ? (atoi(_pe) > 0) : 1; }  /* default ON, =0 to disable */
-            if (_pt) { bsp.dsp->data[0x0804] = _mdf;   /* task_md page0 = mission (5=FB 6=SB) */
+            if (_pt) { static unsigned _n;
+                       if (_n++ == 0) fprintf(stderr, "[bequille] POKE_TASK_MD ACTIF (ecrit d_task_md=%u pages 0/1)\n", _mdf);
+                       bsp.dsp->data[0x0804] = _mdf;   /* task_md page0 = mission (5=FB 6=SB) */
                        bsp.dsp->data[0x0818] = _mdf; } /* task_md page1 */ }
           /* POKE_DISPATCH replicates osmocom dsp_end_scenario (dsp.c:480):
            * d_task_md on the current WRITE page plus d_dsp_page =
@@ -1563,6 +1666,17 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
             samples[i] = (uint16_t)iq[i];
         c54x_bsp_load(bsp.dsp, samples, ns);
     }
+    /* [2026-09-20] THE OTHER SEVEN TIMESLOTS. The injectors only carry TS0
+     * (the cell's FCCH/SCH/BCCH bursts); on silicon the FB search receives the
+     * whole frame, 1250 symbols, and its ToA counts them. When a TS0 burst
+     * arrives in continuous mode, the idle remainder of the frame follows it
+     * here (no signal on TS1..TS7), so the stream keeps the frame's length.
+     * A caller that delivers all eight timeslots itself passes tn != 0 for the
+     * others and is left alone. */
+    if (pleine && continu && tn == 0 && n_int16 <= 2 * 157) {
+        for (int ts = 1; ts < 8; ts++)
+            c54x_bsp_load(bsp.dsp, g_remplissage, 2 * (156 + ((ts == 3 || ts == 7) ? 1 : 0)));
+    }
 
     /* [2026-09-19] REFERENCE PROBE. Keeps a copy of the burst rx_burst was handed,
      * together with the destination address, length and frame. Everything it needs
@@ -1578,6 +1692,8 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         bsp_verif_h[i].n = nv;
         bsp_verif_h[i].addr = bsp.daram_addr;
         bsp_verif_h[i].fn = fn;
+        bsp_verif_h[i].page = (bsp.dsp && bsp.dsp->api_ram)
+                            ? bsp.dsp->api_ram[0x08D4 - 0x0800] : 0xffffu;
         bsp_verif_pos = (i + 1) % BSP_VERIF_HIST;
         if (bsp_verif_plein < BSP_VERIF_HIST) bsp_verif_plein++;
     }

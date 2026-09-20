@@ -97,7 +97,7 @@
 #define SPCX_RESET   0x059E
 
 #define RIF_FIFO_DEPTH  4        /* THRESHOLD is capped at 4 (§12.6) */
-#define RIF_STAGE_MAX   2048     /* same bound as bsp_buf */
+#define RIF_STAGE_MAX   8192     /* [2026-09-20] a full 1250-symbol frame is 2500 words */
 
 static struct {
     bool     init;
@@ -124,7 +124,16 @@ static struct {
      * room, and bursts forced through by the anti-stall valve. `bp_run` =
      * consecutive refusals in progress. */
     unsigned n_bp_skip, n_bp_force, bp_run;
+    unsigned n_muets;        /* bursts arriving with no receive window open */
 } rif;
+
+/* Discard whatever the receiver still holds (a one-shot window just closed:
+ * the radio stops, the rest of the frame is never received). */
+void calypso_rif_flush(void)
+{
+    rif.fifo_n = 0;
+    rif.stage_pos = rif.stage_n = 0;
+}
 
 bool calypso_rif_on(void)
 {
@@ -355,6 +364,20 @@ bool calypso_rif_portw(C54xState *s, uint16_t pa, uint16_t val)
     }
 }
 
+/* [2026-09-19] How many words the receiver still holds: the FIFO plus the part
+ * of the staging buffer not yet poured into it. A transfer that starts with a
+ * non-zero level begins on LEFTOVERS from an earlier burst, which pushes the
+ * real burst one page further into DARAM — the mechanism behind the TOA ladder
+ * in steps of 48 samples (= one 96-word DMA page) measured on this bench. */
+int calypso_rif_level(void)
+{
+    if (!calypso_rif_on()) return 0;
+    rif_init();
+    int reste = rif.stage_n - rif.stage_pos;
+    if (reste < 0) reste = 0;
+    return rif.fifo_n + reste;
+}
+
 int calypso_rif_drain(uint16_t *dst, int max)
 {
     if (!calypso_rif_on() || !dst || max <= 0)
@@ -388,6 +411,43 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     if (n > RIF_STAGE_MAX)
         n = RIF_STAGE_MAX;
 
+    /* [2026-09-20] The receiver is a STREAM: words not yet drained stay ahead of
+     * the new ones (the hardware shift register does not forget them because a
+     * new burst arrived). The DMA now transfers full pages only and leaves the
+     * tail of a frame in here, so this append is what carries the 156.25
+     * symbols per frame across frame boundaries. Overrun is a real overflow of
+     * the staging area. CALYPSO_RIF_REPLACE=1 restores the old
+     * replace-and-backpressure behaviour for A/B. */
+    static int remplace = -1;
+    if (remplace < 0) remplace = getenv("CALYPSO_RIF_REPLACE") ? 1 : 0;
+    if (!remplace && !calypso_rhea_dma_rx_armed()) {
+        /* [2026-09-20] No receive window open (DMA2 disabled, or its one-shot
+         * window already filled): on silicon the radio is off between windows
+         * and those samples never exist. Queueing them would put a stale
+         * backlog in front of the next window and shift every ToA. */
+        rif.n_muets++;
+        return;
+    }
+    if (!remplace) {
+        int reste = rif.stage_n - rif.stage_pos;
+        if (reste < 0) reste = 0;
+        if (reste && rif.stage_pos)
+            memmove(rif.stage, rif.stage + rif.stage_pos, (size_t)reste * sizeof(uint16_t));
+        rif.stage_n = reste; rif.stage_pos = 0;
+        if (rif.stage_n + n > RIF_STAGE_MAX) {
+            rif.rsrfull = true;
+            if (rif.n_overrun++ < 10)
+                fprintf(stderr, "[rif] OVERRUN #%u : %d mots en attente + %d nouveaux > %d, "
+                        "les plus anciens sont perdus\n", rif.n_overrun, reste, n, RIF_STAGE_MAX);
+            int perte = rif.stage_n + n - RIF_STAGE_MAX;
+            memmove(rif.stage, rif.stage + perte, (size_t)(rif.stage_n - perte) * sizeof(uint16_t));
+            rif.stage_n -= perte;
+        }
+        memcpy(rif.stage + rif.stage_n, w, (size_t)n * sizeof(uint16_t));
+        rif.stage_n += n;
+        rif_refill();
+        rif.n_burst++;
+    } else {
     /* The previous burst was not fully consumed: a real receiver overrun,
      * counted rather than hidden. */
     if (rif.stage_pos < rif.stage_n) {
@@ -439,6 +499,7 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     rif.fifo_n = 0;
     rif_refill();
     rif.n_burst++;
+    }   /* CALYPSO_RIF_REPLACE */
 
     /* §12.6 bits 11/13: the FIRMWARE picked the mode, not this model. */
     bool rint = !(rif.spcr & SPCR_RINT_MASK);

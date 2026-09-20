@@ -180,14 +180,21 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             }
         }
 
-        /* Update ARP */
-        s->st0 = (s->st0 & ~ST0_ARP_MASK) | (nar << ST0_ARP_SHIFT);
+        /* Update ARP - only in compatibility mode (ST1.CMPT = 1, SPRU131G 5.4.1);
+         * with CMPT = 0 the ARP is left alone (manual example MAR *AR3+, ARP stays 0). */
+        if (s->st1 & ST1_CMPT)
+            s->st0 = (s->st0 & ~ST0_ARP_MASK) | (nar << ST0_ARP_SHIFT);
 
         return addr;
     } else {
-        /* Direct addressing: DP:offset */
+        /* Direct addressing. SPRU131G 5.3: CPL=0 -> dma = DP:offset (DP<<7 | 7 bits);
+         * CPL=1 -> dma = SP + offset. [2026-09-20] CPL was ignored: the ROM runs its
+         * C tasks with CPL=1 (0x71d5 `stm #0x6900, ST1` before `cala A`) and clears
+         * it for the hand-written DSP kernels (0x7c20 `rsbx CPL`), so every
+         * SP-relative local in the C parts was read from page DP instead. */
         *indirect = false;
         uint16_t offset = opcode & 0x7F;
+        if (s->st1 & ST1_CPL) return (uint16_t)(s->sp + offset);
         return (dp(s) << 7) | offset;
     }
 }
@@ -201,19 +208,24 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
  * resolve_smem's MOD field decode (bits 6:3). */
 uint16_t resolve_lmem(C54xState *s, uint16_t opcode)
 {
+    /* [2026-09-20] The address is returned AS IS: the C54x reads the high word
+     * at the given address and the low word at address ^ 1 (SPRU172C DADD
+     * example, AR3 = 0101h: hi = data[0101h], lo = data[0100h]). Forcing the
+     * address even swapped the halves of every odd-addressed long operand. */
     if (!(opcode & 0x80)) {
-        /* Direct (DP-relative) - dmad pair, no post-mod. */
-        uint16_t dp = s->st0 & ST0_DP_MASK;
-        return (uint16_t)(((dp << 7) | (opcode & 0x7F)) & 0xFFFE);
+        /* Direct - dmad pair, no post-mod. CPL selects SP- or DP-relative. */
+        uint16_t off = opcode & 0x7F;
+        if (s->st1 & ST1_CPL) return (uint16_t)(s->sp + off);
+        return (uint16_t)(((s->st0 & ST0_DP_MASK) << 7) | off);
     }
     int mod = (opcode >> 3) & 0x0F;
     int nar = opcode & 0x07;
-    uint16_t addr = s->ar[nar] & 0xFFFE;
+    uint16_t addr = s->ar[nar];
     switch (mod) {
     case 0x0: break;                                              /* *ARn      */
     case 0x1: s->ar[nar] -= 2; break;                             /* *ARn-     */
     case 0x2: s->ar[nar] += 2; break;                             /* *ARn+     */
-    case 0x3: s->ar[nar] += 2; addr = s->ar[nar] & 0xFFFE; break; /* *+ARn     */
+    case 0x3: s->ar[nar] += 2; addr = s->ar[nar]; break;          /* *+ARn     */
     case 0x4: s->ar[nar] = c54x_revcarry(s, s->ar[nar], s->ar[0], 1); break; /* *ARn-0B */
     case 0x5: s->ar[nar] -= s->ar[0]; break;                                 /* *ARn-0  */
     case 0x6: s->ar[nar] += s->ar[0]; break;                                 /* *ARn+0  */
@@ -222,12 +234,12 @@ uint16_t resolve_lmem(C54xState *s, uint16_t opcode)
     case 0x9: s->ar[nar] = c54x_circ_ref(s->ar[nar], -(int16_t)s->ar[0], s->bk); break; /* *ARn-0% */
     case 0xA: s->ar[nar] = c54x_circ_ref(s->ar[nar], +2, s->bk); break;                 /* *ARn+%  */
     case 0xB: s->ar[nar] = c54x_circ_ref(s->ar[nar], +(int16_t)s->ar[0], s->bk); break; /* *ARn+0% */
-    case 0xC: addr = (uint16_t)((s->ar[nar] + prog_fetch(s, s->pc + 1)) & 0xFFFE); s->lk_used = true; break;
-    case 0xD: s->ar[nar] += prog_fetch(s, s->pc + 1); addr = s->ar[nar] & 0xFFFE; s->lk_used = true; break;
+    case 0xC: addr = (uint16_t)(s->ar[nar] + prog_fetch(s, s->pc + 1)); s->lk_used = true; break;
+    case 0xD: s->ar[nar] += prog_fetch(s, s->pc + 1); addr = s->ar[nar]; s->lk_used = true; break;
     case 0xE: { uint16_t lk = prog_fetch(s, s->pc + 1);
                 s->ar[nar] = c54x_circ_ref(s->ar[nar], (int16_t)lk, s->bk);
-                addr = s->ar[nar] & 0xFFFE; s->lk_used = true; break; }
-    case 0xF: addr = (uint16_t)(prog_fetch(s, s->pc + 1) & 0xFFFE); s->lk_used = true; break;
+                addr = s->ar[nar]; s->lk_used = true; break; }
+    case 0xF: addr = prog_fetch(s, s->pc + 1); s->lk_used = true; break;
     }
     return addr;
 }

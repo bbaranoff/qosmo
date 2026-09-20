@@ -65,6 +65,7 @@
 #include "calypso_rhea_dma.h"
 #include "calypso_rif.h"
 #include "calypso_c54x.h"
+#include "calypso_bsp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,26 @@ static struct {
     struct { uint16_t rad, rdpth, aad, algth, ctrl, cur_off; } ch[4];
     unsigned n_wr, n_rd, n_start;
 } rd;
+static C54xState *rd_dsp;   /* the DSP served by the last request (for pumps) */
+/* [2026-09-20] TOA ORIGIN. On silicon the FB search starts consuming the sample
+ * stream at a TPU-timed instant inside the frame, and the firmware's constant
+ * 23 (prim_fbsb.c "toa -= 23") encodes where a burst aligned on the frame then
+ * lands. The bench has no TPU: the DSP arms DMA2 at the frame interrupt and the
+ * frame's samples follow, so a burst at frame position 0 read TOA = 144. The
+ * gap is closed HERE, where the timing lives: when the channel is armed in
+ * continuous mode, the first CALYPSO_RHEA_DMA_ARM_SKIP words of the stream
+ * (default 242 = 121 symbols = 144 - 23) are consumed without being stored. */
+static int rd_skip_pending;
+static int arm_skip_words(void)
+{
+    static int v = -1;
+    /* Default 0 since the stream carries whole 1250-symbol frames: measured
+     * TOA = 23 + 9 x 1250 + 7 for an FCCH nine frames after the command, i.e.
+     * the ROM's own origin already matches the firmware's 23. (242 was the
+     * calibration for the earlier 156-symbol frames.) */
+    if (v < 0) { const char *e = getenv("CALYPSO_RHEA_DMA_ARM_SKIP"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
+    return v;
+}
 
 static bool rhea_dma_on(void)
 {
@@ -267,6 +288,8 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
              * The write is inert here only because ENABLE is already 0. Count
              * those passes instead of repeating them, and log everything that
              * CHANGES the state or sets ENABLE/DMA_START. */
+            if (n == 1 && (v & CTRL_ENABLE) && !(before & CTRL_ENABLE) && !(v & CTRL_ONE_SHOT))
+                rd_skip_pending = arm_skip_words();      /* FB search armed: set the TOA origin */
             bool inerte = (rd.ch[n].ctrl == before) && !(v & CTRL_DMA_START);
             if (inerte) {
                 static unsigned long long n_rmw[4];
@@ -378,6 +401,7 @@ void calypso_rhea_dma_rx_request(C54xState *s)
 
     const int n = 1;                 /* DMA2 = RIF RX channel (§6 Table 2) */
     uint16_t ctrl = rd.ch[n].ctrl;
+    if (s) rd_dsp = s;
 
     /* ═══════════════════════════════════════════════════════════════════════
      * The IDLE bit is driven by the HARDWARE, CAL207 §11.3.5: "1 IDLE: 0 = DMA
@@ -471,12 +495,60 @@ void calypso_rhea_dma_rx_request(C54xState *s)
      * impossible, which is enough to explain SI=0 without blaming demodulation.
      * A burst therefore needs about 3 pages, drained in one pass. */
     rd.ch[n].ctrl &= (uint16_t)~CTRL_IDLE;      /* 0 = transfer running */
+    /* [2026-09-19] What the receiver already held BEFORE this transfer, and how
+     * each page filled. A transfer that opens on a non-zero level starts on the
+     * tail of an earlier burst, so the real burst begins one page further in —
+     * which is what a TOA quantised to multiples of 48 samples (one 96-word
+     * page) looks like from the correlator. */
+    int niveau_avant = calypso_rif_level();
+    int got_page[8] = {0};
+    int premier_nz = -1;
     int total = 0, pages = 0;
     /* Non-zero words are accumulated page by page: `buf` holds ONLY the last
      * page (max_words words), so scanning buf[0..total[ would read leftovers. */
     int nz_total = 0;
     uint16_t head8[8] = {0};
+    /* [2026-09-20] STREAM SEMANTICS. The RIF is a continuous sample stream and
+     * the DMA fires when a PAGE is full, not when a burst was handed over:
+     *   - double-buffer mode (ONE_SHOT=0, the FB search: ALGTH=192 -> 96-word
+     *     pages at 0x0cce and 0x0d2e): only FULL pages are transferred, a partial
+     *     tail stays in the receiver for the next frame; at most the two pages
+     *     are filled per request, then ONE interrupt, and the ROM's ISR consumes
+     *     both halves (0xb2c1 selects the half by the parity of 0x3fb4, which it
+     *     advances by 2 per interrupt = 2 x 48 samples). Refilling page 0 before
+     *     the ISR ran would corrupt the half being processed, so the caller
+     *     pumps the next pages once the DSP is idle (calypso_rhea_dma_pump).
+     *   - one-shot mode (the SB window, ALGTH=764): the single page takes what is
+     *     there, partial or not, and interrupts.
+     * Measured before: a 312-word frame drained in one pass raised one interrupt,
+     * the ROM counted 2 blocks per frame instead of 3.25 and its TOA advanced 96
+     * per frame where the firmware divides by 156. */
+    const bool one_shot = (ctrl & CTRL_ONE_SHOT) != 0;
+    /* [2026-09-20] The double buffer is not refilled while its completion is
+     * still pending: IRQ_STATE is cleared when the ISR reads DMA2_CTRL, and
+     * until then both pages belong to the DSP. Transferring anyway raised a
+     * second INT10n on top of the first (one interrupt lost) and overwrote the
+     * pages under the ISR. Measured: 13 pairs handed over per frame, the ROM
+     * counted 6 (0x3fb4 += 12 instead of 26). The words wait in the receiver;
+     * calypso_rhea_dma_pump() moves them once the DSP is idle. */
+    if (!one_shot && (ctrl & CTRL_IRQ_STATE))
+        return;
+    if (!one_shot && rd_skip_pending > 0) {
+        static uint16_t poubelle[256];
+        while (rd_skip_pending > 0) {
+            int m = rd_skip_pending < 256 ? rd_skip_pending : 256;
+            int g = calypso_rif_drain(poubelle, m);
+            if (g <= 0) break;
+            rd_skip_pending -= g;
+        }
+        if (rd_skip_pending > 0) {              /* origin not reached yet: nothing to store */
+            rd.ch[n].ctrl |= CTRL_IDLE;
+            return;
+        }
+    }
     for (;;) {
+        if (!one_shot && calypso_rif_level() < max_words)
+            break;                                /* wait for a full page */
         int got = calypso_rif_drain(buf, max_words);
         if (got <= 0)
             break;
@@ -494,15 +566,30 @@ void calypso_rhea_dma_rx_request(C54xState *s)
          * when the whole burst is drained in one synchronous pass. Contiguous
          * pages give a flat [0x0cce..0x0df6) the correlator can read whole.
          * A/B: CALYPSO_RHEA_DMA_PINGPONG=1 restores the 2-page ping-pong. */
-        unsigned pdst = dst_idx + (unsigned)(pages * max_words);
+        /* [2026-09-20] Ping-pong is the default again: page 0 at AAD, page 1 at
+         * AAD+ALGTH, following CURRENT_PAGE (§11.3.5). The FB ROM reads exactly
+         * those two 96-word halves (0x0cce / 0x0d2e); contiguous pages 2 and 3
+         * landed past them. CALYPSO_RHEA_DMA_CONTIGU=1 restores the old layout. */
+        unsigned pdst = dst_idx;
+        if (rd.ch[n].ctrl & CTRL_CURRENT_PAGE)
+            pdst = dst_idx + (unsigned)max_words;   /* 2nd API page = AAD+ALGTH */
         {
-            static int pingpong = -1;
-            if (pingpong < 0) pingpong = getenv("CALYPSO_RHEA_DMA_PINGPONG") ? 1 : 0;
-            if (pingpong) {
-                pdst = dst_idx;
-                if (rd.ch[n].ctrl & CTRL_CURRENT_PAGE)
-                    pdst = dst_idx + (unsigned)max_words;   /* 2nd API page = AAD+ALGTH */
-            }
+            static int contigu = -1;
+            if (contigu < 0) contigu = getenv("CALYPSO_RHEA_DMA_CONTIGU") ? 1 : 0;
+            if (contigu) pdst = dst_idx + (unsigned)(pages * max_words);
+        }
+        /* [2026-09-19] Does the burst DMA ever land ON a_sch? a_sch[0..4] sit at
+         * API words 0x37..0x3b (R page 0) and 0x4b..0x4f (R page 1). The cell
+         * carries plain numbers (0x1111, 0x1388) that no firmware and no DSP
+         * probe accounts for -- and an I/Q sample is exactly a plain number.
+         * If a burst is deposited over the SB result, that is the carnage. */
+        if ((pdst <= 0x3b && pdst + (unsigned)got > 0x37) ||
+            (pdst <= 0x4f && pdst + (unsigned)got > 0x4b)) {
+            static unsigned nov;
+            if (nov++ < 20)
+                fprintf(stderr, "[rhea-dma] *** ECRASEMENT a_sch : depot %u mots en "
+                        "0x%04x..0x%04x recouvre a_sch (0x37..0x3b / 0x4b..0x4f) ***\n",
+                        got, pdst, pdst + got - 1);
         }
         for (int i = 0; i < got; i++)
             if (pdst + (unsigned)i < C54X_API_SIZE)
@@ -512,12 +599,25 @@ void calypso_rhea_dma_rx_request(C54xState *s)
             if (buf[i]) nz_total++;
         if (pages == 0)
             for (int i = 0; i < 8 && i < got; i++) head8[i] = buf[i];
+        /* [2026-09-19] Where the burst actually STARTS inside the window. The
+         * cell injector leaves marge=21 samples of silence on each side of a
+         * 148-symbol burst in a 190-sample window, so the first non-zero word
+         * is expected at index 42 (21 samples x 2 words). Anything else means
+         * the SB task is handed a burst that does not sit where it looks. */
+        if (premier_nz < 0)
+            for (int i = 0; i < got; i++)
+                if (buf[i]) { premier_nz = total + i; break; }
 
+        if (pages < 8) got_page[pages] = got;
         total += got;
         pages++;
         rd.ch[n].cur_off = (uint16_t)(got * 2);
         rd.ch[n].ctrl ^= CTRL_CURRENT_PAGE;      /* §11.3.5: next page */
 
+        if (one_shot)
+            break;                                /* a single page, then the interrupt */
+        if (!(rd.ch[n].ctrl & CTRL_CURRENT_PAGE))
+            break;                                /* both pages full: interrupt, let the ISR consume */
         if (got < max_words)
             break;                                /* receiver emptied before the page filled */
         if (pages >= 64) {                        /* guard: never loop forever */
@@ -542,17 +642,31 @@ void calypso_rhea_dma_rx_request(C54xState *s)
     /* §11.3.5: transfer complete -> IRQ_STATE set, DMA_START drops. */
     rd.ch[n].ctrl = (uint16_t)((rd.ch[n].ctrl | CTRL_IRQ_STATE | CTRL_IDLE)
                                & ~CTRL_DMA_START);   /* done -> IDLE=1 */
-    if (rd.ch[n].ctrl & CTRL_ONE_SHOT)
+    if (rd.ch[n].ctrl & CTRL_ONE_SHOT) {
         rd.ch[n].ctrl &= (uint16_t)~CTRL_ENABLE;
+        calypso_rif_flush();             /* window closed: the radio stops receiving */
+    }
 
     {
         static unsigned long long n_ok;
         n_ok++;
-        if (n_ok <= 20 || (n_ok % 500) == 0)
-            fprintf(stderr, "[rhea-dma] *** TRANSFERT RX #%llu : %d mots RIF -> "
+        /* [2026-09-19] The frame number was missing, and without it a transfer
+         * cannot be put side by side with the firmware's own "=>FB @ FNR X" in
+         * osmocon.log — which is the only way to tell whether the SB window of
+         * frame X+1 really receives the SCH burst. calypso_daram_last_fn is set
+         * by calypso_bsp_rx_burst() for exactly this.
+         *
+         * A 296-word transfer is an ordinary burst; anything else is a window
+         * the firmware armed on purpose (380 words = the SB window), so those
+         * are traced one by one up to 2000 instead of one in 500. */
+        static unsigned long long n_sb;
+        bool fenetre = (got != 296);
+        if (n_ok <= 20 || (n_ok % 500) == 0 || (fenetre && n_sb++ < 2000))
+            fprintf(stderr, "[rhea-dma] *** TRANSFERT RX #%llu fn=%u : %d mots RIF -> "
                     "api_ram[0x%04x..0x%04x] en %d page(s) (mot DSP 0x%04x, ARM 0x%08x) "
                     "ALGTH=%u IRQ_MODE=%d ONE_SHOT=%d\n",
-                    n_ok, got, dst_idx, dst_idx + (got > max_words ? max_words : got) - 1, pages,
+                    n_ok, calypso_bsp_get_last_fn(),
+                    got, dst_idx, dst_idx + (got > max_words ? max_words : got) - 1, pages,
                     (unsigned)(C54X_API_BASE + dst_idx),
                     0xFFD00000u + (rd.ch[n].aad & 0x0FFF),
                     rd.ch[n].algth, !!(rd.ch[n].ctrl & CTRL_IRQ_MODE),
@@ -563,7 +677,12 @@ void calypso_rhea_dma_rx_request(C54xState *s)
          * input really is empty (measured: bursts #1..#5 at nz=0/2368, then #6
          * at nz=2211/2368) and invites the wrong conclusion that the DMA carries
          * only zeros. */
-        if (n_ok <= 20 || (n_ok % 500) == 0) {
+        if (n_ok <= 20 || (n_ok % 500) == 0 || (fenetre && n_sb <= 2000)) {
+            fprintf(stderr, "[rhea-dma]     RIF avant = %d mots ; pages = "
+                    "%d+%d+%d+%d+%d+%d+%d+%d ; 1er mot non nul a l'index %d "
+                    "(attendu 42)\n", niveau_avant,
+                    got_page[0], got_page[1], got_page[2], got_page[3],
+                    got_page[4], got_page[5], got_page[6], got_page[7], premier_nz);
             fprintf(stderr, "[rhea-dma]     contenu : %d/%d mots non nuls ; "
                     "8 premiers = %04x %04x %04x %04x %04x %04x %04x %04x\n",
                     nz_total, total,
@@ -581,6 +700,43 @@ void calypso_rhea_dma_rx_request(C54xState *s)
                     C54X_IT_DMA_VEC, C54X_IT_DMA_BIT, n_it);
         c54x_interrupt_ex(s, C54X_IT_DMA_VEC, C54X_IT_DMA_BIT);
     }
+}
+
+bool calypso_rhea_dma_rx_armed(void)
+{
+    if (!rhea_dma_on()) return true;      /* no DMA model: legacy path, keep everything */
+    rhea_dma_init();
+    uint16_t ctrl = rd.ch[1].ctrl;
+    return (ctrl & CTRL_ENABLE) && (ctrl & CTRL_DIRECTION);
+}
+
+bool calypso_rhea_dma_one_shot(void)
+{
+    if (!rhea_dma_on()) return false;
+    rhea_dma_init();
+    uint16_t ctrl = rd.ch[1].ctrl;
+    return (ctrl & CTRL_ENABLE) && (ctrl & CTRL_ONE_SHOT);
+}
+
+/* Stream pump: transfer the next full page(s) of the receiver into the
+ * double buffer, if the channel is armed in continuous mode and enough words
+ * are waiting. Called by the frame loop once the DSP has gone idle, i.e. once
+ * its ISR has consumed the previous pair. Returns 1 when a transfer happened. */
+int calypso_rhea_dma_pump(C54xState *s)
+{
+    if (!rhea_dma_on()) return 0;
+    rhea_dma_init();
+    if (s) rd_dsp = s; else s = rd_dsp;
+    uint16_t ctrl = rd.ch[1].ctrl;
+    if (!(ctrl & CTRL_ENABLE) || !(ctrl & CTRL_DIRECTION) || (ctrl & CTRL_ONE_SHOT))
+        return 0;
+    int page = rd.ch[1].algth / 2;
+    if (page <= 0) return 0;
+    int besoin = (ctrl & CTRL_CURRENT_PAGE) ? page : 2 * page;
+    if (calypso_rif_level() < besoin) return 0;
+    int avant = calypso_rif_level();
+    calypso_rhea_dma_rx_request(s);
+    return calypso_rif_level() < avant;
 }
 
 /* XIO bridge: the SAME register bank, seen from the DSP Rhea bus. §11.1 gives

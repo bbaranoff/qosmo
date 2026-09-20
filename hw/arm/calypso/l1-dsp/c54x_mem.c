@@ -1043,6 +1043,10 @@ void scratchwr_note(C54xState *s, uint16_t a, uint16_t v, const char *espace)
                 (unsigned long long)cum_coef, (unsigned long long)cum_src);
 }
 
+/* provenance du dernier TOA ecrit par la ROM (voir la sonde sur 0x08fa) */
+int g_toa_grille = -1, g_toa_valeur = 0;
+unsigned g_toa_seq = 0;
+
 void data_write(C54xState *s, uint16_t addr, uint16_t val)
 {
     scratchwr_note(s, addr, val, "data");
@@ -1319,9 +1323,35 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
      * (0x08fd), the output of the real FCCH frequency detector. Captures A/B
      * (complex correlation) and the reference pointers AR3/4/5 at the store, to
      * name the actual frequency-correlation site. Cap 40. */
+    /* [2026-09-19] A_SCH-WR: which R page does the ROM write its SB result to,
+     * and what does d_dsp_page say at that instant? a_sch[0,1,3,4] sit at
+     * 0x0837..0x083b (R page 0) and 0x084b..0x084f (R page 1) per calypso_api.h
+     * (API_R_PAGE + RP_A_SCH). If the ROM writes the page the firmware is not
+     * reading, the firmware decodes a stale cell -- which is what an SB result
+     * that is wrong yet repeatable looks like. */
+    if ((addr >= 0x0837 && addr <= 0x083b) || (addr >= 0x084b && addr <= 0x084f)) {
+        static unsigned sw = 0;
+        if (val != 0 && sw < 120) {
+            int pg = (addr >= 0x084b);
+            fprintf(stderr, "[c54x] A_SCH-WR #%u page=%d [0x%04x]<-0x%04x "
+                    "d_dsp_page=0x%04x PC=0x%04x insn=%u\n",
+                    sw, pg, addr, val, s->data[0x08d4], s->pc, s->insn_count);
+            sw++;
+        }
+    }
     if (addr >= 0x08fa && addr <= 0x08fd) {
-        static unsigned aw = 0;
-        if (aw < 40) {
+        static unsigned aw = 0, awz = 0;
+        /* [2026-09-19] Only the NON-ZERO stores are of interest, and the cap of
+         * 40 never reached them: measured, the first 40 writes are all 0x0000
+         * from a single clearing site (PC 0xb2cf/b2d2/b2d5/b2d8, the four cells
+         * in four consecutive instructions), so the probe filled up on the
+         * memset and never showed the detector. Zeros are counted and reported
+         * once every 2000 instead. */
+        if (val == 0) {
+            if (++awz % 2000 == 1)
+                fprintf(stderr, "[c54x] ANGLE-WR (mise a zero x%u, PC=0x%04x)\n",
+                        awz, s->pc);
+        } else if (aw < 200) {
             int64_t a = (s->a & 0x8000000000LL) ? (int64_t)(s->a | ~0xFFFFFFFFFFLL) : (int64_t)s->a;
             int64_t b = (s->b & 0x8000000000LL) ? (int64_t)(s->b | ~0xFFFFFFFFFFLL) : (int64_t)s->b;
             const char *nm = addr==0x08fa?"TOA":addr==0x08fb?"PM":addr==0x08fc?"ANGLE":"SNR";
@@ -1497,6 +1527,196 @@ static void dio_note(C54xState *s, const char *rw, uint16_t addr, uint16_t val)
 
 static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
 {
+    /* [2026-09-19] A_SCH-WR2: the twin probe in data_write() never fired on
+     * a_sch while its ANGLE-WR neighbour did, so these writes take the OTHER
+     * path. Here the ADDRESS is the function's own argument, so the attribution
+     * is exact -- unlike a before/after snapshot per instruction, which the ARM
+     * writing the same shared mapping from another process can fool. */
+    /* [2026-09-19] TOA-LAW: the firmware wants a ToA of 23 and never sees it;
+     * the measured values form a ladder of 48 (48, 96, 144, 192...). The ROM
+     * stores a_sync[TOA] at 0x795a and the stored word equals B, with T holding
+     * the constant 48 loaded at 0x7953. Capture B, T and the pointers on every
+     * such store to get the law instead of guessing it. */
+    /* [2026-09-19] ANGLE-LAW : meme traitement que le TOA, qui s'etait revele
+     * avoir DEUX producteurs separes par AR2 (0x0cce = une grille, autre = une
+     * vraie mesure). L'angle est ecrit par la ROM en 0x798b et rend ~0 quel que
+     * soit l'offset injecte ; s'il a lui aussi deux populations, l'une des deux
+     * mesure peut-etre correctement et c'est la mauvaise qui est consommee. */
+    /* [2026-09-19] BUF-0cce : le TOA (grille de 48) et l'angle (bruit non
+     * correle) sont TOUS DEUX degrades quand AR2=0x0cce. Hypothese unificatrice :
+     * ce que le correlateur lit la ne porte pas le signal. Test direct -- la
+     * FCCH est une tonalite pure, donc a 1 ech/symbole elle tourne de +pi/2 par
+     * echantillon avec une coherence ~1. On mesure coherence et dphi SUR LE
+     * CONTENU DU TAMPON au moment ou la tache FB rend son resultat. */
+    if ((addr == 0x08fc || addr == 0x08fa) && val != 0 && s->ar[2] == 0x0cce) {
+        static unsigned nb;
+        if (nb < 20) {
+            double ar=0, ai=0, den=0; int ns=148;
+            const uint16_t BUF = 0x0cce;
+            for (int k = 1; k < ns; k++) {
+                double i0=(int16_t)s->data[BUF + 2*(k-1)], q0=(int16_t)s->data[BUF + 2*(k-1) + 1];
+                double i1=(int16_t)s->data[BUF + 2*k],     q1=(int16_t)s->data[BUF + 2*k + 1];
+                ar += i1*i0 + q1*q0;  ai += q1*i0 - i1*q0;
+                den += sqrt((i0*i0+q0*q0)*(i1*i1+q1*q1));
+            }
+            double coh = den > 0 ? sqrt(ar*ar+ai*ai)/den : 0;
+            double dphi = atan2(ai, ar);
+            fprintf(stderr, "[c54x] BUF-0cce %s=%d : coherence=%.3f dphi=%+.3f "
+                    "(FCCH pure vise coh~1, dphi=+1.571)\n",
+                    addr == 0x08fa ? "TOA" : "ANGLE", (int)(int16_t)val, coh, dphi);
+            nb++;
+        }
+    }
+    if (addr == 0x08fc && val != 0) {
+        static unsigned na;
+        if (na < 300)
+            fprintf(stderr, "[c54x] ANGLE-LAW <-%6d  AR2=%04x AR3=%04x AR4=%04x "
+                    "AR5=%04x A=%lld B=%lld T=%04x PC=0x%04x\n",
+                    (int)(int16_t)val, s->ar[2], s->ar[3], s->ar[4], s->ar[5],
+                    (long long)s->a, (long long)s->b, s->t, s->pc);
+        na++;
+    }
+    if (addr == 0x08fa) {
+        static unsigned nt;
+        /* [2026-09-19] Deux producteurs de TOA sortent de la MEME instruction
+         * 0x795a, separes par AR2 : 0x0cce donne 100% de multiples de 48 (une
+         * grille, pas une mesure), tout autre pointeur donne des valeurs fines.
+         * On marque la provenance pour savoir laquelle la tache SB consomme. */
+        if (s->pc == 0x795a) {
+            g_toa_grille = (s->ar[2] == 0x0cce);
+            g_toa_valeur = (int)(int16_t)val;
+            g_toa_seq++;
+        }
+        /* [2026-09-19] La couture. Le TOA tombe a 100% sur un multiple de 48
+         * echantillons = 96 mots = une page DMA, donc le tampon doit porter une
+         * discontinuite a chaque frontiere de page. On imprime les mots de part
+         * et d'autre des frontieres (96 et 192) du tampon 0x0cce : sur un burst
+         * GMSK continu, |IQ| est quasi constant et rien ne doit sauter la. */
+        if (val != 0 && nt < 12 && s->pc == 0x795a) {
+            const uint16_t B0 = 0x0cce;
+            fprintf(stderr, "[c54x] COUTURE TOA=%d | p1 94,95 -> 96,97 : "
+                    "%04x %04x | %04x %04x || p2 190,191 -> 192,193 : "
+                    "%04x %04x | %04x %04x\n", (int)(int16_t)val,
+                    s->data[B0 + 94], s->data[B0 + 95],
+                    s->data[B0 + 96], s->data[B0 + 97],
+                    s->data[B0 + 190], s->data[B0 + 191],
+                    s->data[B0 + 192], s->data[B0 + 193]);
+        }
+        if (nt < 400)
+            fprintf(stderr, "[c54x] TOA-LAW <-%5d  B=%lld T=%d A=%lld "
+                    "AR2=%04x AR3=%04x AR4=%04x AR5=%04x PC=0x%04x\n",
+                    (int)(int16_t)val, (long long)s->b, (int)(int16_t)s->t,
+                    (long long)s->a, s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->pc);
+        nt++;
+    }
+    /* [2026-09-19] A_SERV-WR : read_sb_result (prim_fbsb.c:148) lit
+     * dsp_api.db_r->a_serv_demod[], donc la PAGE R aux mots 8..11 =
+     * 0x0830..0x0833 (page 0) et 0x0844..0x0847 (page 1) -- PAS le NDB
+     * a_sync_demod 0x08fa..0x08fd que lit read_fb_result. Si personne n'ecrit
+     * ces cellules, le SB lit du mort : st->snr reste nul, le test
+     * `snr > AFC_SNR_THRESHOLD` echoue toujours et TOUTES les mesures AFC sont
+     * marquees invalides -- la moyenne glissante n'emet alors jamais. */
+    /* [2026-09-19] SRC-3fa4 : les quatre resultats du SB sortent de quatre
+     * cellules de travail, lues par la ROM en 0xb1e7..0xb1f5 :
+     *   0x3fa4 -> TOA    0x3fa5 -> PM    0x3fa7 -> ANGLE    0x3fa6 -> SNR
+     * Le SNR ne depasse jamais AFC_SNR_THRESHOLD=2560 (max observe 864), donc
+     * 100% des mesures AFC sont marquees invalides. On remonte d'un cran : qui
+     * ecrit 0x3fa6, et avec quoi ? */
+    /* [2026-09-19] SNR-BINAIRE : le SNR publie vaut soit 16384 (0x4000, la
+     * constante "bon signal" que la ROM pose aussi en 0x798d) soit une valeur a
+     * un ou deux chiffres -- rien entre les deux, 15,3% de 16384 sur 111
+     * mesures. Il en faudrait 20% pour atteindre les 8 mesures valides par
+     * fenetre de 40 qu'exige l'AFC. Qu'est-ce qui distingue un bon burst d'un
+     * mauvais ? On mesure la coherence du tampon 0x0cce AU MOMENT de l'ecriture,
+     * et la phase de multitrame : une FCCH (fn%51 dans {0,10,20,30,40}) est une
+     * tonalite pure, coherence ~1 et dphi=+pi/2 a 1 ech/symbole. */
+    /* [2026-09-19] DECALAGE : le verdict SNR n'est PAS correle au contenu du
+     * tampon -- 16384 sur du factice (coherence 0.488), deux chiffres sur de la
+     * FCCH. Quand une vraie FCCH est la, le DSP la voit parfaitement
+     * (coherence 0.999, dphi +1.565 pour +1.571 theorique). Donc le signal et
+     * l'estimateur sont bons : c'est l'INSTANT de l'evaluation qui est decale
+     * par rapport au depot. On apparie chaque evaluation avec le dernier depot
+     * DMA et on compte les trames qui les separent. */
+    /* [2026-09-19] CRC-CELL : le statut SB est forme en 0x98b3/0x98b4 --
+     * A prend 0x8000 (B_BLUD seul) puis 0x8100, l'instruction 0x98b4 ayant
+     * pour operandes 0x2bf8 et 0x0c08. Si data[0x0c08] porte 0x0100, c'est la
+     * cellule du verdict CRC, et son ecrivain est le decodeur lui-meme. */
+    if (addr == 0x0c08) {
+        static unsigned n7;
+        if (n7 < 60) {
+            fprintf(stderr, "[c54x] CRC-CELL [0x0c08] <- 0x%04x  PC=0x%04x "
+                    "A=%lld B=%lld T=%04x AR2=%04x AR3=%04x insn=%u\n",
+                    val, s->pc, (long long)s->a, (long long)s->b, s->t,
+                    s->ar[2], s->ar[3], s->insn_count);
+            n7++;
+        }
+    }
+    if (addr == 0x3fa6) {
+        extern unsigned g_depot_fn, g_depot_seq;
+        static unsigned n6;
+        if (n6 < 60) {
+            unsigned fn_eval = calypso_daram_last_fn;
+            fprintf(stderr, "[c54x] DECALAGE snr=%-6d eval_fn=%-7u p51=%-2u | "
+                    "dernier depot fn=%-7u p51=%-2u | ecart=%d trames\n",
+                    (int)(int16_t)val, fn_eval, fn_eval % 51u,
+                    g_depot_fn, g_depot_fn % 51u, (int)(fn_eval - g_depot_fn));
+            n6++;
+        }
+    }
+    if (addr == 0x3fa6) {
+        static unsigned n5;
+        if (n5 < 400) {
+            double ar=0, ai=0, den=0; const uint16_t BUF = 0x0cce; int ns=148;
+            for (int k = 1; k < ns; k++) {
+                double i0=(int16_t)s->data[BUF + 2*(k-1)], q0=(int16_t)s->data[BUF + 2*(k-1) + 1];
+                double i1=(int16_t)s->data[BUF + 2*k],     q1=(int16_t)s->data[BUF + 2*k + 1];
+                ar += i1*i0 + q1*q0;  ai += q1*i0 - i1*q0;
+                den += sqrt((i0*i0+q0*q0)*(i1*i1+q1*q1));
+            }
+            double coh = den > 0 ? sqrt(ar*ar+ai*ai)/den : 0;
+            unsigned fn = calypso_daram_last_fn;
+            fprintf(stderr, "[c54x] SNR-BINAIRE snr=%-6d fn=%-7u p51=%-2u "
+                    "coherence=%.3f dphi=%+.3f %s\n",
+                    (int)(int16_t)val, fn, fn % 51u, coh, atan2(ai, ar),
+                    (fn % 51u) % 10 == 0 && (fn % 51u) <= 40 ? "<- trame FCCH" : "");
+            n5++;
+        }
+    }
+    if (addr >= 0x3fa4 && addr <= 0x3fa7) {
+        static unsigned n4;
+        if (n4 < 80) {
+            static const char *q[4] = { "TOA(3fa4)", "PM(3fa5)", "SNR(3fa6)", "ANGLE(3fa7)" };
+            fprintf(stderr, "[c54x] SRC-3fa4 %-11s <- %6d  PC=0x%04x A=%lld B=%lld "
+                    "T=%04x AR2=%04x AR3=%04x insn=%u\n",
+                    q[addr - 0x3fa4], (int)(int16_t)val, s->pc,
+                    (long long)s->a, (long long)s->b, s->t, s->ar[2], s->ar[3],
+                    s->insn_count);
+            n4++;
+        }
+    }
+    if ((addr >= 0x0830 && addr <= 0x0833) || (addr >= 0x0844 && addr <= 0x0847)) {
+        static unsigned n3;
+        if (n3 < 600) {
+            static const char *nm[4] = { "TOA", "PM", "ANGLE", "SNR" };
+            int pg = (addr >= 0x0844);
+            int idx = addr - (pg ? 0x0844 : 0x0830);
+            fprintf(stderr, "[c54x] A_SERV-WR page=%d %-5s [0x%04x] <- %6d "
+                    "PC=0x%04x AR2=%04x insn=%u\n",
+                    pg, nm[idx & 3], addr, (int)(int16_t)val, s->pc, s->ar[2],
+                    s->insn_count);
+            n3++;
+        }
+    }
+    if ((addr >= 0x0837 && addr <= 0x083b) || (addr >= 0x084b && addr <= 0x084f)) {
+        static unsigned n2;
+        if (n2 < 60) {
+            fprintf(stderr, "[c54x] A_SCH-WR2 [0x%04x] <- 0x%04x PC=0x%04x "
+                    "A=%lld B=%lld T=%04x AR2=%04x AR3=%04x insn=%u\n",
+                    addr, val, s->pc, (long long)s->a, (long long)s->b, s->t,
+                    s->ar[2], s->ar[3], s->insn_count);
+            n2++;
+        }
+    }
     { static long _dwl_n = 0; if (getenv("CALYPSO_DWL_PROVE") && (_dwl_n++ % 100000) == 0)
         fprintf(stderr, "[c54x] DWL-PROVE appel #%ld addr=0x%04x pc=0x%04x\n", _dwl_n, addr, s->pc); }
     {   /* FBCNT-WATCH - CALYPSO_FBROUTE=1 (same gate as FBROUTE, of which this

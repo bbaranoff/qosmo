@@ -32,6 +32,18 @@ bool     calypso_rhea_dma_xio(bool write, uint16_t pa, uint16_t *val, uint16_t p
 struct C54xState;
 void     calypso_rhea_dma_rx_request(struct C54xState *s);
 
+/* [2026-09-20] Stream pump: hand the next full page pair of the receiver to
+ * the double buffer (continuous mode only), once the DSP is idle. Returns 1
+ * when a transfer took place. The frame loop calls it until it returns 0. */
+int      calypso_rhea_dma_pump(struct C54xState *s);
+/* True while DMA2 is armed as a one-shot window (the SB task: ALGTH=764). The
+ * bench delivers the burst as an aligned window block in that case, and as a
+ * 156.25-symbol frame of the continuous stream otherwise. */
+bool     calypso_rhea_dma_one_shot(void);
+/* True while DMA2 is armed for reception at all: the RIF drops samples
+ * arriving outside a receive window (the radio is off between windows). */
+bool     calypso_rhea_dma_rx_armed(void);
+
 /* Level of the INT10n line. CAL000 5.1: "INT10n (level) -> DMA interrupt". The
  * line stays asserted as long as the channel has its IRQ_STATE set; READING the
  * register is what clears it (CAL207 11.3.5). Without that, the model treats the

@@ -98,6 +98,7 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 int32_t maca_prod = (int32_t)maca_ahi * (int32_t)maca_mem;
                 if (s->st1 & ST1_FRCT) maca_prod <<= 1;
                 s->b = sext40((s->b + (int64_t)(int32_t)maca_prod) & 0xFFFFFFFFFFULL);
+                s->t = (uint16_t)maca_mem;      /* SPRU172C: MACA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
 
@@ -110,6 +111,7 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 int32_t masa_prod = (int32_t)masa_ahi * (int32_t)masa_mem;
                 if (s->st1 & ST1_FRCT) masa_prod <<= 1;
                 s->b = sext40((s->b - (int64_t)(int32_t)masa_prod) & 0xFFFFFFFFFFULL);
+                s->t = (uint16_t)masa_mem;      /* SPRU172C: MASA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
 
@@ -124,6 +126,7 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 macar_prod += 0x8000;
                 macar_prod &= ~0xFFFF;
                 s->b = sext40((s->b + (int64_t)(int32_t)macar_prod) & 0xFFFFFFFFFFULL);
+                s->t = (uint16_t)macar_mem;     /* SPRU172C: MACAR Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
 
@@ -136,6 +139,7 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 int32_t mpya_prod = (int32_t)mpya_ahi * (int32_t)mpya_mem;
                 if (s->st1 & ST1_FRCT) mpya_prod <<= 1;
                 s->b = sext40((int64_t)(int32_t)mpya_prod);
+                s->t = (uint16_t)mpya_mem;      /* SPRU172C: MPYA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
 
@@ -251,6 +255,29 @@ static void c54x_sfta_exec(C54xState *s, uint16_t op)
 static inline uint16_t c54x_carry_in(C54xState *s)
 {
     return (s->st0 & ST0_C) ? 1 : 0;
+}
+
+/* SFTL src, SHIFT [, dst] — SPRU172C 4-158. A 32-bit LOGICAL shift of src(31-0):
+ *   SHIFT < 0 : src((-SHIFT)-1) -> C ; src(31-0) >> -SHIFT -> dst(31-0), zero fill
+ *   SHIFT = 0 : 0 -> C ; dst(31-0) = src(31-0)
+ *   SHIFT > 0 : src(32-SHIFT) -> C ; (src(31-0) << SHIFT) & 0xFFFFFFFF -> dst(31-0)
+ *   always     0 -> dst(39-32)
+ * [2026-09-20] The three former copies shifted the 40-bit accumulator and never
+ * set C. Manual example SFTL A, -5, B: A = 00 8765 0055 -> B = 00 043B 2802, C = 1.
+ * One body, called from every dispatch copy. */
+static void c54x_sftl_exec(C54xState *s, uint16_t op)
+{
+    int src, dst;
+    c54x_f4_srcdst(op, &src, &dst);
+    int shift = op & 0x1F;
+    if (shift > 15) shift -= 32;
+    uint32_t v = (uint32_t)((src ? s->b : s->a) & 0xFFFFFFFFULL);
+    uint32_t r; int c;
+    if (shift < 0)      { c = (v >> (-shift - 1)) & 1; r = v >> (-shift); }
+    else if (shift == 0){ c = 0;                        r = v; }
+    else                { c = (v >> (32 - shift)) & 1;  r = v << shift; }
+    if (c) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
+    if (dst) s->b = (int64_t)r; else s->a = (int64_t)r;
 }
 
 bool calypso_fix_enabled(const char *name)
@@ -430,6 +457,34 @@ int c54x_exec_one(C54xState *s)
      * going to 0. Once an AR pointer is 0, any later indirect store *ARx hits
      * data[0x00], which is the IMR MMR. Logs the instruction that made the
      * transition (last_exec_pc and its opcode) to name the culprit. */
+    /* [2026-09-19] A_SCH-1111: which instruction puts 0x1111 into a_sch[0]?
+     * a_sch[0] = data[0x0837] (R page 0) and data[0x084b] (R page 1). It is the
+     * MOST FREQUENT value in that cell (27 of 60 changes measured) and it is a
+     * plain number where only B_BLUD (bit15) and B_SCH_CRC (bit8) have meaning;
+     * no firmware and no emulation source contains it as a literal, so it is
+     * computed. Runs per instruction like its AR-CLOBBER neighbour, and names
+     * the instruction that JUST executed (last_exec_pc), not the next one --
+     * the distinction that made the gdb watchpoint report the wrong site. */
+    {
+        static uint16_t a_prev0, a_prev1; static bool a_ini; static unsigned a_n;
+        uint16_t a_now0 = s->data[0x0837], a_now1 = s->data[0x084b];
+        if (a_ini && a_n < 30) {
+            for (int pg = 0; pg < 2; pg++) {
+                uint16_t was = pg ? a_prev1 : a_prev0, now = pg ? a_now1 : a_now0;
+                if (now != was && (now & 0x8000)) {   /* BLUD=1 : un RESULTAT */
+                    fprintf(stderr, "[c54x] A_SCH-RESULTAT page=%d %04x -> %04x "
+                            "par PC=0x%04x op=0x%04x A=%lld B=%lld T=%04x "
+                            "AR1=%04x AR2=%04x AR3=%04x AR4=%04x insn=%u\n",
+                            pg, was, now, s->last_exec_pc,
+                            prog_fetch(s, s->last_exec_pc),
+                            (long long)s->a, (long long)s->b, s->t,
+                            s->ar[1], s->ar[2], s->ar[3], s->ar[4], s->insn_count);
+                    a_n++;
+                }
+            }
+        }
+        a_prev0 = a_now0; a_prev1 = a_now1; a_ini = true;
+    }
     {
         static uint16_t prev_ar1, prev_ar2, prev_ar6, prev_ar7;
         static bool init_done = false;
@@ -582,7 +637,9 @@ int c54x_exec_one(C54xState *s)
          * sign-extending turns AR=0x8000 into a negative 40-bit value. SPRU172C
          * gives "LDM MMR, dst : dst = MMR" with no sign extension (LDU is the
          * explicitly unsigned form; LDM has no signed variant). */
-        if ((op & 0xFE00) == 0x4800 && calypso_fix_enabled("FIX_LDM_ZEROEXT")) {
+        /* [2026-09-20] Gate removed: SPRU172C example LDM AR4, A with AR4=FFFF
+         * gives A = 00 0000 FFFF. Unconditional. */
+        if ((op & 0xFE00) == 0x4800) {
             int mmr = op & 0x7F;
             uint16_t v = data_read(s, mmr);
             if ((op >> 8) & 1) s->b = (int64_t)(uint16_t)v; else s->a = (int64_t)(uint16_t)v;
@@ -595,22 +652,14 @@ int c54x_exec_one(C54xState *s)
         if ((op & 0xFE00) == 0x4E00) {
             int src = (op >> 8) & 1;
             int64_t v = src ? s->b : s->a;
-            uint8_t sm = op & 0xFF;
-            if (sm & 0x80) {                       /* indirect: *ARx with post-modification */
-                int ar = sm & 0x7, mod = (sm >> 3) & 0xF;
-                uint16_t a = s->ar[ar];
-                data_write(s, a,     (uint16_t)((v >> 16) & 0xFFFF));
-                data_write(s, a + 1, (uint16_t)(v & 0xFFFF));
-                if (mod == 0x2) s->ar[ar] = a + 2;        /* *ARx+ : +2, not +1 */
-                else if (mod == 0x1) s->ar[ar] = a - 2;   /* *ARx- : -2, not -1 */
-                return 1;
-            }
-            {   /* direct: DP:offset */
-                uint16_t a = (uint16_t)(((s->st0 & ST0_DP_MASK) << 7) | (sm & 0x7F));
-                data_write(s, a,     (uint16_t)((v >> 16) & 0xFFFF));
-                data_write(s, a + 1, (uint16_t)(v & 0xFFFF));
-                return 1;
-            }
+            /* [2026-09-20] All Lmem addressing modes through resolve_lmem (the old
+             * code knew *ARx+ and *ARx- only, and ignored CPL for the direct form),
+             * high word AT the address, low word at address ^ 1 (SPRU172C DST
+             * example, AR3 = 0101h: data[0101h] = hi, data[0100h] = lo). */
+            uint16_t a = resolve_lmem(s, op);
+            data_write(s, a,                 (uint16_t)((v >> 16) & 0xFFFF));
+            data_write(s, (uint16_t)(a ^ 1), (uint16_t)(v & 0xFFFF));
+            return 1 + s->lk_used;
         }
         /* STL/STH src,SHFT,Xmem — binutils { "stl"/"sth", 1,.., 0x9800/0x9A00,
          * 0xFE00, {OP_SRC1,OP_SHFT,OP_Xmem} }. The SHFT field (bits 3-0) was
@@ -1957,8 +2006,10 @@ int c54x_exec_one(C54xState *s)
                 int src = (op >> 8) & 1;
                 int64_t *acc = src ? &s->b : &s->a;
                 int64_t val = sext40(*acc);
-                if (val > 0x7FFFFFFFLL) *acc = sext40(0x7FFFFFFFLL);
-                else if (val < -0x80000000LL) *acc = sext40(-0x80000000LL);
+                uint16_t ovbit = src ? ST0_OVB : ST0_OVA;
+                if (val > 0x7FFFFFFFLL) { *acc = sext40(0x7FFFFFFFLL); s->st0 |= ovbit; }
+                else if (val < -0x80000000LL) { *acc = sext40(-0x80000000LL); s->st0 |= ovbit; }
+                else s->st0 &= ~ovbit;          /* SPRU172C 4-153: "Affects OVsrc" */
                 return consumed + s->lk_used;
             }
 
@@ -2012,7 +2063,8 @@ int c54x_exec_one(C54xState *s)
                 int src = (op >> 8) & 1;
                 int64_t val = sext40(src ? s->b : s->a);
                 int exp = 0;
-                if (val == 0 || val == -1) { exp = 31; }
+                if (val == 0) { exp = 0; }              /* SPRU172C 4-58: src = 0 -> T = 0 */
+                else if (val == -1) { exp = 31; }
                 else {
                     uint64_t uv = (val < 0) ? ~val : val;
                     uv &= 0xFFFFFFFFFFULL;
@@ -2072,13 +2124,17 @@ int c54x_exec_one(C54xState *s)
              * binutils: "roltc" 1,1,1, 0xF492, 0xFEFF.
              * SPRU172C semantics: src bit 31 -> TC, src << 1, src bit 0 <- old TC. */
             if ((op & 0xFEFF) == 0xF492) {
+                /* SPRU172C 4-149: 32-bit rotate. (TC) -> src(0); src(30-0) -> src(31-1);
+                 * src(31) -> C (the CARRY, TC is only read); 0 -> src(39-32).
+                 * [2026-09-20] Was a 40-bit rotate that wrote bit 31 back into TC.
+                 * Example ROLTC A, A = 00 0000 5555, TC = 1 -> 00 0000 AAAB, C = 0. */
                 int src = (op >> 8) & 1;
                 int64_t *acc = src ? &s->b : &s->a;
-                int64_t v = *acc & 0xFFFFFFFFFFLL;
-                int new_tc = (int)((v >> 31) & 1);
+                int64_t v = *acc & 0xFFFFFFFFLL;
+                int new_tc = (int)((v >> 31) & 1);          /* bit 31 -> C */
                 int old_tc = (s->st0 & ST0_TC) ? 1 : 0;
-                *acc = sext40(((v << 1) | (int64_t)old_tc) & 0xFFFFFFFFFFULL);
-                if (new_tc) s->st0 |= ST0_TC; else s->st0 &= ~ST0_TC;
+                *acc = (int64_t)(((uint32_t)v << 1) | (uint32_t)old_tc);
+                if (new_tc) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
                 /* BITT-WATCH, leg 2 of 2 (same gate and window as leg 1 in the
                  * BITT handler). Shows whether the TC set by `bitt` really enters
                  * the accumulator: `after` must equal `before<<1 | old_tc`. An
@@ -2148,7 +2204,11 @@ int c54x_exec_one(C54xState *s)
                  * data-dependent variable shift that only makes sense if NORM
                  * shifts by T. */
                 {
-                    int16_t t = (int16_t)s->t;               /* signed count */
+                    /* SPRU172C 4-122: the shift is T(5-0), a 6-bit two's complement
+                     * count (-16..31). Example NORM B, A with T = 0FF9h shifts by
+                     * 39h = -7, not by 4089. */
+                    int t = s->t & 0x3F;
+                    if (t & 0x20) t -= 64;
                     if (t >= 0) val = sext40(val << t);
                     else        val = sext40(val >> (-t));   /* arithmetic shift (SXM) */
                     if (dst) s->b = val; else s->a = val;
@@ -2161,32 +2221,50 @@ int c54x_exec_one(C54xState *s)
 
             /* F490/F590: ROR src (mask FEFF, 1 word) */
             if ((op & 0xFEFF) == 0xF490) {
+                /* SPRU172C 4-150: 32-bit rotate. C -> src(31); src(31-1) -> src(30-0);
+                 * src(0) -> C; 0 -> src(39-32). [2026-09-20] Was a 40-bit rotate. */
                 int src = (op >> 8) & 1;
                 int64_t *acc = src ? &s->b : &s->a;
-                uint16_t c = c54x_carry_in(s); /* carry */
-                uint16_t lsb = *acc & 1;
-                *acc = sext40(((uint64_t)(*acc & 0xFFFFFFFFFFULL) >> 1) | ((uint64_t)c << 39));
+                uint32_t v = (uint32_t)(*acc & 0xFFFFFFFFULL);
+                uint32_t c = c54x_carry_in(s);
+                uint32_t lsb = v & 1;
+                *acc = (int64_t)((v >> 1) | (c << 31));
                 if (lsb) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
                 return consumed + s->lk_used;
             }
 
             /* F491/F591: ROL src (mask FEFF, 1 word) */
             if ((op & 0xFEFF) == 0xF491) {
+                /* SPRU172C 4-148: 32-bit rotate. C -> src(0); src(30-0) -> src(31-1);
+                 * src(31) -> C; 0 -> src(39-32). [2026-09-20] Was a 40-bit rotate:
+                 * example ROL A with A = 00 B000 1234, C = 0 gives 00 6000 2468, C = 1. */
                 int src = (op >> 8) & 1;
                 int64_t *acc = src ? &s->b : &s->a;
-                uint16_t c = c54x_carry_in(s);
-                uint16_t msb = (*acc >> 39) & 1;
-                *acc = sext40(((*acc << 1) & 0xFFFFFFFFFFULL) | c);
+                uint32_t v = (uint32_t)(*acc & 0xFFFFFFFFULL);
+                uint32_t c = c54x_carry_in(s);
+                uint32_t msb = (v >> 31) & 1;
+                *acc = (int64_t)((v << 1) | c);
                 if (msb) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
                 return consumed + s->lk_used;
             }
 
-            /* F488/F588: MACA T,src[,dst] (mask FCFF, 1 word) */
-            if ((op & 0xFCFF) == 0xF488) {
-                int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
-                int64_t prod = (int64_t)(int16_t)s->t * (int64_t)(int16_t)((src ? s->b : s->a) >> 16);
+            /* F488-F48B (mask FCFF, 1 word): MACA T,src[,dst] / MACAR / MASA T / MASAR.
+             * SPRU172C 4-86, 4-95: dst = src +/- T x A(32-16), rounded for the R
+             * forms. The multiplier is ALWAYS A's high word, whatever src is, and
+             * the base is src (not dst). [2026-09-20] The old MACA multiplied T by
+             * src's high word and accumulated into dst; MACAR/MASA/MASAR had no
+             * handler and fell into the F7 "LD #k8" block, which wrote T. Manual
+             * example MACA T, B, B (A=1234 0000, B=2 0000, T=0444, FRCT=1) gives
+             * B = 00 009D 4BA0. */
+            if ((op & 0xFCFC) == 0xF488) {
+                int src, dst; c54x_f4_srcdst(op, &src, &dst);
+                int64_t ahi  = (int64_t)(int16_t)((s->a >> 16) & 0xFFFF);
+                int64_t prod = (int64_t)(int16_t)s->t * ahi;
                 if (s->st1 & ST1_FRCT) prod <<= 1;
-                if (dst) s->b = sext40(s->b + prod); else s->a = sext40(s->a + prod);
+                int64_t base = sext40(src ? s->b : s->a);
+                int64_t r = (op & 2) ? base - prod : base + prod;   /* F48A/B subtract */
+                if (op & 1) r = (r + 0x8000) & ~(int64_t)0xFFFF;    /* F489/B round */
+                if (dst) s->b = sext40(r); else s->a = sext40(r);
                 return consumed + s->lk_used;
             }
 
@@ -2280,15 +2358,11 @@ int c54x_exec_one(C54xState *s)
              * accumulator shift, BEFORE the real hi8==0xF6/0xF7 handlers further
              * down ever run, and INTM is never cleared.
              * The exclusion is unconditional. */
-            if ((op & 0xFCE0) == 0xF4A0 &&
-                (op & 0xF0) != 0xB0) {
-                /* SFTL src,shift,dst — logical shift accumulator */
-                int src, dst; c54x_f4_srcdst(op, &src, &dst);
-                int shift = op & 0x1F; if (shift > 15) shift -= 32;
-                uint64_t uv = (uint64_t)((src ? s->b : s->a) & 0xFFFFFFFFFFULL);
-                if (shift >= 0) uv <<= shift; else uv >>= (-shift);
-                uv &= 0xFFFFFFFFFFULL;
-                if (dst) s->b = sext40(uv); else s->a = sext40(uv);
+            /* [2026-09-20] 0xF4A0-0xF4A7 is LD #k3, ARP (binutils {"ld", 0xF4A0,
+             * 0xFFF8, {OP_k3, OP_ARP}}), NOT an SFTL: SFTL is 0xF0E0/0xFCE0 and is
+             * handled with AND/OR/XOR src,shift,dst. Manual example LD 3, ARP -> ARP = 3. */
+            if ((op & 0xFFF8) == 0xF4A0) {
+                s->st0 = (s->st0 & ~ST0_ARP_MASK) | ((op & 7) << ST0_ARP_SHIFT);
                 return consumed + s->lk_used;
             }
 
@@ -2565,14 +2639,8 @@ int c54x_exec_one(C54xState *s)
                  * unconditional guard higher up for the encoding rule (low-byte
                  * high nibble 0xB is always rsbx/ssbx per tic54x-opc.c, never a
                  * legal shift amount). */
-                if ((op & 0xFCE0) == 0xF4A0) {
-                    /* SFTL src,shift,dst — logical shift accumulator */
-                    int src, dst; c54x_f4_srcdst(op, &src, &dst);
-                    int shift = op & 0x1F; if (shift > 15) shift -= 32;
-                    uint64_t uv = (uint64_t)((src ? s->b : s->a) & 0xFFFFFFFFFFULL);
-                    if (shift >= 0) uv <<= shift; else uv >>= (-shift);
-                    uv &= 0xFFFFFFFFFFULL;
-                    if (dst) s->b = sext40(uv); else s->a = sext40(uv);
+                if ((op & 0xFFF8) == 0xF4A0) {      /* LD #k3, ARP (see the first copy) */
+                    s->st0 = (s->st0 & ~ST0_ARP_MASK) | ((op & 7) << ST0_ARP_SHIFT);
                     return consumed + s->lk_used;
                 }
             }
@@ -2647,7 +2715,12 @@ int c54x_exec_one(C54xState *s)
                 consumed = 2;
                 int subop     = (op >> 4) & 0xF;
                 int shift_raw = op & 0xF;
-                int shift     = (shift_raw & 0x8) ? (shift_raw - 16) : shift_raw;
+                /* [2026-09-20] SHFT is a 4-bit UNSIGNED field (0..15) for all six
+                 * forms, ADD included: SPRU172C 4-4 "ADD #lk [, SHFT], src [, dst]",
+                 * and the manual's own example ADD #4568h, 8, A, B gives
+                 * B = A + (lk << 8). The signed reading turned SHFT=8..15 into a
+                 * right shift. The ISA suite (tools/isa_test) caught it. */
+                int shift     = shift_raw;
                 /* ─────────────────────────────────────────────────────────────
                  * FIX_LK_SHFT — the shift field of these #lk forms is FOUR bits
                  * (`op & 0xF`) and must not be given the sign rule of a five-bit
@@ -2945,9 +3018,7 @@ int c54x_exec_one(C54xState *s)
                     case 4: *dst = sext40(first) & sext40(shifted); break;
                     case 5: *dst = sext40(first) | sext40(shifted); break;
                     case 6: *dst = sext40(first) ^ sext40(shifted); break;
-                    case 7: { uint64_t uv = (uint64_t)(sv & 0xFFFFFFFFFFULL);
-                              if (shift >= 0) uv <<= shift; else uv >>= (-shift);
-                              *dst = sext40(uv & 0xFFFFFFFFFFULL); } break;
+                    case 7: c54x_sftl_exec(s, op); break;   /* SFTL: 32-bit, sets C */
                     default: break;
                     }
                     return consumed + s->lk_used;
@@ -3062,7 +3133,7 @@ int c54x_exec_one(C54xState *s)
                 consumed = 2;
                 int subop = (op >> 4) & 0xF;
                 int shift_raw = op & 0xF;
-                int shift = (shift_raw & 0x8) ? (shift_raw - 16) : shift_raw;
+                int shift = shift_raw;          /* SHFT: 4-bit unsigned (SPRU172C), see the F0/F1 copy */
                 int src_b = (op >> 9) & 1;
                 int dst_b = (op >> 8) & 1;
                 int64_t src = src_b ? s->b : s->a;
@@ -3107,10 +3178,9 @@ int c54x_exec_one(C54xState *s)
                             int64_t sh = (shift >= 0) ? (dst_in << shift)
                                                       : (dst_in >> (-shift));
                             result = src ^ sh; break; }
-                case 0x7: { uint64_t usrc = (uint64_t)src & 0xFFFFFFFFFFULL;
-                            result = (int64_t)((shift >= 0) ? (usrc << shift)
-                                                            : (usrc >> (-shift)));
-                            break; }
+                case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
+                    c54x_sftl_exec(s, op);
+                    return consumed + s->lk_used;
                 }
                 if (dst_b) s->b = sext40(result); else s->a = sext40(result);
                 return consumed + s->lk_used;
@@ -3366,7 +3436,7 @@ int c54x_exec_one(C54xState *s)
                 consumed = 2;
                 int subop = (op >> 4) & 0xF;
                 int shift_raw = op & 0xF;
-                int shift = (shift_raw & 0x8) ? (shift_raw - 16) : shift_raw;
+                int shift = shift_raw;          /* SHFT: 4-bit unsigned (SPRU172C), see the F0/F1 copy */
                 int src_b = (op >> 9) & 1;
                 int dst_b = (op >> 8) & 1;
                 int64_t src = src_b ? s->b : s->a;
@@ -3426,11 +3496,9 @@ int c54x_exec_one(C54xState *s)
                     result = src ^ sh;
                     break;
                 }
-                case 0x7: { /* SFTL src,SHIFT,DST: DST = SRC << shift (logical) */
-                    uint64_t usrc = (uint64_t)src & 0xFFFFFFFFFFULL;
-                    result = (int64_t)((shift >= 0) ? (usrc << shift) : (usrc >> (-shift)));
-                    break;
-                }
+                case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
+                    c54x_sftl_exec(s, op);
+                    return consumed + s->lk_used;
                 }
                 if (dst_b) s->b = sext40(result); else s->a = sext40(result);
                 return consumed + s->lk_used;
@@ -4473,7 +4541,9 @@ int c54x_exec_one(C54xState *s)
              * stack by pushing return addresses in a loop. */
             int dst = (op >> 8) & 1;
             uint8_t k = op & 0xFF;
-            int64_t v = (s->st1 & ST1_SXM) ? (int64_t)(int8_t)k : (int64_t)k;
+            /* [2026-09-20] K is an 8-bit UNSIGNED short immediate whatever SXM says:
+             * SPRU172C example LD #248, B gives B = 00 0000 00F8. */
+            int64_t v = (int64_t)k;
             /* Per SPRU172C, LD #k8 loads the immediate into the LOW bits
              * (sext40(v)), not v<<16. [2026-07-23] With the <<16, 0x39 landed in
              * bits 16-23: in the mask-ROM terminal, 0xb408 LD #0x39 followed by
@@ -5512,6 +5582,18 @@ int c54x_exec_one(C54xState *s)
              * SQURA just below was extracted from the same blind MAC for the same
              * reason.
              * ═════════════════════════════════════════════════════════════════ */
+            /* ADD Smem, 16, src [, dst] : dst = src + (Smem << 16).
+             * Encoding 0011 11SD IAAAAAAA (binutils {"add", 0x3C00, 0xFC00,
+             * {Smem, 16, SRC, DST}}, SPRU172C 4-4). [2026-09-20] Had no handler
+             * and fell into the blind MAC below (acc += T*Smem). Sites: SCH
+             * decoder 0x9a7d `3d81 add *AR1,16,A,B` (branch metric s0+s1), SB
+             * equalizer 0x847f/0x849b/0x837a/0x8390 `3f89 add *AR1-,16,B`. */
+            if ((op & 0xFC00) == 0x3C00) {
+                int64_t srcv = ((op >> 9) & 1) ? s->b : s->a;
+                int64_t r = sext40(srcv + ((int64_t)(int16_t)val << 16));
+                if ((op >> 8) & 1) s->b = r; else s->a = r;
+                return consumed + s->lk_used;
+            }
             if ((op & 0xFF00) == 0x3400) {
                 int bitt_idx = 15 - (s->t & 0xF);
                 if ((val >> bitt_idx) & 1) s->st0 |= ST0_TC;
@@ -5633,10 +5715,16 @@ int c54x_exec_one(C54xState *s)
             int64_t *acc_dst = dst_b ? &s->b : &s->a;
 
             if (op8 >= 0x40 && op8 <= 0x43) {
-                /* SUB Smem << 16, src, dst — sub of shifted Smem from acc */
+                /* SUB Smem, 16, src [, dst] : dst = src - (Smem << 16).
+                 * Encoding 0100 00SD IAAAAAAA: bit 9 = src, bit 8 = dst (binutils
+                 * {"sub", 0x4000, 0xFC00, {Smem, 16, SRC, DST}}, SPRU172C 4-187).
+                 * [2026-09-20] src was ignored (dst used as src): the SCH decoder's
+                 * `4191 sub *AR1+,16,A,B` at 0x9a7f computed B - s1 instead of
+                 * A - s1, so the second branch metric (s0-s1) was garbage. */
                 addr = resolve_smem(s, op, &ind);
                 int64_t val = (int64_t)(int16_t)data_read(s, addr) << 16;
-                *acc_dst = sext40(*acc_dst - val);
+                int64_t srcv = ((op >> 9) & 1) ? s->b : s->a;
+                *acc_dst = sext40(srcv - val);
                 return consumed + s->lk_used;
             }
             if (op8 == 0x44 || op8 == 0x45) {
@@ -5750,7 +5838,9 @@ int c54x_exec_one(C54xState *s)
                  * for DADD, DADST and DSADT. */
                 uint16_t laddr  = resolve_lmem(s, op);
                 uint16_t lhi    = data_read(s, laddr);
-                uint16_t llo    = data_read(s, (uint16_t)(laddr + 1));
+                /* Lmem: high word AT the address, low word at address ^ 1 (SPRU172C
+                 * DADD example, AR3 = 0101h: hi = data[0101h], lo = data[0100h]). */
+                uint16_t llo    = data_read(s, (uint16_t)(laddr ^ 1));
                 int      c16    = (s->st1 & ST1_C16) != 0;
                 int      sxm    = (s->st1 & ST1_SXM) != 0;
                 int16_t  lhi16  = (int16_t)lhi, llo16 = (int16_t)llo;
@@ -6281,6 +6371,7 @@ int c54x_exec_one(C54xState *s)
                 }
                 int64_t base = srcb ? s->b : s->a;
                 int64_t res  = is_mpy ? p : (base + p);
+                if (is_macr) res &= ~(int64_t)0xFFFF;   /* rnd(): +0x8000 then clear the low half */
                 if (dstb) s->b = sext40(res);
                 else      s->a = sext40(res);
                 s->t = xval_d;                      /* C54x side effect: T <- Xmem */

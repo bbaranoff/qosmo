@@ -167,6 +167,29 @@ void calypso_dma_tick(C54xState *s)
             continue;
         }
 
+        /* [2026-09-19] Who writes a_sch? Not the core: a probe on the
+         * instruction write path (c54x_mem.c, A_SCH-WR) counted ZERO stores to
+         * 0x0837..0x083b / 0x084b..0x084f while the cells changed 60 times in
+         * 35 s. This block copy is the remaining writer, and it is not visible
+         * from the core side. a_sch[0] has been seen carrying plain numbers
+         * (0x1111, 0x1388=5000) where only B_BLUD (bit15) and B_SCH_CRC (bit8)
+         * mean anything -- so name the source address the words come from. */
+        {
+            unsigned d0 = dst, d1 = dst + n - 1;
+            int touche = (d0 <= 0x083b && d1 >= 0x0837) || (d0 <= 0x084f && d1 >= 0x084b);
+            if (touche) {
+                static unsigned na;
+                if (na < 40) {
+                    unsigned off = (d0 <= 0x0837) ? (0x0837 - d0) : 0;
+                    fprintf(stderr, "[dma] A_SCH canal %u : %u mots 0x%04x -> 0x%04x ; "
+                            "source a_sch[0] = data[0x%04x] = 0x%04x\n",
+                            c, n, src, dst, (uint16_t)(src + off),
+                            s->data[(uint16_t)(src + off)]);
+                    na++;
+                }
+            }
+        }
+
         /* Block transfer, DATA space only (see the header: program and I/O
          * spaces are not modelled). */
         for (unsigned i = 0; i < n; i++) {

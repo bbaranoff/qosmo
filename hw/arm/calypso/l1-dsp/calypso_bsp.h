@@ -45,6 +45,12 @@ int  calypso_bsp_service(uint32_t current_fn);  /* drains UDP 6702 and delivers 
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16);
 
+/* [2026-09-20] Filler for timeslots 1..7 during the FB search (continuous
+ * DMA): the ROM receives the whole 1250-symbol frame, and on a real C0 carrier
+ * the other timeslots carry dummy bursts, not silence. The bench registers one
+ * GMSK dummy burst (148 samples, 296 int16); the default filler is zeros. */
+void calypso_bsp_set_remplissage(const int16_t *iq, int n_int16);
+
 /*
  * Transmit an uplink burst - symmetric to rx_burst.
  *
@@ -69,6 +75,7 @@ uint16_t calypso_bsp_get_daram_len(void);
 /* Reference probe: compares DARAM against the last bursts the BSP was handed;
  * *age names which one matched best (0 = this frame). -1 if none recorded. */
 int calypso_bsp_verif_compare(uint32_t *fn, uint16_t *addr, int *n, int *age);
+uint16_t calypso_bsp_verif_last_page(void);
 uint8_t  calypso_bsp_get_last_att(void);
 
 /* Send UL burst via UDP to BTS */

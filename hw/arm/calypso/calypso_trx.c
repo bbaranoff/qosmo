@@ -6,6 +6,7 @@
 #include "exec/address-spaces.h"
 #include "exec/cpu-common.h"
 #include "hw/core/cpu.h"
+#include "target/arm/cpu.h"
 #include "hw/irq.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
@@ -656,6 +657,33 @@ static void tdma_tick(void *opaque)
         } else {
             uint32_t wfn = __atomic_load_n(&g_wall_fn, __ATOMIC_ACQUIRE);
             s->fn = (wfn ? wfn : s->fn + 1) % GSM_HYPERFRAME;
+        }
+    }
+
+    /* [2026-09-19] WHO WRITES a_sch? Every writer on the DSP side has been
+     * eliminated by measurement: the C54x core (instruction probe: 0 stores),
+     * its internal DMA (probe: 0 transfers), the RX_FBFLAGS/POKE crutches
+     * (witnesses silent), the gr-gsm L1 (disabled under CALYPSO_DSP_EXTERN),
+     * PONT_CAN_SB (off). Only the ARM firmware is left, writing through the
+     * shared mapping, which no DSP-side probe can see. a_sch[0] carries plain
+     * numbers (0x1111, 0x1388) where only B_BLUD and B_SCH_CRC mean anything,
+     * so name the ARM PC that puts them there. a_sch = R_PAGE + 0x1E (bytes),
+     * i.e. api_ram words 0x37 (page 0) and 0x4b (page 1). */
+    {
+        static uint16_t prev[2]; static int first = 1; static unsigned n;
+        if (s->api_ram) {
+            uint16_t v0 = s->api_ram[0x37], v1 = s->api_ram[0x4b];
+            if (!first && n < 40 && (v0 != prev[0] || v1 != prev[1])) {
+                uint32_t pc = 0;
+                if (first_cpu) {
+                    ARMCPU *ac = ARM_CPU(first_cpu);
+                    pc = ac->env.regs[15];
+                }
+                fprintf(stderr, "[trx] A_SCH fn=%u page0 %04x->%04x page1 %04x->%04x "
+                        "PC_ARM=0x%08x\n", s->fn, prev[0], v0, prev[1], v1, pc);
+                n++;
+            }
+            prev[0] = v0; prev[1] = v1; first = 0;
         }
     }
 
