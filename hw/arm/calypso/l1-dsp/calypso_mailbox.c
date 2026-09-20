@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hw/arm/calypso/calypso_debug.h"
 
 int calypso_mbx_actif = -1;   /* -1 = initialise on first access */
 
@@ -106,7 +107,7 @@ void calypso_mbx_init(void)
     }
     g_init = 1;
 
-    e = getenv("CALYPSO_MAILBOX");
+    e = calypso_getenv("CALYPSO_MAILBOX");
     if (!e || !*e || !strcmp(e, "0")) {
         calypso_mbx_actif = 0;        /* off: zero cost on the hot paths */
         return;
@@ -117,7 +118,7 @@ void calypso_mbx_init(void)
         g_ecr = 0;
     }
 
-    e = getenv("CALYPSO_MAILBOX_CELLS");
+    e = calypso_getenv("CALYPSO_MAILBOX_CELLS");
     if (e && *e) {
         const char *p = e;
         while (*p && g_ncells < 32) {
@@ -140,7 +141,7 @@ void calypso_mbx_init(void)
     /* CALYPSO_MAILBOX_RANGES=lo-hi,lo-hi,... , bounds INCLUDED. Same tolerant
      * parse as _CELLS: stop at the first unreadable token rather than guess.
      * Bounds are swapped back into order when needed. */
-    e = getenv("CALYPSO_MAILBOX_RANGES");
+    e = calypso_getenv("CALYPSO_MAILBOX_RANGES");
     if (e && *e) {
         const char *p = e;
         while (*p && g_nranges < 16) {
@@ -174,24 +175,24 @@ void calypso_mbx_init(void)
         }
     }
 
-    e = getenv("CALYPSO_MAILBOX_ONLY");
+    e = calypso_getenv("CALYPSO_MAILBOX_ONLY");
     g_only = (e && *e == '1');
 
-    e = getenv("CALYPSO_MAILBOX_BRUT");
+    e = calypso_getenv("CALYPSO_MAILBOX_BRUT");
     g_brut = (e && *e == '1');
 
-    e = getenv("CALYPSO_MAILBOX_MAX");
+    e = calypso_getenv("CALYPSO_MAILBOX_MAX");
     if (e && *e) {
         g_max = strtoul(e, NULL, 0);
     }
 
-    e = getenv("CALYPSO_MAILBOX_FILE");
+    e = calypso_getenv("CALYPSO_MAILBOX_FILE");
     if (!e || !*e) {
         static char def[512];
         /* The repo exports LOG_DIR (paths.env). CALYPSO_LOG_DIR is accepted as
          * a fallback, but LOG_DIR wins. */
-        const char *d = getenv("LOG_DIR");
-        if (!d || !*d) d = getenv("CALYPSO_LOG_DIR");
+        const char *d = calypso_getenv("LOG_DIR");
+        if (!d || !*d) d = calypso_getenv("CALYPSO_LOG_DIR");
         snprintf(def, sizeof(def), "%s/mailbox.log",
                  (d && *d) ? d : "/tmp/calypso/logs");
         e = def;

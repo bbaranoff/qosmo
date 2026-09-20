@@ -6,6 +6,7 @@
  * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 /* ================================================================
  * Memory access
@@ -130,7 +131,7 @@ void ar_write_track(C54xState *s, unsigned idx, uint16_t new_val)
         }
     }
     if (g_ar_enabled < 0) {
-        const char *e = getenv("CALYPSO_AR_TRACE");
+        const char *e = calypso_getenv("CALYPSO_AR_TRACE");
         g_ar_mask = (e && *e) ? (unsigned)strtoul(e, NULL, 0) : 0xFFu;
         g_ar_enabled = calypso_debug_enabled("AR-TRACE") ? 1 : 0;
         if (g_ar_enabled) {
@@ -218,7 +219,7 @@ unsigned g_a_trace_log_cap   = 50;
 void a_track_init_lazy(void)
 {
     if (g_a_trace_enabled >= 0) return;
-    const char *e = getenv("CALYPSO_A_TRACE_PC");
+    const char *e = calypso_getenv("CALYPSO_A_TRACE_PC");
     if (calypso_debug_enabled("A-TRACE")) {
         g_a_trace_pc = (e && *e) ? (uint16_t)strtoul(e, NULL, 0) : 0;
         g_a_trace_enabled = 1;
@@ -289,13 +290,13 @@ unsigned g_ar6_at_log_cap     = 200;
 void ar6_at_init_lazy(void)
 {
     if (g_ar6_at_enabled >= 0) return;
-    const char *e = getenv("CALYPSO_AR6_AT_PC");
+    const char *e = calypso_getenv("CALYPSO_AR6_AT_PC");
     if (calypso_debug_enabled("AR6-AT")) {
         g_ar6_at_pc = (e && *e) ? (uint16_t)strtoul(e, NULL, 0) : 0;
         g_ar6_at_enabled = 1;
-        const char *lo = getenv("CALYPSO_AR6_WIN_LO");
-        const char *hi = getenv("CALYPSO_AR6_WIN_HI");
-        const char *cap = getenv("CALYPSO_AR6_AT_LOG_CAP");
+        const char *lo = calypso_getenv("CALYPSO_AR6_WIN_LO");
+        const char *hi = calypso_getenv("CALYPSO_AR6_WIN_HI");
+        const char *cap = calypso_getenv("CALYPSO_AR6_AT_LOG_CAP");
         g_ar6_at_win_lo = (lo && *lo) ? (unsigned)strtoul(lo, NULL, 0) : 0;
         g_ar6_at_win_hi = (hi && *hi) ? (unsigned)strtoul(hi, NULL, 0) : 0xFFFFFFFFu;
         g_ar6_at_log_cap = (cap && *cap) ? (unsigned)strtoul(cap, NULL, 0) : 200;
@@ -531,7 +532,7 @@ void mvpd_trace_init_lazy(void)
     if (g_mvpd_trace_enabled >= 0) return;
     const char *e = cdbg_env("MVPD");
     g_mvpd_trace_enabled = (e && *e == '1') ? 1 : 0;
-    const char *l = getenv("CALYPSO_MVPD_BOOT_LIMIT");
+    const char *l = calypso_getenv("CALYPSO_MVPD_BOOT_LIMIT");
     g_mvpd_boot_limit = (l && *l) ? (unsigned)strtoul(l, NULL, 0) : 500000u;
     if (g_mvpd_trace_enabled) {
         fprintf(stderr,
@@ -836,7 +837,7 @@ uint16_t g_force_intm_at_pc = 0xFFFF;
 void force_intm_oneshot_check(C54xState *s)
 {
     if (g_force_intm_oneshot_enabled < 0) {
-        const char *e = getenv("CALYPSO_FORCE_INTM_ONESHOT");
+        const char *e = calypso_getenv("CALYPSO_FORCE_INTM_ONESHOT");
         /* Strict gate: ON only for =1; =0 or unset means OFF. The one-shot
          * masks the vec28 livelock by clearing INTM once, which is useful
          * until the frame-IT over-fire is fixed at its BSP root. */
@@ -845,7 +846,7 @@ void force_intm_oneshot_check(C54xState *s)
          * only when the PC matches, so the force lands at a safe point (the
          * RET at fc6f, the idle dispatcher) instead of mid-compute at fc57.
          * That separates state corruption from a broken downstream path. */
-        const char *pc_e = getenv("CALYPSO_FORCE_INTM_AT_PC");
+        const char *pc_e = calypso_getenv("CALYPSO_FORCE_INTM_AT_PC");
         if (pc_e && *pc_e) {
             unsigned long pc_val = strtoul(pc_e, NULL, 0);
             if (pc_val <= 0xFFFF) {

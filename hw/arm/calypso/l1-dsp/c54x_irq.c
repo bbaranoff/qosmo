@@ -6,6 +6,7 @@
  * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 void calypso_inth_arm_ack(void);
 /* @BEQUILLE - FRAME_IT_LEVEL  (CALYPSO_FRAME_IT_LEVEL, EQ1, default OFF)
@@ -18,7 +19,7 @@ void calypso_inth_arm_ack(void);
 bool frame_it_level_on(void)
 {
     static int c = -1;
-    if (c < 0) { const char *e = getenv("CALYPSO_FRAME_IT_LEVEL"); c = (e && *e == '1') ? 1 : 0; }
+    if (c < 0) { const char *e = calypso_getenv("CALYPSO_FRAME_IT_LEVEL"); c = (e && *e == '1') ? 1 : 0; }
     return c;
 }
 /* @BEQUILLE - FRAME_IT_PRIO  (CALYPSO_FRAME_IT_PRIO, EQ1, default OFF)
@@ -31,14 +32,14 @@ bool frame_it_level_on(void)
 bool frame_it_prio_on(void)
 {
     static int c = -1;
-    if (c < 0) { const char *e = getenv("CALYPSO_FRAME_IT_PRIO"); c = (e && *e == '1') ? 1 : 0; }
+    if (c < 0) { const char *e = calypso_getenv("CALYPSO_FRAME_IT_PRIO"); c = (e && *e == '1') ? 1 : 0; }
     return c;
 }
 
 bool c54x_irq_level_check(C54xState *s)
 {
     static int en = -1;
-    if (en < 0) { const char *_d = getenv("CALYPSO_DSP"); en = (getenv("CALYPSO_C54X_IRQ_LEVEL") || (_d && !strcmp(_d, "c54x"))) ? 1 : 0; }
+    if (en < 0) { const char *_d = calypso_getenv("CALYPSO_DSP"); en = (calypso_getenv("CALYPSO_C54X_IRQ_LEVEL") || (_d && !strcmp(_d, "c54x"))) ? 1 : 0; }
     if (!en) return false;
     /* Level hold: keep bit 12 pending in the IFR until the frame IT has been
      * vectored (vec 28), so the next INTM=0 window picks it up. */
@@ -185,7 +186,7 @@ bool c54x_irq_level_check(C54xState *s)
      * PC=0 storm follows. Legacy behaviour: CALYPSO_IT_PUSH_XPC_ALWAYS=1. */
     {
         static int always = -1;
-        if (always < 0) { const char *e = getenv("CALYPSO_IT_PUSH_XPC_ALWAYS");
+        if (always < 0) { const char *e = calypso_getenv("CALYPSO_IT_PUSH_XPC_ALWAYS");
                           always = (e && *e != 0) ? 1 : 0; }
         if (always || s->xpc != 0) { s->sp--; data_write(s, s->sp, s->xpc); }
     }

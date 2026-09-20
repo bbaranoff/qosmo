@@ -17,6 +17,7 @@
 #include "calypso_c54x.h"
 #include "hw/core/cpu.h"
 #include <stdlib.h>  /* getenv */
+#include "hw/arm/calypso/calypso_debug.h"
 
 #define TINT0_LOG(fmt, ...) \
     fprintf(stderr, "[tint0] " fmt "\n", ##__VA_ARGS__)
@@ -54,7 +55,7 @@ static void tint0_tick_cb(void *opaque)
     {
         static int pcb_threaded = -1;
         if (pcb_threaded < 0) {
-            const char *e = getenv("CALYPSO_PCB_TICK_THREADS");
+            const char *e = calypso_getenv("CALYPSO_PCB_TICK_THREADS");
             pcb_threaded = (e && e[0] == '1') ? 1 : 0;
         }
         if (!pcb_threaded && tint0.running) {

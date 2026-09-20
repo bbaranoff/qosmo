@@ -5,6 +5,7 @@
  * Split out of calypso_c54x.c on 2026-09-18. File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
 {
@@ -45,7 +46,7 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
              */
             static int ar2_drop = -1;
             if (ar2_drop < 0) {
-                const char *e = getenv("CALYPSO_AR2_FLOOR_DROP");
+                const char *e = calypso_getenv("CALYPSO_AR2_FLOOR_DROP");
                 ar2_drop = (e && *e == '1') ? 1 : 0;
             }
             if (calypso_debug_enabled("AR2-FLOOR"))

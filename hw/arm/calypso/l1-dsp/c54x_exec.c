@@ -6,6 +6,7 @@
  * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 /* 0xF4xx source/destination selectors: bit 9 = src, bit 8 = dst (TI SPRU172C). */
 static inline void c54x_f4_srcdst(uint16_t op, int *src, int *dst)
@@ -285,7 +286,7 @@ bool calypso_fix_enabled(const char *name)
     static char buf[1024];
     static int  init = 0;
     if (!init) {
-        const char *e = getenv("CALYPSO_FIXES");
+        const char *e = calypso_getenv("CALYPSO_FIXES");
         snprintf(buf, sizeof(buf), "%s", e ? e : "");
         init = 1;
         if (buf[0])
@@ -354,7 +355,7 @@ int c54x_exec_one(C54xState *s)
          *             Only leaving the variable unset disables it.
          */
         static int cbk = -2;
-        if (cbk == -2) { const char *e = getenv("CALYPSO_CORR_BANK");
+        if (cbk == -2) { const char *e = calypso_getenv("CALYPSO_CORR_BANK");
                          cbk = (e && *e) ? atoi(e) : -1; }   /* -1 = off; 0..3 = forced XPC */
         if (cbk >= 0 && cbk <= 3 && s->pc >= 0x8d00 && s->pc <= 0xa200 && s->xpc != (uint16_t)cbk) {
             s->xpc = (uint16_t)cbk;
@@ -437,7 +438,7 @@ int c54x_exec_one(C54xState *s)
 
     static int ct_lo = -1, ct_hi = -1;
     if (ct_lo < 0) {
-        const char *l = getenv("CALYPSO_CORR_LO"); const char *h = getenv("CALYPSO_CORR_HI");
+        const char *l = calypso_getenv("CALYPSO_CORR_LO"); const char *h = calypso_getenv("CALYPSO_CORR_HI");
         ct_lo = l ? (int)strtol(l, NULL, 0) : 0x8560;
         ct_hi = h ? (int)strtol(h, NULL, 0) : 0x8590;
     }
@@ -516,7 +517,7 @@ int c54x_exec_one(C54xState *s)
         }
     }
 
-    if (s->pc == 0x013b && getenv("CALYPSO_AR0_DEBUG")) {
+    if (s->pc == 0x013b && calypso_getenv("CALYPSO_AR0_DEBUG")) {
         static int d13 = 0;
         if (!d13) { d13 = 1;
             fprintf(stderr, "[c54x] SUB-013B A=0x%06llx DP=0x%03x d_page(08D4)=0x%04x insn=%u\n",
@@ -531,7 +532,7 @@ int c54x_exec_one(C54xState *s)
                         s->prog[(uint16_t)(a+2)], s->prog[(uint16_t)(a+3)]);
         }
     }
-    if (s->pc == 0x8869 && getenv("CALYPSO_AR0_DEBUG")) {
+    if (s->pc == 0x8869 && calypso_getenv("CALYPSO_AR0_DEBUG")) {
         static int d88 = 0;
         if (!d88) { d88 = 1;
             fprintf(stderr, "[c54x] TASK-8869 A=0x%06llx DP=0x%03x AR2=%04x AR3=%04x "
@@ -544,7 +545,7 @@ int c54x_exec_one(C54xState *s)
                         s->prog[(uint16_t)(a+2)], s->prog[(uint16_t)(a+3)]);
         }
     }
-    if (s->pc == 0x7234 && getenv("CALYPSO_AR0_DEBUG")) {
+    if (s->pc == 0x7234 && calypso_getenv("CALYPSO_AR0_DEBUG")) {
         static int d72 = 0;
         if (!d72) { d72 = 1;
             int ovly = !!(s->pmst & PMST_OVLY);
@@ -721,7 +722,7 @@ int c54x_exec_one(C54xState *s)
     if (s->pc == 0x7234) {
         /* One-shot dump of the 0x7234 scheduler (CALYPSO_AR0_DEBUG): what it does
          * and which indirect pointer sends it to 0x013b. */
-        if (getenv("CALYPSO_AR0_DEBUG")) {
+        if (calypso_getenv("CALYPSO_AR0_DEBUG")) {
             static int d7 = 0;
             if (!d7) { d7 = 1;
                 fprintf(stderr, "[c54x] SCHED-7234 A=0x%06llx ST0=0x%04x DP=0x%03x "
@@ -748,7 +749,7 @@ int c54x_exec_one(C54xState *s)
          *             the ARM path.
          */
         static int fd = -1;
-        if (fd < 0) { const char *e = getenv("CALYPSO_FORCE_DISPATCH"); fd = (e && atoi(e) > 0) ? 1 : 0; }
+        if (fd < 0) { const char *e = calypso_getenv("CALYPSO_FORCE_DISPATCH"); fd = (e && atoi(e) > 0) ? 1 : 0; }
         if (fd) {
             /* d_dsp_page is 0x08D4 (0x08E2 is d_dsp_state) and must be written
              * in api_ram: that is the array the ROM reads for the 0x0800+ range.
@@ -780,7 +781,7 @@ int c54x_exec_one(C54xState *s)
      * buffer amplitude. Writes nothing, so it cannot change behaviour. */
     if (s->pc == 0x9841) {
         static int on = -1;
-        if (on < 0) { const char *e = getenv("CALYPSO_SBFN"); on = (e && *e && atoi(e)) ? 1 : 0; }
+        if (on < 0) { const char *e = calypso_getenv("CALYPSO_SBFN"); on = (e && *e && atoi(e)) ? 1 : 0; }
         if (on) {
             static unsigned n = 0, prevwr = 0;
             if (n++ < 400) {
@@ -820,7 +821,7 @@ int c54x_exec_one(C54xState *s)
     if (s->pc == 0x7d19 || s->pc == 0x7d1b || s->pc == 0x7d1c ||
         s->pc == 0x7d1e || s->pc == 0x81e4 || s->pc == 0x989f) {
         static int on = -1;
-        if (on < 0) { const char *e = getenv("CALYPSO_SUBC"); on = (e && *e && atoi(e)) ? 1 : 0; }
+        if (on < 0) { const char *e = calypso_getenv("CALYPSO_SUBC"); on = (e && *e && atoi(e)) ? 1 : 0; }
         if (on) {
             static unsigned n_q = 0, n_mpy = 0, n_ctl = 0;
             if (s->pc == 0x989f) {
@@ -882,7 +883,7 @@ int c54x_exec_one(C54xState *s)
      * whether the copy runs, with which AR0/AR3, and what the source holds. */
     if (s->pc == 0x7ccd || s->pc == 0x7ce0 || s->pc == 0x7ce4) {
         static int on = -1;
-        if (on < 0) { const char *e = getenv("CALYPSO_SUBC"); on = (e && *e && atoi(e)) ? 1 : 0; }
+        if (on < 0) { const char *e = calypso_getenv("CALYPSO_SUBC"); on = (e && *e && atoi(e)) ? 1 : 0; }
         if (on) {
             static unsigned n_g = 0, n_c3 = 0, n_c4 = 0;
             if (s->pc == 0x7ccd) {
@@ -925,9 +926,9 @@ int c54x_exec_one(C54xState *s)
         static int inited = 0, force_dp = -1, force_from = -1;
         if (!inited) {
             inited = 1;
-            const char *e = getenv("CALYPSO_FORCE_DP");
+            const char *e = calypso_getenv("CALYPSO_FORCE_DP");
             force_dp = (e && *e) ? (int)strtol(e, NULL, 0) : -1;
-            const char *ef = getenv("CALYPSO_FORCE_DP_FROM"); /* scoped: force only when DP==FROM */
+            const char *ef = calypso_getenv("CALYPSO_FORCE_DP_FROM"); /* scoped: force only when DP==FROM */
             force_from = (ef && *ef) ? (int)strtol(ef, NULL, 0) : -1; /* -1 = unscoped */
         }
         if (force_dp >= 0) {
@@ -1671,8 +1672,8 @@ int c54x_exec_one(C54xState *s)
                      *   ⚠️ Any measurement taken under this reroute is a measurement
                      *   UNDER CRUTCH: on the pure native path this stage is NEVER
                      *   executed ([2026-07-28] CALYPSO_WATCH_9F00_RD = 0). */
-                    const char *_e = getenv("CALYPSO_FB_ENERGY"); _fbe = (_e && atoi(_e) > 0) ? 1 : 0;
-                    const char *_p = getenv("CALYPSO_FB_CORR_ENTRY");
+                    const char *_e = calypso_getenv("CALYPSO_FB_ENERGY"); _fbe = (_e && atoi(_e) > 0) ? 1 : 0;
+                    const char *_p = calypso_getenv("CALYPSO_FB_CORR_ENTRY");
                     if (_p && *_p) _fbentry = (uint16_t)strtol(_p, NULL, 0);
                 }
                 if (_fbe && s->data[0x058a] == 5) {   /* d_task_md == 5 (FB command) */
@@ -5451,7 +5452,7 @@ int c54x_exec_one(C54xState *s)
         {
             static int ldu_trace_pc = -1;
             if (ldu_trace_pc < 0) {
-                const char *e = getenv("CALYPSO_TRACE_LDU_PC");
+                const char *e = calypso_getenv("CALYPSO_TRACE_LDU_PC");
                 ldu_trace_pc = (e && *e) ? (int)strtol(e, NULL, 0) : 0xfa7e;
             }
             if (s->pc == (uint16_t)ldu_trace_pc) {

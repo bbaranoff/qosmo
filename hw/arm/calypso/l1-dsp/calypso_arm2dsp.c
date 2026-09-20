@@ -95,7 +95,7 @@ static unsigned     a2d_ctrlsys_posts;   /* how many asserts (log cap)          
 
 static uint16_t a2d_env_u16(const char *name, uint16_t def)
 {
-    const char *e = getenv(name);
+    const char *e = calypso_getenv(name);
     if (!e || !*e) {
         return def;
     }
@@ -116,7 +116,7 @@ static void a2d_resolve(void)
     if (a2d_on >= 0) {
         return;
     }
-    const char *e = getenv("CALYPSO_ARM2DSP");
+    const char *e = calypso_getenv("CALYPSO_ARM2DSP");
     a2d_on   = (e && atoi(e) > 0) ? 1 : 0;
     a2d_word = a2d_env_u16("CALYPSO_ARM2DSP_TASKWORD", 0x0fff);
     a2d_bit  = a2d_env_u16("CALYPSO_ARM2DSP_TASKBIT", 0x0002);
@@ -133,14 +133,14 @@ static void a2d_resolve(void)
      *   retirer : when the emulated ARM firmware writes 0x098a/0x098c into the API
      *             RAM itself (handshake ported to the ARM side).
      */
-    const char *eb = getenv("CALYPSO_ARM2DSP_BGEN");
+    const char *eb = calypso_getenv("CALYPSO_ARM2DSP_BGEN");
     a2d_bgen        = (eb && atoi(eb) > 0) ? 1 : 0;
     a2d_bgen_a      = a2d_env_u16("CALYPSO_ARM2DSP_BGEN_A",      0x098a);
     a2d_bgen_c      = a2d_env_u16("CALYPSO_ARM2DSP_BGEN_C",      0x098c);
     a2d_bgen_val    = a2d_env_u16("CALYPSO_ARM2DSP_BGEN_VAL",    0x0001);
     a2d_bgen_val_c  = a2d_env_u16("CALYPSO_ARM2DSP_BGEN_VAL_C",  a2d_bgen_val);
     a2d_bgen_pollpc = a2d_env_u16("CALYPSO_ARM2DSP_BGEN_POLLPC", 0xdddb);
-    const char *eo  = getenv("CALYPSO_ARM2DSP_BGEN_ONESHOT");
+    const char *eo  = calypso_getenv("CALYPSO_ARM2DSP_BGEN_ONESHOT");
     a2d_bgen_oneshot = (eo && *eo) ? (atoi(eo) > 0 ? 1 : 0) : 1;
 
     /* CTRLSYS wire (RANK1): model the ARM's l1s_reset() write of d_ctrl_system
@@ -161,7 +161,7 @@ static void a2d_resolve(void)
      *             B_TASK_ABORT and breaks the FB return - hence =0 in the native
      *             profiles.
      */
-    const char *ec  = getenv("CALYPSO_ARM2DSP_CTRLSYS");
+    const char *ec  = calypso_getenv("CALYPSO_ARM2DSP_CTRLSYS");
     a2d_ctrlsys        = (ec && atoi(ec) > 0) ? 1 : 0;
     a2d_ctrlsys_cell   = a2d_env_u16("CALYPSO_ARM2DSP_CTRLSYS_CELL",   0x0810);
     a2d_ctrlsys_bit    = a2d_env_u16("CALYPSO_ARM2DSP_CTRLSYS_VAL",    0x8000);

@@ -128,7 +128,7 @@ bool calypso_debug_enabled_(const char *probe_name)
  * the cases where two modules read the same variable at different times. */
 int calypso_gate(const char *nom, int defaut)
 {
-    const char *e = nom ? getenv(nom) : NULL;
+    const char *e = nom ? calypso_getenv(nom) : NULL;
     if (!e) {
         return defaut;          /* unset: the caller decides */
     }
@@ -145,4 +145,32 @@ int calypso_gate(const char *nom, int defaut)
         return 0;
     }
     return 1;
+}
+
+
+/* ── getenv() memoised, see calypso_debug.h ────────────────────────────── */
+#define GETENV_MEMO 512
+static struct { const char *name; const char *val; } s_env[GETENV_MEMO];
+static int s_env_n;
+static pthread_mutex_t s_env_mu = PTHREAD_MUTEX_INITIALIZER;
+
+const char *calypso_getenv(const char *name)
+{
+    if (!name) return NULL;
+    /* fast path: string literals have one address per call site, and the
+     * same variable is usually asked from the same site */
+    int n = __atomic_load_n(&s_env_n, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++)
+        if (s_env[i].name == name) return s_env[i].val;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(s_env[i].name, name)) return s_env[i].val;
+    const char *v = getenv(name);
+    pthread_mutex_lock(&s_env_mu);
+    if (s_env_n < GETENV_MEMO) {
+        s_env[s_env_n].name = name;
+        s_env[s_env_n].val  = v;
+        __atomic_store_n(&s_env_n, s_env_n + 1, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&s_env_mu);
+    return v;
 }

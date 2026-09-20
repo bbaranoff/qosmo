@@ -123,7 +123,7 @@ static int arm_skip_words(void)
      * TOA = 23 + 9 x 1250 + 7 for an FCCH nine frames after the command, i.e.
      * the ROM's own origin already matches the firmware's 23. (242 was the
      * calibration for the earlier 156-symbol frames.) */
-    if (v < 0) { const char *e = getenv("CALYPSO_RHEA_DMA_ARM_SKIP"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
+    if (v < 0) { const char *e = calypso_getenv("CALYPSO_RHEA_DMA_ARM_SKIP"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
     return v;
 }
 
@@ -575,7 +575,7 @@ void calypso_rhea_dma_rx_request(C54xState *s)
             pdst = dst_idx + (unsigned)max_words;   /* 2nd API page = AAD+ALGTH */
         {
             static int contigu = -1;
-            if (contigu < 0) contigu = getenv("CALYPSO_RHEA_DMA_CONTIGU") ? 1 : 0;
+            if (contigu < 0) contigu = calypso_getenv("CALYPSO_RHEA_DMA_CONTIGU") ? 1 : 0;
             if (contigu) pdst = dst_idx + (unsigned)(pages * max_words);
         }
         /* [2026-09-19] Does the burst DMA ever land ON a_sch? a_sch[0..4] sit at

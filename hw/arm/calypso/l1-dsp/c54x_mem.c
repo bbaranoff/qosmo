@@ -5,6 +5,7 @@
  * Split out of calypso_c54x.c on 2026-09-18; file map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 static uint16_t data_read_locked(C54xState *s, uint16_t addr);
 /* DEMODIO: forward declaration - the helper is defined further down, but its
@@ -95,8 +96,8 @@ uint16_t data_read(C54xState *s, uint16_t addr)
      * reading 0x9260/0x9261, not the 0x9213/0x9215 default. */
     static uint16_t _fscI = 0, _fscQ = 0;
     if (_fscI == 0) {
-        const char *c = getenv("CALYPSO_FB_STREAM_CELL");  _fscI = c ? (uint16_t)strtol(c, NULL, 0) : 0x9213;
-        const char *q = getenv("CALYPSO_FB_STREAM_CELLQ"); _fscQ = q ? (uint16_t)strtol(q, NULL, 0) : 0x9215;
+        const char *c = calypso_getenv("CALYPSO_FB_STREAM_CELL");  _fscI = c ? (uint16_t)strtol(c, NULL, 0) : 0x9213;
+        const char *q = calypso_getenv("CALYPSO_FB_STREAM_CELLQ"); _fscQ = q ? (uint16_t)strtol(q, NULL, 0) : 0x9215;
     }
     if (s->pc >= 0x9f00 && s->pc <= 0x9fb8 && (addr == _fscI || addr == _fscQ)) {
         static int _fs = -1;
@@ -213,9 +214,9 @@ static void rmap_dump(void)
 static void rmap_note(uint16_t addr, uint16_t pc)
 {
     if (g_rmap_on < 0) {
-        const char *e = getenv("CALYPSO_RMAP");
+        const char *e = calypso_getenv("CALYPSO_RMAP");
         g_rmap_on = (e && atoi(e) > 0) ? 1 : 0;
-        const char *lo = getenv("CALYPSO_RMAP_PCLO"), *hi = getenv("CALYPSO_RMAP_PCHI");
+        const char *lo = calypso_getenv("CALYPSO_RMAP_PCLO"), *hi = calypso_getenv("CALYPSO_RMAP_PCHI");
         g_rmap_pclo = lo ? (uint16_t)strtoul(lo, NULL, 0) : 0x9f00;
         g_rmap_pchi = hi ? (uint16_t)strtoul(hi, NULL, 0) : 0x9fff;
         if (g_rmap_on)
@@ -415,7 +416,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
     {
         static int watch_rd_addr = -1;
         if (watch_rd_addr < 0) {
-            const char *e = getenv("CALYPSO_WATCH_RD_ADDR");
+            const char *e = calypso_getenv("CALYPSO_WATCH_RD_ADDR");
             watch_rd_addr = (e && *e) ? (int)strtol(e, NULL, 0) : 0;
         }
         if (watch_rd_addr && addr == (uint16_t)watch_rd_addr) {
@@ -976,7 +977,7 @@ static void stkw_rec(C54xState *s, uint16_t addr, uint16_t val)
     {
         static int tval = -2;
         if (tval == -2) {
-            const char *te = getenv("CALYPSO_TRACK_STKVAL");
+            const char *te = calypso_getenv("CALYPSO_TRACK_STKVAL");
             tval = (te && *te) ? (int)strtol(te, NULL, 0) : 0x3125;
         }
         if (tval >= 0 && val == (uint16_t)tval)
@@ -1216,7 +1217,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
      *   ARM reads 0x0000 -> ARM<->DSP desync. */
     {
         static int sent = -1;
-        if (sent < 0) { const char *e = getenv("CALYPSO_FBDET_SENTINEL"); sent = e ? atoi(e) : 0;
+        if (sent < 0) { const char *e = calypso_getenv("CALYPSO_FBDET_SENTINEL"); sent = e ? atoi(e) : 0;
             if (sent==1) fprintf(stderr, "[c54x] FBDET-SENTINEL=1 FORCE : data[0x08f8] forcé à 0xDEAD\n");
             else if (sent==2) fprintf(stderr, "[c54x] FBDET-SENTINEL=2 MONITOR : logge la vraie valeur écrite à 0x08f8 (pas de force)\n"); }
         {
@@ -1377,7 +1378,7 @@ int   g_flow_armed = 0;
 static void flow_log(const char *rw, uint16_t addr, uint16_t val, uint16_t pc, unsigned insn)
 {
     if (g_flow_budget == -2) {
-        const char *e = getenv("CALYPSO_FLOWTRACE");
+        const char *e = calypso_getenv("CALYPSO_FLOWTRACE");
         g_flow_budget = (e && *e) ? atol(e) : -1;
         if (g_flow_budget > 0) {
             g_flow_f = fopen("/tmp/calypso_flow.txt", "w");
@@ -1435,12 +1436,12 @@ static void wmap_heartbeat(void)
 static void wmap_note(uint16_t addr, uint16_t val, uint16_t pc)
 {
     if (g_wmap_on < 0) {
-        const char *e = getenv("CALYPSO_WMAP");
+        const char *e = calypso_getenv("CALYPSO_WMAP");
         g_wmap_on = (e && atoi(e) > 0) ? 1 : 0;
-        const char *lo = getenv("CALYPSO_WMAP_LO"), *hi = getenv("CALYPSO_WMAP_HI");
+        const char *lo = calypso_getenv("CALYPSO_WMAP_LO"), *hi = calypso_getenv("CALYPSO_WMAP_HI");
         g_wmap_lo = lo ? (uint16_t)strtoul(lo, NULL, 0) : 0x2c00;
         g_wmap_hi = hi ? (uint16_t)strtoul(hi, NULL, 0) : 0x2c1f;
-        const char *lo2 = getenv("CALYPSO_WMAP_LO2"), *hi2 = getenv("CALYPSO_WMAP_HI2");
+        const char *lo2 = calypso_getenv("CALYPSO_WMAP_LO2"), *hi2 = calypso_getenv("CALYPSO_WMAP_HI2");
         g_wmap_lo2 = lo2 ? (uint16_t)strtoul(lo2, NULL, 0) : 0xffff;
         g_wmap_hi2 = hi2 ? (uint16_t)strtoul(hi2, NULL, 0) : 0x0000;
         if (g_wmap_on)
@@ -1483,11 +1484,11 @@ uint16_t g_dio_pclo, g_dio_pchi;
 
 static void dio_init(void)
 {
-    const char *e = getenv("CALYPSO_DEMODIO");
+    const char *e = calypso_getenv("CALYPSO_DEMODIO");
     g_dio_on = (e && atoi(e) > 0) ? 1 : 0;
-    const char *a = getenv("CALYPSO_DEMODIO_AFTER");
+    const char *a = calypso_getenv("CALYPSO_DEMODIO_AFTER");
     g_dio_after = a && *a ? strtoull(a, NULL, 0) : 40000000ULL;
-    const char *lo = getenv("CALYPSO_DEMODIO_PCLO"), *hi = getenv("CALYPSO_DEMODIO_PCHI");
+    const char *lo = calypso_getenv("CALYPSO_DEMODIO_PCLO"), *hi = calypso_getenv("CALYPSO_DEMODIO_PCHI");
     g_dio_pclo = lo ? (uint16_t)strtoul(lo, NULL, 0) : 0x9f95;
     g_dio_pchi = hi ? (uint16_t)strtoul(hi, NULL, 0) : 0x9fe2;
     if (g_dio_on)
@@ -1717,7 +1718,8 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             n2++;
         }
     }
-    { static long _dwl_n = 0; if (getenv("CALYPSO_DWL_PROVE") && (_dwl_n++ % 100000) == 0)
+    { static long _dwl_n = 0; static int _dwl_on = -1; if (_dwl_on < 0) _dwl_on = calypso_getenv("CALYPSO_DWL_PROVE") ? 1 : 0;
+      if (_dwl_on && (_dwl_n++ % 100000) == 0)
         fprintf(stderr, "[c54x] DWL-PROVE appel #%ld addr=0x%04x pc=0x%04x\n", _dwl_n, addr, s->pc); }
     {   /* FBCNT-WATCH - CALYPSO_FBROUTE=1 (same gate as FBROUTE, of which this
          * is the direct sequel). Read-only, capped.
@@ -1912,7 +1914,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
          *             0x2a00.
          */
         static int _nc = -1;
-        if (_nc < 0) { const char *e = getenv("CALYPSO_DEMOD_NOCLOBBER"); _nc = (e && atoi(e) > 0) ? 1 : 0; }
+        if (_nc < 0) { const char *e = calypso_getenv("CALYPSO_DEMOD_NOCLOBBER"); _nc = (e && atoi(e) > 0) ? 1 : 0; }
         if (_nc && addr >= 0x2a00 && addr < 0x2b28 &&
             (s->pc == 0x9fb8 || s->pc == 0x9fe2)) {
             static unsigned _ncn = 0;
@@ -2292,7 +2294,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
      * written, written then dropped, and corrupted. */
     {
         static int wv = -1;
-        if (wv < 0) { const char *e = getenv("CALYPSO_WATCH_VEC"); wv = (e && *e != 0) ? 1 : 0; }
+        if (wv < 0) { const char *e = calypso_getenv("CALYPSO_WATCH_VEC"); wv = (e && *e != 0) ? 1 : 0; }
         if (wv && ((addr >= 0x0080 && addr <= 0x00FF) || (addr >= 0x0138 && addr <= 0x013C))) {
             static unsigned wvn = 0;
             if (wvn++ < 100)
@@ -2647,7 +2649,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         static int wr_n = 0;
         if (!wr_init) {
             wr_init = 1;
-            const char *e = getenv("CALYPSO_WATCH_WR_ADDR");
+            const char *e = calypso_getenv("CALYPSO_WATCH_WR_ADDR");
             if (e && *e) {
                 const char *p = e;
                 while (*p && wr_n < 8) {
@@ -2690,9 +2692,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         static long wrp_seen = 0;
         if (!wrp_init) {
             wrp_init = 1;
-            const char *lo = getenv("CALYPSO_WATCH_WR_LO");
-            const char *hi = getenv("CALYPSO_WATCH_WR_HI");
-            const char *nn = getenv("CALYPSO_WATCH_WR_N");
+            const char *lo = calypso_getenv("CALYPSO_WATCH_WR_LO");
+            const char *hi = calypso_getenv("CALYPSO_WATCH_WR_HI");
+            const char *nn = calypso_getenv("CALYPSO_WATCH_WR_N");
             if (lo && *lo) wrp_lo = strtol(lo, NULL, 0);
             if (hi && *hi) wrp_hi = strtol(hi, NULL, 0);
             if (nn && *nn) wrp_max = strtol(nn, NULL, 0);
@@ -3574,9 +3576,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
     if (addr == 0x43d8) {
         static int _dg = -1, _dgv = -1; static unsigned _dgn = 0;
         if (_dg < 0) {
-            const char *m = getenv("CALYPSO_DISPATCH_INSTALL_AT");
+            const char *m = calypso_getenv("CALYPSO_DISPATCH_INSTALL_AT");
             _dg = (m && strcmp(m, "init") == 0) ? 1 : 0;
-            const char *v = getenv("CALYPSO_DISPATCH_INSTALL");
+            const char *v = calypso_getenv("CALYPSO_DISPATCH_INSTALL");
             _dgv = (v && *v) ? (int)strtoul(v, NULL, 0) : -1;
             if (_dg && _dgv >= 0)
                 fprintf(stderr, "[c54x] DISPATCH-GRAFT arme : toute ecriture de 0xab38 "

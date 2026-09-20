@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "hw/arm/calypso/calypso_invariants.h"
 #include <stdarg.h>
+#include "hw/arm/calypso/calypso_debug.h"
 
 
 #define INV_MAX 64
@@ -22,7 +23,7 @@ static int inv_enabled = -1;
 static int inv_on(void)
 {
     if (inv_enabled < 0) {
-        const char *e = getenv("CALYPSO_INVARIANTS");
+        const char *e = calypso_getenv("CALYPSO_INVARIANTS");
         inv_enabled = (e && e[0] == '1') ? 1 : 0;   /* default OFF (boot safety) */
     }
     return inv_enabled;

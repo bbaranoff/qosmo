@@ -106,9 +106,9 @@ static void bsp_iq_publish(const int16_t *iq, int n)
     {
         static int on = -1, decim = 4;
         if (on < 0) {
-            const char *e = getenv("CALYPSO_FB_STREAM");
+            const char *e = calypso_getenv("CALYPSO_FB_STREAM");
             on = (e && atoi(e) > 0) ? 1 : 0;
-            const char *d = getenv("CALYPSO_FB_STREAM_DECIM");
+            const char *d = calypso_getenv("CALYPSO_FB_STREAM_DECIM");
             if (d && *d) {
                 decim = atoi(d);
             }
@@ -155,11 +155,11 @@ uint16_t calypso_bsp_rssi_apm(void)
     static int init;
     if (!init) {
         init = 1;
-        const char *mr = getenv("CALYPSO_DECAN_PM_MAV_REF");
+        const char *mr = calypso_getenv("CALYPSO_DECAN_PM_MAV_REF");
         if (mr && *mr) {
             mav_ref = atof(mr);
         }
-        const char *rr = getenv("CALYPSO_DECAN_PM_RF_REF");
+        const char *rr = calypso_getenv("CALYPSO_DECAN_PM_RF_REF");
         if (rr && *rr) {
             rf_ref = atof(rr);
         }
@@ -478,7 +478,7 @@ static BspBurstSlot *bsp_take_nearest(uint8_t tn, uint32_t current_fn)
 
 static uint16_t parse_uint_env(const char *name, uint16_t def)
 {
-    const char *v = getenv(name);
+    const char *v = calypso_getenv(name);
     if (!v || !*v) return def;
     /* Auto-detect hex even without a 0x prefix: any non-decimal hex digit
      * (a-f / A-F) forces base 16. strtoul with base 0 parses "2a00" as
@@ -609,8 +609,8 @@ static void bsp_trxd_readable(void *opaque)
      * CALYPSO_IQ_TEE_HOST:CALYPSO_IQ_TEE_PORT, read by the osmo-operator live
      * FFT. Opt-in: nothing is sent unless one of the two variables is set. */
     {
-        const char *tee_p = getenv("CALYPSO_IQ_TEE_PORT");
-        const char *tee_h = getenv("CALYPSO_IQ_TEE_HOST");
+        const char *tee_p = calypso_getenv("CALYPSO_IQ_TEE_PORT");
+        const char *tee_h = calypso_getenv("CALYPSO_IQ_TEE_HOST");
         if ((tee_p && *tee_p) || (tee_h && *tee_h)) {
             static int tee_fd = -1;
             static struct sockaddr_in tee_dst;
@@ -742,7 +742,7 @@ static void bsp_trxd_readable(void *opaque)
 
     static int iq_pt_mode = -1;
     if (iq_pt_mode < 0) {
-        const char *e = getenv("CALYPSO_BSP_IQ_PASSTHROUGH");
+        const char *e = calypso_getenv("CALYPSO_BSP_IQ_PASSTHROUGH");
         /* Passthrough is the DEFAULT: cos/sin synthesis yields an incoherent
          * tone. Opt out explicitly with CALYPSO_BSP_IQ_PASSTHROUGH=0. */
         iq_pt_mode = (e && *e == '0') ? 0 : 1;
@@ -761,7 +761,7 @@ static void bsp_trxd_readable(void *opaque)
          * 4 SPS = 37 symbols, which never correlates. */
         static int decim = -1;
         if (decim < 0) {
-            const char *d = getenv("CALYPSO_BSP_IQ_DECIM");
+            const char *d = calypso_getenv("CALYPSO_BSP_IQ_DECIM");
             decim = (d && *d) ? atoi(d) : 4;
             if (decim < 1) decim = 1;
             BSP_LOG("IQ_DECIM=%d (STEP3 decimation ->1SPS)", decim);
@@ -793,7 +793,7 @@ static void bsp_trxd_readable(void *opaque)
         {
             static int win = -1;
             if (win < 0) {
-                const char *e = getenv("CALYPSO_BSP_RX_WINDOW");
+                const char *e = calypso_getenv("CALYPSO_BSP_RX_WINDOW");
                 win = (e && *e) ? atoi(e) : 148;
                 if (win > BSP_IQ_MAX_I16 / 2) win = BSP_IQ_MAX_I16 / 2;
                 if (win != 148)
@@ -888,7 +888,7 @@ static void bsp_trxd_readable(void *opaque)
         {
             static int win = -1;
             if (win < 0) {
-                const char *e = getenv("CALYPSO_BSP_RX_WINDOW");
+                const char *e = calypso_getenv("CALYPSO_BSP_RX_WINDOW");
                 win = (e && *e) ? atoi(e) : 148;
                 if (win < nbits) win = nbits;               /* never truncate */
                 if (win > BSP_IQ_MAX_I16 / 2) win = BSP_IQ_MAX_I16 / 2;
@@ -945,7 +945,7 @@ void calypso_bsp_toa_feedback(int toa)
 {
     static int en = -1;
     if (en < 0) {
-        const char *e = getenv("CALYPSO_BSP_TOA_LOCK"); en = (e && *e=='1') ? 1 : 0;
+        const char *e = calypso_getenv("CALYPSO_BSP_TOA_LOCK"); en = (e && *e=='1') ? 1 : 0;
         if (en) BSP_LOG("TOA_LOCK on : verrouillage natif du TOA sur 23 (biais placement)");
     }
     if (!en || toa <= 0) return;
@@ -981,7 +981,7 @@ int calypso_bsp_service(uint32_t current_fn)
      * (QEMU): only the ORDER matters, and the SCH carries the real FN for
      * synchronisation. */
     static int stream = -1;
-    if (stream < 0) { const char *e = getenv("CALYPSO_BSP_STREAM"); stream = (e && *e=='1') ? 1 : 0;
+    if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e=='1') ? 1 : 0;
                       if (stream) BSP_LOG("STREAM on : 1 burst TS0/trame en ordre FN (cohérence horloge)"); }
     if (stream) {
         /* oldest valid TS0 slot (smallest FN in circular order) */
@@ -1202,7 +1202,7 @@ void calypso_bsp_init(C54xState *dsp)
     /* Deterministic-replay short-circuit. If CALYPSO_BSP_REPLAY_FILE is
      * set, load it now and skip the UDP listener. Replay timer takes over
      * the supply role. */
-    const char *replay_path = getenv("CALYPSO_BSP_REPLAY_FILE");
+    const char *replay_path = calypso_getenv("CALYPSO_BSP_REPLAY_FILE");
     if (replay_path && *replay_path) {
         replay_count = bsp_replay_load(replay_path);
         BSP_LOG("REPLAY mode: loaded %zu bursts from %s (UDP socket bypassed)",
@@ -1233,8 +1233,8 @@ void calypso_bsp_init(C54xState *dsp)
         int one = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
-        const char *bind_addr_env = getenv("CALYPSO_BSP_BIND_ADDR");
-        const char *bind_lo_env   = getenv("CALYPSO_BSP_BIND_LOOPBACK");
+        const char *bind_addr_env = calypso_getenv("CALYPSO_BSP_BIND_ADDR");
+        const char *bind_lo_env   = calypso_getenv("CALYPSO_BSP_BIND_LOOPBACK");
         const char *bind_addr     = NULL;
         if (bind_addr_env && *bind_addr_env)
             bind_addr = bind_addr_env;
@@ -1246,7 +1246,7 @@ void calypso_bsp_init(C54xState *dsp)
         /* Port override: lets a Python proxy (iq_proxy.py) sit between the
          * source and QEMU. The source keeps sending to 6702 while QEMU listens
          * on CALYPSO_BSP_PORT and the proxy applies e.g. a Doppler shift. */
-        const char *port_env = getenv("CALYPSO_BSP_PORT");
+        const char *port_env = calypso_getenv("CALYPSO_BSP_PORT");
         int bsp_port = BSP_TRXD_PORT;
         if (port_env && *port_env) {
             int p = atoi(port_env);
@@ -1345,7 +1345,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * one-shot SB window keeps the block it is given (190 samples with the
      * margins). CALYPSO_BSP_TRAME_PLEINE=0 disables. */
     static int pleine = -1;
-    if (pleine < 0) { const char *e = getenv("CALYPSO_BSP_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
+    if (pleine < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
     const bool continu = !calypso_rhea_dma_one_shot();
     {
         static int16_t plein[2 * 157];
@@ -1364,7 +1364,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * address actually programmed, whenever it is known. */
     {
         static int follow = -1;
-        if (follow < 0) { const char *e = getenv("CALYPSO_BSP_AAD_FOLLOW"); follow = (e && *e=='0') ? 0 : 1; }
+        if (follow < 0) { const char *e = calypso_getenv("CALYPSO_BSP_AAD_FOLLOW"); follow = (e && *e=='0') ? 0 : 1; }
         if (follow) {
             uint16_t aad = calypso_rhea_dma_get_daram();
             if (aad && aad != bsp.daram_addr) {
@@ -1380,7 +1380,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
              * the DSP programs itself (ALGTH). CALYPSO_BSP_LEN_FOLLOW=0
              * restores the fixed cap. */
             static int lfollow = -1;
-            if (lfollow < 0) { const char *e = getenv("CALYPSO_BSP_LEN_FOLLOW"); lfollow = (e && *e=='0') ? 0 : 1; }
+            if (lfollow < 0) { const char *e = calypso_getenv("CALYPSO_BSP_LEN_FOLLOW"); lfollow = (e && *e=='0') ? 0 : 1; }
             if (lfollow) {
                 uint16_t lw = calypso_rhea_dma_get_len_words();
                 if (lw && lw != bsp.daram_len && lw <= 2048) {
@@ -1421,9 +1421,9 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         static long stride;
         static uint16_t base0;
         if (pfollow < 0) {
-            const char *e = getenv("CALYPSO_BSP_PAGE_FOLLOW");
+            const char *e = calypso_getenv("CALYPSO_BSP_PAGE_FOLLOW");
             pfollow = (e && *e && *e != '0') ? 1 : 0;
-            const char *st = getenv("CALYPSO_BSP_PAGE_STRIDE");
+            const char *st = calypso_getenv("CALYPSO_BSP_PAGE_STRIDE");
             stride = (st && *st) ? strtol(st, NULL, 0) : 0x180;
         }
         if (pfollow && bsp.dsp && bsp.dsp->api_ram && bsp.daram_addr) {
@@ -1461,7 +1461,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * FCCH probe (CALYPSO_IQDUMP_FCCH=1): coherence and dphi of the DECIMATED
      * burst written to DARAM. A real decimated FCCH gives dphi ~ +1.571 (pi/2)
      * and coh ~ 1, which checks the content layer of the feed. */
-    if (getenv("CALYPSO_IQDUMP_FCCH")) {
+    if (calypso_getenv("CALYPSO_IQDUMP_FCCH")) {
         int ns = n_int16 / 2;
         double accr = 0, acci = 0, den = 0;
         for (int k = 1; k < ns; k++) {
@@ -1568,7 +1568,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
            *   NB      : default ON, but nested inside the RX_FBFLAGS block, so it is
            *             never reached without CALYPSO_RX_FBFLAGS.
            */
-          { static int _pt = -1; if (_pt < 0) { const char *_pe = getenv("CALYPSO_POKE_TASK_MD"); _pt = _pe ? (atoi(_pe) > 0) : 1; }  /* default ON, =0 to disable */
+          { static int _pt = -1; if (_pt < 0) { const char *_pe = calypso_getenv("CALYPSO_POKE_TASK_MD"); _pt = _pe ? (atoi(_pe) > 0) : 1; }  /* default ON, =0 to disable */
             if (_pt) { static unsigned _n;
                        if (_n++ == 0) fprintf(stderr, "[bequille] POKE_TASK_MD ACTIF (ecrit d_task_md=%u pages 0/1)\n", _mdf);
                        bsp.dsp->data[0x0804] = _mdf;   /* task_md page0 = mission (5=FB 6=SB) */
@@ -1578,7 +1578,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
            * B_GSM_TASK(0x0002)|w_page, ALTERNATING 2<->3 (native stays at 2, so
            * w_page never flips). */
           { static int _pd = -1; static uint16_t _wp = 0;
-            if (_pd < 0) { const char *_de = getenv("CALYPSO_POKE_DISPATCH"); _pd = _de ? (atoi(_de) > 0) : 0; }
+            if (_pd < 0) { const char *_de = calypso_getenv("CALYPSO_POKE_DISPATCH"); _pd = _de ? (atoi(_de) > 0) : 0; }
             if (_pd) {
                 bsp.dsp->data[_wp ? 0x0818 : 0x0804] = _mdf;      /* d_task_md on the write page */
                 /* d_dsp_page is 0x08D4, not 0x08E2 (that is d_dsp_state), and the
@@ -1611,7 +1611,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      */
     { static int _di = -1; static uint16_t _tgt = 0; static int _os = -1; static int _done = 0;
       if (_di < 0) { _di = calypso_gate("CALYPSO_BSP_DISPATCH_FB", 0);
-        const char *_t = getenv("CALYPSO_BSP_DISPATCH_FB_TGT");
+        const char *_t = calypso_getenv("CALYPSO_BSP_DISPATCH_FB_TGT");
         _tgt = (_t && *_t) ? (uint16_t)strtoul(_t, NULL, 0) : 0x8d00;
         _os = calypso_gate("CALYPSO_BSP_DISPATCH_ONESHOT", 0); } /* default target 0x8d00.
         * ONESHOT installs and raises BRINT0 only ONCE instead of re-dispatching
@@ -1685,7 +1685,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * executed and its DMA has drained the RIF: nothing is in DARAM yet at the
      * moment the burst is handed over. Read it with calypso_bsp_verif_compare().
      * Gate CALYPSO_BSP_VERIF. */
-    if (getenv("CALYPSO_BSP_VERIF")) {
+    if (calypso_getenv("CALYPSO_BSP_VERIF")) {
         unsigned i = bsp_verif_pos;
         int nv = n_int16 < BSP_IQ_MAX_I16 ? n_int16 : BSP_IQ_MAX_I16;
         memcpy(bsp_verif_h[i].iq, iq, (size_t)nv * sizeof(int16_t));
@@ -1718,7 +1718,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * FCCH-PROBE. Outputs: /tmp/iq_rx_*.bin (CALYPSO_IQDUMP, raw int16) and
      * BSP_DUMP_RX_FILE (IQ16: 12-byte header [magic|fn LE|tn|n_int16 LE|pad]
      * then int16). */
-    if (getenv("CALYPSO_IQDUMP") || getenv("BSP_DUMP_RX_FILE")) {
+    if (calypso_getenv("CALYPSO_IQDUMP") || calypso_getenv("BSP_DUMP_RX_FILE")) {
         int nsx = n / 2;
         double ar = 0, ai = 0, dn = 0;
         for (int k = 1; k < nsx; k++) {
@@ -1729,7 +1729,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         }
         double bcoh = dn > 0 ? sqrt(ar*ar+ai*ai)/dn : 0;
         if (bcoh > 0.85) {   /* coherent burst = FCCH */
-            if (getenv("CALYPSO_IQDUMP")) {
+            if (calypso_getenv("CALYPSO_IQDUMP")) {
                 static unsigned rx_dump_n;
                 if (rx_dump_n < 24) {
                     char path[80];
@@ -1739,7 +1739,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                     rx_dump_n++;
                 }
             }
-            const char *bp = getenv("BSP_DUMP_RX_FILE");
+            const char *bp = calypso_getenv("BSP_DUMP_RX_FILE");
             if (bp && *bp) {
                 static FILE *bf; static int binit;
                 if (!binit) { bf = fopen(bp, "wb"); binit = 1; }
@@ -1957,7 +1957,7 @@ void calypso_bsp_deliver_buffered(uint32_t current_fn)
         /* I/Q dump for the deliver_buffered path: the post-AFC samples handed
          * to the correlator. Gated by CALYPSO_IQDUMP, independent counter,
          * iq_dlv prefix. */
-        if (getenv("CALYPSO_IQDUMP")) {
+        if (calypso_getenv("CALYPSO_IQDUMP")) {
             static unsigned dlv_dump_n;
             if (dlv_dump_n < 24) {
                 char path[80];
@@ -2033,7 +2033,7 @@ void calypso_bsp_deliver_buffered(uint32_t current_fn)
             static int   rx_dump_init = 0;
             if (!rx_dump_init) {
                 rx_dump_init = 1;
-                const char *p = getenv("BSP_DUMP_RX_FILE");
+                const char *p = calypso_getenv("BSP_DUMP_RX_FILE");
                 if (p && *p) {
                     rx_dump_f = fopen(p, "ab");
                     BSP_LOG("BSP_DUMP_RX_FILE='%s' fopen=%s",
@@ -2187,7 +2187,7 @@ static uint32_t d_rach_word_offset(void)
     static uint32_t cached = 0;
     static bool     done = false;
     if (done) return cached;
-    const char *e = getenv("CALYPSO_NDB_D_RACH_OFFSET");
+    const char *e = calypso_getenv("CALYPSO_NDB_D_RACH_OFFSET");
     if (e && *e) {
         cached = (uint32_t)strtoul(e, NULL, 0);
         BSP_LOG("d_rach offset: 0x%04x (env=%s)", cached, e);
@@ -2218,7 +2218,7 @@ static int rach_force_bsic(void)
 {
     static int cached = -2;
     if (cached != -2) return cached;
-    const char *e = getenv("CALYPSO_RACH_FORCE_BSIC");
+    const char *e = calypso_getenv("CALYPSO_RACH_FORCE_BSIC");
     /* Same empty-string-as-unset handling as d_rach_word_offset(). */
     if (!e || !*e) {
         cached = -1;

@@ -96,12 +96,12 @@ static void twl3025_lazy_env(void)
      *             AND exports it: harmless as a value, but present in the
      *             environment.
      */
-    const char *h = getenv("CALYPSO_TWL3025_AFC_HZ");
+    const char *h = calypso_getenv("CALYPSO_TWL3025_AFC_HZ");
     twl.force_hz = (h && *h) ? atoi(h) : 0;
     /* Master gate of the AFC loop (RX sample rotation by the VCXO offset).
      * Default ON: the AFC is part of the nominal osmocom path. Opt out with
      * CALYPSO_TWL3025_AFC=0 to deliver raw I/Q. */
-    const char *ae = getenv("CALYPSO_TWL3025_AFC");
+    const char *ae = calypso_getenv("CALYPSO_TWL3025_AFC");
     twl.afc_enabled = (ae && *ae == '0') ? 0 : 1;
     /* Start at the calibration point (-700), the "nominal VCXO" in QEMU: the
      * firmware starts its AFC at afc_initial_dac_value and converges. */
@@ -171,7 +171,7 @@ double calypso_twl3025_get_afc_hz(void)
      * Selected by CALYPSO_TWL3025_AFC_BAND (default GSM; DCS/1800/PCS -> x2). */
     static double hz_lsb = 0.0;
     if (hz_lsb == 0.0) {
-        const char *b = getenv("CALYPSO_TWL3025_AFC_BAND");
+        const char *b = calypso_getenv("CALYPSO_TWL3025_AFC_BAND");
         int dcs = (b && (b[0]=='D' || b[0]=='d' || b[0]=='P' || b[0]=='p' ||
                          (b[0]=='1' && b[1]=='8')));   /* DCS / PCS / 1800 */
         hz_lsb = dcs ? (TWL3025_AFC_SLOPE / (TWL3025_AFC_NORM_FACTOR_GSM / 2.0))
@@ -200,7 +200,7 @@ double calypso_twl3025_get_afc_phase_step(void)
      * -182 -> -456 -> -799 -> -1714 -> -3421 Hz, doubling per FB) and minus
      * converges to |df| < 110 Hz. CALYPSO_TWL3025_AFC_SIGN_PLUS=1 for A/B. */
     static int sign_plus = -1;
-    if (sign_plus < 0) sign_plus = getenv("CALYPSO_TWL3025_AFC_SIGN_PLUS") ? 1 : 0;
+    if (sign_plus < 0) sign_plus = calypso_getenv("CALYPSO_TWL3025_AFC_SIGN_PLUS") ? 1 : 0;
     return (sign_plus ? 1.0 : -1.0) * 2.0 * M_PI * hz / GSM_SAMPLE_RATE_HZ;
 }
 

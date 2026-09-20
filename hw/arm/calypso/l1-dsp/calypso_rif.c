@@ -201,7 +201,7 @@ static unsigned rif_bp_max_skip(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("CALYPSO_RIF_BP_MAX_SKIP");
+        const char *e = calypso_getenv("CALYPSO_RIF_BP_MAX_SKIP");
         v = e ? atoi(e) : 200;
         if (v <= 0)
             v = 200;   /* a valve at 0 would be a guaranteed stall */
@@ -419,7 +419,7 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
      * the staging area. CALYPSO_RIF_REPLACE=1 restores the old
      * replace-and-backpressure behaviour for A/B. */
     static int remplace = -1;
-    if (remplace < 0) remplace = getenv("CALYPSO_RIF_REPLACE") ? 1 : 0;
+    if (remplace < 0) remplace = calypso_getenv("CALYPSO_RIF_REPLACE") ? 1 : 0;
     if (!remplace && !calypso_rhea_dma_rx_armed()) {
         /* [2026-09-20] No receive window open (DMA2 disabled, or its one-shot
          * window already filled): on silicon the radio is off between windows

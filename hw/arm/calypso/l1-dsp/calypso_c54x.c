@@ -11,6 +11,7 @@
  *   c54x_probes.c   probes and traces (diagnostics only)
  */
 #include "c54x_internal.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
 {
@@ -21,7 +22,7 @@ static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
     static uint64_t ff_hits = 0;
 
     if (ff_enabled < 0) {
-        const char *e = getenv("CALYPSO_DSP_IDLE_FF");
+        const char *e = calypso_getenv("CALYPSO_DSP_IDLE_FF");
         ff_enabled = (!e || *e != '0') ? 1 : 0;
         /* Defaults: two empirically observed dispatcher loops in the
          * stock layer1.highram.elf firmware:
@@ -29,7 +30,7 @@ static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
          *   2) 0xcc62..0xcc6f — PROM0 page 0, runtime mailbox poll loop
          * Override via CALYPSO_DSP_IDLE_RANGE="lo1:hi1,lo2:hi2,..."
          * (max 4 ranges). Each range is hex. Empty = use defaults. */
-        const char *r = getenv("CALYPSO_DSP_IDLE_RANGE");
+        const char *r = calypso_getenv("CALYPSO_DSP_IDLE_RANGE");
         if (r && *r) {
             const char *p = r;
             while (*p && ff_n_ranges < DSP_IDLE_FF_MAX_RANGES) {
@@ -219,16 +220,16 @@ static void sp_ring_init_lazy(void)
     if (g_sp_ring_enabled >= 0) return;
     const char *e = cdbg_env("SP-RING");
     g_sp_ring_enabled = (e && *e == '1') ? 1 : 0;
-    const char *m = getenv("CALYPSO_SP_RING_MAX");
+    const char *m = calypso_getenv("CALYPSO_SP_RING_MAX");
     g_sp_ring_dump_max = (m && *m) ? (unsigned)strtoul(m, NULL, 0) : 4u;
     /* Default trigger is bootstub; floor-cross fires inside the spiral, too
      * late to name the offending RET. */
-    const char *t = getenv("CALYPSO_SP_RING_TRIG");
+    const char *t = calypso_getenv("CALYPSO_SP_RING_TRIG");
     if (!t || !*t || !strcmp(t, "bootstub")) g_sp_ring_trig_mode = 2;
     else if (!strcmp(t, "floor"))            g_sp_ring_trig_mode = 1;
     else if (!strcmp(t, "both"))             g_sp_ring_trig_mode = 3;
     else                                     g_sp_ring_trig_mode = 2;
-    const char *im = getenv("CALYPSO_SP_RING_INSN_MIN");
+    const char *im = calypso_getenv("CALYPSO_SP_RING_INSN_MIN");
     g_sp_ring_insn_min = (im && *im) ? (unsigned)strtoul(im, NULL, 0) : 1000000u;
     if (g_sp_ring_enabled) {
         fprintf(stderr,
@@ -373,8 +374,8 @@ static void sp_hist_account(uint16_t exec_pc, uint16_t exec_op,
                             unsigned insn)
 {
     if (g_sp_dec_enabled < 0) {
-        const char *e_arm = getenv("CALYPSO_SP_HIST_ARM");
-        const char *e_dump = getenv("CALYPSO_SP_HIST_DUMP");
+        const char *e_arm = calypso_getenv("CALYPSO_SP_HIST_ARM");
+        const char *e_dump = calypso_getenv("CALYPSO_SP_HIST_DUMP");
         unsigned arm  = (e_arm  && *e_arm)  ? (unsigned)strtoul(e_arm,  NULL, 0) : 0x2000u;
         unsigned dump = (e_dump && *e_dump) ? (unsigned)strtoul(e_dump, NULL, 0) : 0x0100u;
         if (arm > 0xFFFF) arm = 0xFFFF;
@@ -1126,7 +1127,7 @@ int c54x_run(C54xState *s, int n_insns)
          * gate tests the VALUE with atoi, not mere presence. */
         {
             static int _d247t = -1;
-            if (_d247t < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _d247t = (_e && atoi(_e)) ? 0 : 1; }
+            if (_d247t < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _d247t = (_e && atoi(_e)) ? 0 : 1; }
             if (_d247t) {
                 static unsigned _n7102=0, _nd247=0, _nd25f=0, _n87ff=0;
                 if (s->pc == 0x7102 && _n7102++ < 20)
@@ -1160,7 +1161,7 @@ int c54x_run(C54xState *s, int n_insns)
          * 80 lines per site. */
         {
             static int _cyc = -1;
-            if (_cyc < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _cyc = (_e && atoi(_e)) ? 0 : 1; }
+            if (_cyc < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _cyc = (_e && atoi(_e)) ? 0 : 1; }
             if (_cyc) {
                 static unsigned n51c=0,n537=0,n53c=0,n53f=0,n544=0,n549=0,n71d3=0;
                 unsigned _cap = 20000;
@@ -1204,7 +1205,7 @@ int c54x_run(C54xState *s, int n_insns)
          * c1fa/c27b and the bitmask helpers 8f7f/8f9d. 30 lines. */
         {
             static int _c8d21 = -1;
-            if (_c8d21 < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _c8d21 = (_e && atoi(_e)) ? 0 : 1; }
+            if (_c8d21 < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _c8d21 = (_e && atoi(_e)) ? 0 : 1; }
             if (_c8d21 && s->pc == 0x8d21) {
                 static unsigned _n8d21 = 0;
                 if (_n8d21++ < 30)
@@ -1243,7 +1244,7 @@ int c54x_run(C54xState *s, int n_insns)
          * (the I/Q pointer) for sites 2 and 3. 30 lines per site. */
         {
             static int _cbs = -1;
-            if (_cbs < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _cbs = (_e && atoi(_e)) ? 0 : 1; }
+            if (_cbs < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _cbs = (_e && atoi(_e)) ? 0 : 1; }
             if (_cbs) {
                 static unsigned _ncbs[3] = {0};
                 uint16_t sites[3] = {0x8ac4, 0x8b01, 0x8b8c};
@@ -1262,7 +1263,7 @@ int c54x_run(C54xState *s, int n_insns)
          * 40 lines. */
         {
             static int _tts = -1;
-            if (_tts < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _tts = (_e && atoi(_e)) ? 0 : 1; }
+            if (_tts < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _tts = (_e && atoi(_e)) ? 0 : 1; }
             if (_tts && s->pc == 0xa6e9) {
                 static unsigned _ntts = 0;
                 if (_ntts++ < 40)
@@ -1276,7 +1277,7 @@ int c54x_run(C54xState *s, int n_insns)
          * whether that path fires. */
         {
             static int _a546on = -1;
-            if (_a546on < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _a546on = (_e && atoi(_e)) ? 0 : 1; }
+            if (_a546on < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _a546on = (_e && atoi(_e)) ? 0 : 1; }
             if (_a546on && s->pc == 0xa546) {
                 static unsigned _na546 = 0;
                 if (_na546++ < 20)
@@ -1292,7 +1293,7 @@ int c54x_run(C54xState *s, int n_insns)
          * disassembled offline. */
         {
             static int _c1fa = -1;
-            if (_c1fa < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _c1fa = (_e && atoi(_e)) ? 0 : 1; }
+            if (_c1fa < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _c1fa = (_e && atoi(_e)) ? 0 : 1; }
             if (_c1fa && s->pc == 0xc1fa) {
                 static unsigned _nc1fa = 0;
                 if (_nc1fa++ < 20)
@@ -1315,7 +1316,7 @@ int c54x_run(C54xState *s, int n_insns)
          * reached natively. 20 lines per site. */
         {
             static int _clb = -1;
-            if (_clb < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _clb = (_e && atoi(_e)) ? 0 : 1; }
+            if (_clb < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _clb = (_e && atoi(_e)) ? 0 : 1; }
             if (_clb) {
                 static unsigned _nclb[8] = {0};
                 uint16_t clb_pcs[8] = {0x86cc, 0x86d4, 0x8ac4, 0x8ad2, 0x8b01, 0x8b09, 0x8b8c, 0x8b94};
@@ -1634,7 +1635,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static int _t0i = -1;
                 if (_t0i < 0) _t0i = calypso_gate("CALYPSO_TINT0_MASTER", 0);
                 static unsigned _t0period = 0;
-                if (_t0period == 0) { const char *_p = getenv("CALYPSO_TINT0_PERIOD"); _t0period = _p ? (unsigned)atoi(_p) : 1500; if (_t0period < 1) _t0period = 1500; }
+                if (_t0period == 0) { const char *_p = calypso_getenv("CALYPSO_TINT0_PERIOD"); _t0period = _p ? (unsigned)atoi(_p) : 1500; if (_t0period < 1) _t0period = 1500; }
                 static unsigned _t0last = 0;
                 (void)_t0i; (void)_t0last; (void)_t0period;
             }
@@ -2486,12 +2487,12 @@ int c54x_run(C54xState *s, int n_insns)
              *   TRAP    : the name says _OFF, but "=0" ENABLES it.
              */
             static int i435 = -1;
-            if (i435 < 0) { const char *_e435 = getenv("CALYPSO_INIT_435B_OFF"); i435 = (_e435 && atoi(_e435)) ? 0 : 1; }  /* gate tests the VALUE: OFF=0 means active */
+            if (i435 < 0) { const char *_e435 = calypso_getenv("CALYPSO_INIT_435B_OFF"); i435 = (_e435 && atoi(_e435)) ? 0 : 1; }  /* gate tests the VALUE: OFF=0 means active */
             if (i435 && s->data[0x435b] == 0) {
                 static unsigned in = 0;
                 if (in++ < 4)
                     fprintf(stderr, "[c54x] INIT-435B: data[0x435b] 0x0000 -> 0x52ed (masque IMR reset SANS bit4/clobber) insn=%u\n", s->insn_count);
-                s->data[0x435b] = getenv("CALYPSO_SEED_52FD") ? 0x52fd : 0x52ed;   /* default 0x52ed: without bit 4 (TINT), which avoids the firmware clobber at 0xa509 that strips bit 12 (frame). 0x52fd sets bit 4 and breaks the frame, which shows the firmware does not use TINT0 */
+                s->data[0x435b] = calypso_getenv("CALYPSO_SEED_52FD") ? 0x52fd : 0x52ed;   /* default 0x52ed: without bit 4 (TINT), which avoids the firmware clobber at 0xa509 that strips bit 12 (frame). 0x52fd sets bit 4 and breaks the frame, which shows the firmware does not use TINT0 */
             }
         }
         /* SM-TRACE: full path of the go-live state machine 0xa4e4-0xa5b5 once
@@ -2514,7 +2515,7 @@ int c54x_run(C54xState *s, int n_insns)
          * instruction of the zone. Gate CALYPSO_TERM_TRACE_OFF. */
         {
             static int _tt = -1;
-            if (_tt < 0) _tt = getenv("CALYPSO_TERM_TRACE_OFF") ? 0 : 1;
+            if (_tt < 0) _tt = calypso_getenv("CALYPSO_TERM_TRACE_OFF") ? 0 : 1;
             if (_tt && exec_pc >= 0xb400 && exec_pc <= 0xb414) {
                 static unsigned _ttn = 0;
                 if (_ttn++ < 60)
@@ -2534,7 +2535,7 @@ int c54x_run(C54xState *s, int n_insns)
          * (strong signal), general hits are capped at 200 for context. */
         {
             static int _ctw = -1;
-            if (_ctw < 0) { const char *_e = getenv("CALYPSO_D247_TRACE_OFF"); _ctw = (_e && atoi(_e)) ? 0 : 1; }
+            if (_ctw < 0) { const char *_e = calypso_getenv("CALYPSO_D247_TRACE_OFF"); _ctw = (_e && atoi(_e)) ? 0 : 1; }
             if (_ctw && exec_pc >= 0x7000 && exec_pc <= 0xdfff) {   /* all of PROM0, no arbitrary sub-range */
                 uint16_t _cop = prog_fetch(s, exec_pc);
                 bool _is_xfer = (_cop==0xf4e2||_cop==0xf4e3||_cop==0xf4e6||_cop==0xf4e7||
@@ -2565,7 +2566,7 @@ int c54x_run(C54xState *s, int n_insns)
          * d[4c5d] confirm the block ran. Gate CALYPSO_INSTALL_TRACE_OFF. */
         {
             static int _it = -1;
-            if (_it < 0) _it = getenv("CALYPSO_INSTALL_TRACE_OFF") ? 0 : 1;
+            if (_it < 0) _it = calypso_getenv("CALYPSO_INSTALL_TRACE_OFF") ? 0 : 1;
             if (_it && (exec_pc==0xc7fa || exec_pc==0xc801 || exec_pc==0xc803 ||
                         exec_pc==0xc805 || exec_pc==0xc7e2 || exec_pc==0xc827)) {
                 static unsigned _itn = 0;
@@ -2585,7 +2586,7 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static uint16_t _pp827 = 0;
             static int _bsc = -1;
-            if (_bsc < 0) _bsc = getenv("CALYPSO_BACC_C827_OFF") ? 0 : 1;
+            if (_bsc < 0) _bsc = calypso_getenv("CALYPSO_BACC_C827_OFF") ? 0 : 1;
             if (_bsc && exec_pc == 0xc827 && _pp827 != 0xc825 && _pp827 != 0xc826 && _pp827 != 0xc827) {
                 static unsigned _bn = 0;
                 if (_bn++ < 15)
@@ -2606,7 +2607,7 @@ int c54x_run(C54xState *s, int n_insns)
          * values. Gate CALYPSO_PHASE_SM_OFF. */
         {
             static int _ps = -1;
-            if (_ps < 0) _ps = getenv("CALYPSO_PHASE_SM_OFF") ? 0 : 1;
+            if (_ps < 0) _ps = calypso_getenv("CALYPSO_PHASE_SM_OFF") ? 0 : 1;
             if (_ps && (exec_pc==0xddeb || exec_pc==0xde86 || exec_pc==0xde97 ||
                         exec_pc==0xde9c || exec_pc==0xde8b || exec_pc==0xdea8 || exec_pc==0xdddb)) {
                 static unsigned _psn = 0;
@@ -2965,7 +2966,7 @@ int c54x_run(C54xState *s, int n_insns)
              *             the missing enable is still open.
              */
             static int seed_on = -1;
-            if (seed_on < 0) { const char *e = getenv("CALYPSO_SEED5AC8"); seed_on = (e && atoi(e) > 0) ? 1 : 0; }
+            if (seed_on < 0) { const char *e = calypso_getenv("CALYPSO_SEED5AC8"); seed_on = (e && atoi(e) > 0) ? 1 : 0; }
             /* Wired to the DSP's own STM #0x5ac8,SP (PC=0xb382, op=0x7718),
              * so the seed follows the real stack init rather than an arbitrary
              * poke at the terminal BACC. Timing is safe: nothing writes
@@ -2978,7 +2979,7 @@ int c54x_run(C54xState *s, int n_insns)
                  * the native RSBX INTM runs and the frame interrupt (delivered
                  * on bit 12) is actually taken. */
                 static int sval = -1;
-                if (sval < 0) { const char *e = getenv("CALYPSO_SEED5AC8_VAL");
+                if (sval < 0) { const char *e = calypso_getenv("CALYPSO_SEED5AC8_VAL");
                                 sval = (e && *e) ? (int)strtoul(e, NULL, 0) : 0x71f4; }
                 static unsigned sd = 0;
                 if (sd < 8)
@@ -3020,7 +3021,8 @@ int c54x_run(C54xState *s, int n_insns)
         /* PROG-DUMP-B3D0 (CALYPSO_AR0_DEBUG, read-only, one-shot): dumps the
          * region that seeds data[0x3f6d] = 0xa4df (at 0xb405) and the terminal
          * BACC 0xb40f, to find the companion setup of mem[0x5ac8]. */
-        if (getenv("CALYPSO_AR0_DEBUG") && exec_pc == 0xb405) {
+        static int _ar0dbg = -1; if (_ar0dbg < 0) _ar0dbg = calypso_getenv("CALYPSO_AR0_DEBUG") ? 1 : 0;
+        if (_ar0dbg && exec_pc == 0xb405) {
             static int done = 0;
             if (!done) {
                 done = 1;
@@ -3132,7 +3134,7 @@ int c54x_run(C54xState *s, int n_insns)
              */
             static int ki = -1; static uint16_t kiv = 0;
             if (ki < 0) { ki = calypso_gate("CALYPSO_KEEP_IMR", 0);
-                const char *e = getenv("CALYPSO_KEEP_IMR_VAL");
+                const char *e = calypso_getenv("CALYPSO_KEEP_IMR_VAL");
                 kiv = (e && *e) ? (uint16_t)strtoul(e, NULL, 0) : 0x52fd; }
             if (ki && exec_pc >= 0xa4ca && exec_pc <= 0xdea0 && !(s->imr & 0x0020)) {
                 uint16_t img = s->data[0x435b];            /* shadow IMR (= 0x52fd) */
@@ -3157,7 +3159,7 @@ int c54x_run(C54xState *s, int n_insns)
              *   remove  : as soon as the ARM handshake (ARM2DSP_BGEN) gets the flow past
              *             0xddf5 and the native setter 0xde9c runs.
              */
-            { static int fg = -1; if (fg < 0) { const char *e = getenv("CALYPSO_FORCE_GOLIVE"); fg = (e && atoi(e) > 0) ? 1 : 0; }
+            { static int fg = -1; if (fg < 0) { const char *e = calypso_getenv("CALYPSO_FORCE_GOLIVE"); fg = (e && atoi(e) > 0) ? 1 : 0; }
               if (fg && !(fl & 0x0002)) { s->data[0x3f70] = (uint16_t)(fl | 0x0002); fl = s->data[0x3f70];
                 static unsigned fgc = 0; if (fgc++ < 8) fprintf(stderr, "[c54x] FORCE-GOLIVE 0x3f70 |= bit1 -> 0x%04x insn=%u\n", fl, s->insn_count); } }
             if ((fl & 0x0002) || fl != last) {
@@ -3212,9 +3214,9 @@ int c54x_run(C54xState *s, int n_insns)
             if (cs < 0) {
                 cs = calypso_gate("CALYPSO_CORR_SETUP", 0);
                 const char *e;
-                a1 = (e = getenv("CALYPSO_CORR_AR1")) && *e ? (uint16_t)strtoul(e,0,0) : 0x2f22;
-                a4 = (e = getenv("CALYPSO_CORR_AR4")) && *e ? (uint16_t)strtoul(e,0,0) : 0x2be4;
-                a5 = (e = getenv("CALYPSO_CORR_AR5")) && *e ? (uint16_t)strtoul(e,0,0) : 0x0060;
+                a1 = (e = calypso_getenv("CALYPSO_CORR_AR1")) && *e ? (uint16_t)strtoul(e,0,0) : 0x2f22;
+                a4 = (e = calypso_getenv("CALYPSO_CORR_AR4")) && *e ? (uint16_t)strtoul(e,0,0) : 0x2be4;
+                a5 = (e = calypso_getenv("CALYPSO_CORR_AR5")) && *e ? (uint16_t)strtoul(e,0,0) : 0x0060;
             }
             if (cs) {
                 s->ar[1] = a1; s->ar[4] = a4; s->ar[5] = a5;
@@ -3244,7 +3246,7 @@ int c54x_run(C54xState *s, int n_insns)
              *   note    : calypso_hack.env itself calls this "falsification, not a fix".
              */
             static int poke_en = -1;
-            if (poke_en < 0) { const char *e = getenv("CALYPSO_POKE_A4C7_ONCE"); poke_en = (e && atoi(e) > 0) ? 1 : 0; }
+            if (poke_en < 0) { const char *e = calypso_getenv("CALYPSO_POKE_A4C7_ONCE"); poke_en = (e && atoi(e) > 0) ? 1 : 0; }
             static int poke_done = 0;
             if (poke_en && !poke_done) {
                 poke_done = 1;
@@ -3295,7 +3297,7 @@ int c54x_run(C54xState *s, int n_insns)
              *             itself.
              */
             static int fimr = -1; static uint16_t fimrv = 0;
-            if (fimr < 0) { const char *e = getenv("CALYPSO_C54X_FORCE_IMR");
+            if (fimr < 0) { const char *e = calypso_getenv("CALYPSO_C54X_FORCE_IMR");
                 fimrv = (e && *e) ? (uint16_t)strtoul(e, NULL, 0) : 0; fimr = fimrv ? 1 : 0; }
             if (fimr && (s->imr & fimrv) != fimrv) {
                 static unsigned fic = 0;
@@ -3334,7 +3336,7 @@ int c54x_run(C54xState *s, int n_insns)
              *             declares the replacement.
              */
             static int f98 = -1; static uint16_t f98v = 0;
-            if (f98 < 0) { const char *e = getenv("CALYPSO_FORCE_098");
+            if (f98 < 0) { const char *e = calypso_getenv("CALYPSO_FORCE_098");
                 f98v = (e && *e) ? (uint16_t)strtoul(e, NULL, 0) : 0; f98 = f98v ? 1 : 0; }
             if (f98 && (exec_pc == 0xde86 || exec_pc == 0xde94 || exec_pc == 0xb3e4 ||
                         exec_pc == 0xa5bd)) {
@@ -3360,7 +3362,7 @@ int c54x_run(C54xState *s, int n_insns)
              *   note    : inert without ARM2DSP_CTRLSYS, which sets data[0x0810] bit 15.
              */
             static int gt = -1;
-            if (gt < 0) { const char *e = getenv("CALYPSO_GOLIVE_TASKW");
+            if (gt < 0) { const char *e = calypso_getenv("CALYPSO_GOLIVE_TASKW");
                           gt = (e && *e == '1') ? 1 : 0; }
             if (gt && (s->data[0x0810] & 0x8000)) {
                 s->data[0x3f92] |= 0x0800;   /* replay of ORM #0x0800 @0xa539 */
@@ -3695,8 +3697,8 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static int pi_init = 0; static long pi_lo = -1, pi_hi = -1, pi_max = 400, pi_n = 0;
             if (!pi_init) { pi_init = 1;
-                const char *l = getenv("CALYPSO_PISTE_LO"), *h = getenv("CALYPSO_PISTE_HI"),
-                           *n = getenv("CALYPSO_PISTE_N");
+                const char *l = calypso_getenv("CALYPSO_PISTE_LO"), *h = calypso_getenv("CALYPSO_PISTE_HI"),
+                           *n = calypso_getenv("CALYPSO_PISTE_N");
                 if (l && *l) pi_lo = strtol(l, NULL, 0);
                 if (h && *h) pi_hi = strtol(h, NULL, 0); else pi_hi = pi_lo;
                 if (n && *n) pi_max = strtol(n, NULL, 0);
@@ -3733,8 +3735,8 @@ int c54x_run(C54xState *s, int n_insns)
                    * healthy job diverge from one that emits zeros. */
                     static int pd_init = 0; static long pd_lo = -1, pd_hi = -1;
                     if (!pd_init) { pd_init = 1;
-                        const char *l = getenv("CALYPSO_PISTE_DUMP_LO");
-                        const char *h = getenv("CALYPSO_PISTE_DUMP_HI");
+                        const char *l = calypso_getenv("CALYPSO_PISTE_DUMP_LO");
+                        const char *h = calypso_getenv("CALYPSO_PISTE_DUMP_HI");
                         if (l && *l) pd_lo = strtol(l, NULL, 0);
                         if (h && *h) pd_hi = strtol(h, NULL, 0); else pd_hi = pd_lo;
                     }
@@ -3764,7 +3766,7 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static int ti_init = 0; static long ti_lo = -1, ti_hi = -1;
             if (!ti_init) { ti_init = 1;
-                const char *l = getenv("CALYPSO_T_LO"), *h = getenv("CALYPSO_T_HI");
+                const char *l = calypso_getenv("CALYPSO_T_LO"), *h = calypso_getenv("CALYPSO_T_HI");
                 if (l && *l) ti_lo = strtol(l, NULL, 0);
                 if (h && *h) ti_hi = strtol(h, NULL, 0);
             }
@@ -3975,8 +3977,8 @@ int c54x_run(C54xState *s, int n_insns)
         static int da_lo = -1, da_hi = -1;
         static long long da_insn = -1;
         if (da_lo < 0) {
-            const char *l = getenv("CALYPSO_DA_LO"); const char *h = getenv("CALYPSO_DA_HI");
-            const char *n = getenv("CALYPSO_DA_INSN");
+            const char *l = calypso_getenv("CALYPSO_DA_LO"); const char *h = calypso_getenv("CALYPSO_DA_HI");
+            const char *n = calypso_getenv("CALYPSO_DA_INSN");
             da_lo = l ? (int)strtol(l, NULL, 0) : 0x8000;   /* correlator overlay by default */
             da_hi = h ? (int)strtol(h, NULL, 0) : 0x9FFF;   /* CALYPSO_DA_LO/HI widen it (e.g. 0x7000..0xFFFF) */
             da_insn = n ? strtoll(n, NULL, 0) : 0;          /* CALYPSO_DA_INSN: skip the boot, aim at the detection window (e.g. 250000000) */
@@ -4008,7 +4010,7 @@ int c54x_run(C54xState *s, int n_insns)
          * so who re-arms it". Silent unless CALYPSO_INTM_TRANS is set. */
         {
             static int g_intm_prev_tr = -1, g_intm_tr_en = -1;
-            if (g_intm_tr_en < 0) { const char *e = getenv("CALYPSO_INTM_TRANS");
+            if (g_intm_tr_en < 0) { const char *e = calypso_getenv("CALYPSO_INTM_TRANS");
                                     g_intm_tr_en = (e && *e != 0) ? 1 : 0; }
             int intm_now_tr = !!(s->st1 & ST1_INTM);
             if (intm_now_tr != g_intm_prev_tr && g_intm_tr_en) {
@@ -4055,7 +4057,7 @@ int c54x_run(C54xState *s, int n_insns)
                 if (_ia < 0) {
                     _ia    = calypso_gate("CALYPSO_INTM_ACK", 0);
                     _iswap = calypso_gate("CALYPSO_INTM_ACK_SWAP", 0);
-                    _int0  = getenv("CALYPSO_INTM_ACK_NO_TINT0") ? 0 : 1;
+                    _int0  = calypso_getenv("CALYPSO_INTM_ACK_NO_TINT0") ? 0 : 1;
                     /* Each gesture is separately switchable, for A/B. Default
                      * follows INTM_ACK, except the d_dsp_page write, which is
                      * explicitly opt-in.
@@ -4071,10 +4073,10 @@ int c54x_run(C54xState *s, int n_insns)
                      * FRAME (osmocom-bb layer1/sync.c -> calypso/dsp.c:471). That
                      * hammered the DSP synchronisation cell at ~50x the frame
                      * cadence. */
-                    _iarm   = getenv("CALYPSO_INTM_ACK_NO_ARM") ? 0 : 1;
-                    _idsp   = getenv("CALYPSO_INTM_ACK_NO_DSP") ? 0 : 1;
+                    _iarm   = calypso_getenv("CALYPSO_INTM_ACK_NO_ARM") ? 0 : 1;
+                    _idsp   = calypso_getenv("CALYPSO_INTM_ACK_NO_DSP") ? 0 : 1;
                     _idpage = calypso_gate("CALYPSO_INTM_ACK_DPAGE", 0);
-                    { const char *_e = getenv("CALYPSO_INTM_ACK_DPAGE_EVERY");
+                    { const char *_e = calypso_getenv("CALYPSO_INTM_ACK_DPAGE_EVERY");
                       _idpage_every = (_e && *_e) ? (unsigned)strtoul(_e, NULL, 0) : 65536u;
                       if (_idpage_every < 1) _idpage_every = 65536u; }
                     if (_ia)
@@ -4181,7 +4183,7 @@ int c54x_run(C54xState *s, int n_insns)
             /* Shadow stack: pairs pushes with pops (CALYPSO_ORPHAN). Names THE
              * orphan return (the over-pop), not the 15 victims at 0xc8be. */
             if (g_shadow_on < 0) {
-                const char *eo = getenv("CALYPSO_ORPHAN");  /* its own env, outside CALYPSO_DEBUG */
+                const char *eo = calypso_getenv("CALYPSO_ORPHAN");  /* its own env, outside CALYPSO_DEBUG */
                 g_shadow_on = (eo && *eo) ? 1 : 0;
             }
             if (g_shadow_on) {
@@ -4723,9 +4725,9 @@ int c54x_run(C54xState *s, int n_insns)
             static int _fv = -2, _fvbit = -1; static unsigned _fvn = 0, _fvper = 65536;
             static uint32_t _fvlast = 0;
             if (_fv == -2) {
-                const char *e = getenv("CALYPSO_FORCE_VEC");
+                const char *e = calypso_getenv("CALYPSO_FORCE_VEC");
                 _fv = (e && *e) ? (int)strtol(e, NULL, 0) : -1;
-                const char *p = getenv("CALYPSO_FORCE_VEC_PERIOD");
+                const char *p = calypso_getenv("CALYPSO_FORCE_VEC_PERIOD");
                 if (p && *p) _fvper = (unsigned)strtoul(p, NULL, 0);
                 if (_fv >= 0) {
                     _fvbit = _fv - 16;
@@ -4755,10 +4757,10 @@ int c54x_run(C54xState *s, int n_insns)
             static int _tf = -1; static uint16_t _tfpc = 0; static int _tfd = 0;
             static int _tfn2 = 24;   /* CALYPSO_TRACEFROM_N: dump length */
             static int _tfarm = 0; static unsigned _tfn = 0, _tfr = 0; static uint16_t _tfp = 0;
-            if (_tf < 0) { const char *e = getenv("CALYPSO_TRACEFROM");
+            if (_tf < 0) { const char *e = calypso_getenv("CALYPSO_TRACEFROM");
                 _tf = (e && *e) ? 1 : 0;
                 if (_tf) _tfpc = (uint16_t)strtol(e, NULL, 0);
-                const char *n = getenv("CALYPSO_TRACEFROM_N");
+                const char *n = calypso_getenv("CALYPSO_TRACEFROM_N");
                 if (n && *n) _tfn2 = atoi(n); }
             if (_tf) {
                 if (exec_pc == _tfpc) {
@@ -4856,8 +4858,8 @@ int c54x_run(C54xState *s, int n_insns)
             static uint16_t _lo = 0x76f8, _hi = 0x79f0;
             if (_sd2 < 0) {
                 _sd2 = calypso_gate("CALYPSO_SCANDATA", 0);
-                const char *a = getenv("CALYPSO_SCANDATA_LO");
-                const char *b = getenv("CALYPSO_SCANDATA_HI");
+                const char *a = calypso_getenv("CALYPSO_SCANDATA_LO");
+                const char *b = calypso_getenv("CALYPSO_SCANDATA_HI");
                 if (a && *a) _lo = (uint16_t)strtol(a, NULL, 0);
                 if (b && *b) _hi = (uint16_t)strtol(b, NULL, 0);
             }
@@ -4912,7 +4914,7 @@ int c54x_run(C54xState *s, int n_insns)
              * preceding words so the referencing instruction can be
              * identified. */
             static int _sr = -1; static uint16_t _srt = 0; static int _srd = 0;
-            if (_sr < 0) { const char *e = getenv("CALYPSO_SCANREF");
+            if (_sr < 0) { const char *e = calypso_getenv("CALYPSO_SCANREF");
                 _sr = (e && *e) ? 1 : 0;
                 if (_sr) _srt = (uint16_t)strtol(e, NULL, 0); }
             if (_sr && !_srd && exec_pc == 0xb01c) {
@@ -5173,9 +5175,9 @@ int c54x_run(C54xState *s, int n_insns)
              * gate will not mask it, it will fall silent. */
             static int _di2 = -2, _ditask = -1; static unsigned _din2 = 0;
             if (_di2 == -2) {
-                const char *e = getenv("CALYPSO_DISPATCH_INSTALL");
+                const char *e = calypso_getenv("CALYPSO_DISPATCH_INSTALL");
                 _di2 = (e && *e) ? (int)strtoul(e, NULL, 0) : -1;
-                const char *t = getenv("CALYPSO_DISPATCH_INSTALL_TASK");
+                const char *t = calypso_getenv("CALYPSO_DISPATCH_INSTALL_TASK");
                 _ditask = (t && *t) ? atoi(t) : -1;   /* -1 = any task */
                 if (_di2 >= 0)
                     fprintf(stderr, "[c54x] DISPATCH-INSTALL arme : data[0x43d8] "
@@ -5204,7 +5206,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (exec_pc == 0xb01c) {
                 static int _ft = -2; static unsigned _ftn = 0;
                 if (_ft == -2) {
-                    const char *e = getenv("CALYPSO_FORCE_TASK");
+                    const char *e = calypso_getenv("CALYPSO_FORCE_TASK");
                     _ft = (e && *e) ? (int)strtol(e, NULL, 0) : -1;
                     if (_ft >= 0)
                         fprintf(stderr, "[c54x] FORCE-TASK arme : d_task_md <- %d "
@@ -5241,7 +5243,7 @@ int c54x_run(C54xState *s, int n_insns)
                     static unsigned _fbid = 0;
                     static int _ftsc = -1;
                     if (_ftsc < 0) {
-                        const char *t = getenv("CALYPSO_FORCE_TASK_TSC");
+                        const char *t = calypso_getenv("CALYPSO_FORCE_TASK_TSC");
                         _ftsc = (t && *t) ? (int)strtol(t, NULL, 0) : 7;
                     }
                     /* Keep our OWN page counter: d_dsp_page is reset to 0 by
@@ -5312,7 +5314,7 @@ int c54x_run(C54xState *s, int n_insns)
              * data_write_locked() does the work and this block must stay
              * quiet, otherwise the two fight each other. */
             static int _at_init = -1;
-            if (_at_init < 0) { const char *m = getenv("CALYPSO_DISPATCH_INSTALL_AT");
+            if (_at_init < 0) { const char *m = calypso_getenv("CALYPSO_DISPATCH_INSTALL_AT");
                                 _at_init = (m && strcmp(m, "init") == 0) ? 1 : 0; }
             if (_di2 >= 0 && !_at_init && exec_pc == 0xb01c) {
                 uint16_t _md = s->data[0x0804] ? s->data[0x0804] : s->data[0x0818];
@@ -5375,7 +5377,7 @@ int c54x_run(C54xState *s, int n_insns)
             static uint16_t _dc_slot = 0, _dc_md = 0, _dc_pslot = 0xffff, _dc_pmd = 0xffff;
             static unsigned _dc_rep = 0, _dc_lines = 0;
             if (_dc < 0) {
-                const char *_e = getenv("CALYPSO_DISPCALL_N");
+                const char *_e = calypso_getenv("CALYPSO_DISPCALL_N");
                 _dc = calypso_gate("CALYPSO_DISPCALL", 0);
                 if (_e && *_e) _dcn2 = atoi(_e);
                 if (_dcn2 < 2) _dcn2 = 2;
@@ -5620,13 +5622,13 @@ int c54x_run(C54xState *s, int n_insns)
             static uint16_t _ddpc = 0x9ac0; static unsigned _ddmax = 200;
             static uint16_t _ddaddr = 0x2a00;   /* recorded base, see CALYPSO_DARAM_DUMP_ADDR */
             if (_dd < 0) {
-                const char *e = getenv("CALYPSO_DARAM_DUMP");
+                const char *e = calypso_getenv("CALYPSO_DARAM_DUMP");
                 _dd = (e && *e && strcmp(e, "0")) ? 1 : 0;
                 if (_dd) {
                     const char *path = (strcmp(e, "1") == 0) ? "/dev/shm/daram_2a00.cfile" : e;
-                    const char *p = getenv("CALYPSO_DARAM_DUMP_PC");
+                    const char *p = calypso_getenv("CALYPSO_DARAM_DUMP_PC");
                     if (p && *p) _ddpc = (uint16_t)strtol(p, NULL, 0);
-                    const char *m = getenv("CALYPSO_DARAM_DUMP_MAX");
+                    const char *m = calypso_getenv("CALYPSO_DARAM_DUMP_MAX");
                     if (m && *m) _ddmax = (unsigned)atoi(m);
                     /* The recorded base must be configurable: the native
                      * profiles deliver at CALYPSO_BSP_DARAM_ADDR=0x4c00, and a
@@ -5636,7 +5638,7 @@ int c54x_run(C54xState *s, int n_insns)
                      * outside that thread while the BSP rewrites the 296 words
                      * during the `xp`, giving coherence around 0.5 and a
                      * drifting FFT peak (two bursts spliced together). */
-                    const char *ad = getenv("CALYPSO_DARAM_DUMP_ADDR");
+                    const char *ad = calypso_getenv("CALYPSO_DARAM_DUMP_ADDR");
                     if (ad && *ad) _ddaddr = (uint16_t)strtol(ad, NULL, 0);
                     fprintf(stderr, "[c54x] DARAM-DUMP base=0x%04x "
                             "(CALYPSO_DARAM_DUMP_ADDR)\n", _ddaddr);
@@ -5651,7 +5653,7 @@ int c54x_run(C54xState *s, int n_insns)
              * reads as "the buffer never contains FCCH".
              * CALYPSO_DARAM_DUMP_ANYMODE=1 records everything. */
             static int _ddany = -1;
-            if (_ddany < 0) { const char *e = getenv("CALYPSO_DARAM_DUMP_ANYMODE");
+            if (_ddany < 0) { const char *e = calypso_getenv("CALYPSO_DARAM_DUMP_ANYMODE");
                               _ddany = (e && atoi(e) > 0) ? 1 : 0; }
             if (_dd && _ddf && exec_pc == _ddpc && _ddn < _ddmax &&
                 (_ddany || s->data[0x08f9] != 0)) {
@@ -6071,7 +6073,7 @@ int c54x_run(C54xState *s, int n_insns)
                  * the DSP under CALYPSO_DEBUG=ALL, and the analysis it served
                  * is resolved. */
                 trap_armed = 0;
-                const char *c = getenv("CALYPSO_TRAP_CHECKPOINT");
+                const char *c = calypso_getenv("CALYPSO_TRAP_CHECKPOINT");
                 checkpoint = (c && *c) ? (unsigned)strtoul(c, NULL, 0) : 4200000u;
             }
             if (trap_armed && !tripped && s->insn_count >= checkpoint) {
@@ -6211,13 +6213,14 @@ int c54x_run(C54xState *s, int n_insns)
                  *   TRAP    : this code IS executed; only the absence of the environment
                  *             variable keeps it quiet.
                  */
-                if (getenv("CALYPSO_TINT0_PERINSN")) {
+                static int _t0pi = -1; if (_t0pi < 0) _t0pi = calypso_getenv("CALYPSO_TINT0_PERINSN") ? 1 : 0;
+        if (_t0pi) {
                     static unsigned _t0c = 0;
                     if (++_t0c >= 2000) { _t0c = 0; c54x_fire_tint(s); }
                 }
             }
             static int _tmr = -1;
-            if (_tmr < 0) _tmr = getenv("CALYPSO_DSP_TIMER_OFF") ? 0 : 1;
+            if (_tmr < 0) _tmr = calypso_getenv("CALYPSO_DSP_TIMER_OFF") ? 0 : 1;
             /* @BEQUILLE - TINT0_MASTER  (CALYPSO_TINT0_MASTER, EXISTS, default OFF
              *              outside the WIRE profile - calypso.env/wire.env only set it
              *              under CALYPSO_WIRE=1)
@@ -6382,7 +6385,7 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static int dsp_yield = -1;
             if (dsp_yield < 0) {
-                const char *e = getenv("CALYPSO_DSP_YIELD");
+                const char *e = calypso_getenv("CALYPSO_DSP_YIELD");
                 /* Default 32768 (2^15): the empirically tuned DSP / osmocon
                  * interrupt cadence, on by default. Only an explicit
                  * CALYPSO_DSP_YIELD=0 turns it off. */
@@ -6481,7 +6484,7 @@ void c54x_early_boot(C54xState *s)
 {
     static int run_c54x = -1;
     if (run_c54x < 0) {
-        const char *e = getenv("CALYPSO_DSP_RUN_C54X");
+        const char *e = calypso_getenv("CALYPSO_DSP_RUN_C54X");
         run_c54x = (e && *e == '1') ? 1 : 0;
     }
     if (!s || !run_c54x) {
@@ -6709,7 +6712,7 @@ void c54x_reset(C54xState *s)
     {
         static int reg_mode = -1;  /* 0=c54x 1=bin 2=hybrid */
         if (reg_mode < 0) {
-            const char *e = getenv("CALYPSO_DSP_REG_MODE");
+            const char *e = calypso_getenv("CALYPSO_DSP_REG_MODE");
             if      (e && !strcasecmp(e, "c54x"))   reg_mode = 0;
             else if (e && !strcasecmp(e, "hybrid")) reg_mode = 2;
             else                                    reg_mode = 1; /* "bin"/default */
@@ -7133,7 +7136,7 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
     {
         static int decim = -1;
         if (decim < 0) {
-            const char *d = getenv("CALYPSO_BSP_IQ_DECIM");
+            const char *d = calypso_getenv("CALYPSO_BSP_IQ_DECIM");
             decim = (d && *d) ? atoi(d) : 4;
             if (decim < 1) decim = 1;
         }

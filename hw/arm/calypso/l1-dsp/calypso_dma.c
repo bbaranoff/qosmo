@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hw/arm/calypso/calypso_debug.h"
 
 int calypso_dma_actif = -1;   /* -1 = initialise on first access */
 
@@ -46,16 +47,16 @@ void calypso_dma_init(void)
     }
     g_init = 1;
 
-    e = getenv("CALYPSO_DMA");
+    e = calypso_getenv("CALYPSO_DMA");
     if (!e || !*e || !strcmp(e, "0")) {
         calypso_dma_actif = 0;
         return;
     }
-    e = getenv("CALYPSO_DMA_VEC_BASE");
+    e = calypso_getenv("CALYPSO_DMA_VEC_BASE");
     if (e && *e) {
         g_vec_base = (int)strtol(e, NULL, 0);
     }
-    e = getenv("CALYPSO_DMA_MAX_MOTS");
+    e = calypso_getenv("CALYPSO_DMA_MAX_MOTS");
     if (e && *e) {
         g_max_mots = (unsigned)strtoul(e, NULL, 0);
     }

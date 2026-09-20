@@ -113,3 +113,13 @@ static inline const char *cdbg_env(const char *token)
  *  `getenv` + `strtoul`/`atoi` : les convertir n'aurait aucun sens.
  * ---------------------------------------------------------------------------- */
 int calypso_gate(const char *nom, int defaut);
+
+/* [2026-09-20] getenv() memoised by name. The C54x run loop and its probes
+ * consult the environment on hot paths (c54x_run is entered ~1200 times per
+ * TDMA frame by the benches, c54x_exec_one 17k times), and glibc's getenv()
+ * is a linear scan of the environment with a strncmp per entry: measured 40 %
+ * of the replay's wall time under gdb sampling, 6.7 ms per 4.615 ms frame.
+ * The environment never changes once the core runs (c54x_exe sets its one
+ * variable before c54x_init()), so the first answer is kept. NULL is cached
+ * too. Returns the same pointer glibc would (the environ string). */
+const char *calypso_getenv(const char *name);
