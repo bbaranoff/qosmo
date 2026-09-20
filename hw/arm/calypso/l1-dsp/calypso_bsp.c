@@ -974,6 +974,62 @@ void calypso_bsp_toa_feedback(int toa)
  * Standalone, nobody empties UDP socket 6702 and bridge/BTS bursts pile up in
  * Recv-Q without ever reaching the DSP. Called once per frame from pont.c.
  * Returns the number of bursts read. */
+/* [2026-09-20] STREAM frame assembler. One TDMA frame of the BTS stream is
+ * handed to the DSP per tick, in timeslot order, ALWAYS 1250 symbols long:
+ *   - continuous DMA (FB search): TS0..TS7 of that frame, each padded to
+ *     156 (157 on TS3/TS7) symbols by calypso_bsp_rx_burst(); a timeslot the
+ *     BTS did not send (idle TS carry nothing over TRXD) gets the dummy burst
+ *     instead. The old path loaded the raw 148-symbol bursts that had arrived,
+ *     so a frame was 1184 symbols at best and shorter with idle timeslots: the
+ *     ROM's symbol counter drifted (FB TOA intra-frame offsets of 264..632
+ *     instead of a constant), the FB1 narrow window and the SB frame missed.
+ *   - one-shot DMA (the SB window): TS0 alone, framed like the synthetic cell
+ *     (21 silent samples before and after), which is what puts the ROM's
+ *     SB TOA near 23.
+ * Slots older than the delivered frame are purged (their TS0 was lost). */
+static uint16_t g_remplissage[2 * 157];
+static bool bsp_source_toutes_ts;   /* the source delivers TS1..7 itself: no automatic fillers */
+static BspBurstSlot *bsp_slot_exact(uint8_t tn, uint32_t fn)
+{
+    BspBurstQueue *qq = &bsp.q[tn];
+    for (int i = 0; i < BSP_QUEUE_LEN; i++)
+        if (qq->slot[i].valid && qq->slot[i].fn == fn) return &qq->slot[i];
+    return NULL;
+}
+static void bsp_livrer_trame(uint32_t fn)
+{
+    static int16_t iq[2 * 256];
+    const bool one_shot = calypso_rhea_dma_one_shot();
+    bsp_source_toutes_ts = true;
+    for (int tn = 0; tn < BSP_NUM_TN; tn++) {
+        BspBurstSlot *sl = bsp_slot_exact((uint8_t)tn, fn);
+        if (one_shot) {
+            if (tn == 0 && sl) {
+                const int marge = 21;
+                int n = sl->n < 296 ? sl->n : 296;
+                memset(iq, 0, sizeof iq);
+                memcpy(iq + 2 * marge, sl->iq, (size_t)n * sizeof(int16_t));
+                calypso_bsp_rx_burst(0, fn, iq, 2 * (marge + 148 + marge));
+                bsp.bursts_written++;
+            }
+        } else if (sl) {
+            int n = sl->n < 296 ? sl->n : 296;
+            calypso_bsp_rx_burst((uint8_t)tn, fn, sl->iq, n);
+            bsp.bursts_written++;
+        } else {
+            calypso_bsp_rx_burst((uint8_t)tn, fn, (const int16_t *)g_remplissage, 2 * 148);
+        }
+        if (sl) sl->valid = false;
+    }
+    /* purge what is older than this frame */
+    for (int tn = 0; tn < BSP_NUM_TN; tn++)
+        for (int i = 0; i < BSP_QUEUE_LEN; i++) {
+            BspBurstSlot *s2 = &bsp.q[tn].slot[i];
+            if (s2->valid && bsp_fn_delta(s2->fn, fn) < 0) { s2->valid = false; bsp.bursts_dropped_stale++; }
+        }
+    { static unsigned nl; if (nl++ < 3) BSP_LOG("STREAM trame fn=%u livree (%s)", fn, one_shot ? "fenetre SB, TS0 + marges" : "8 TS, 1250 symboles"); }
+}
+
 int calypso_bsp_service(uint32_t current_fn)
 {
     int n = 0;
@@ -1002,7 +1058,7 @@ int calypso_bsp_service(uint32_t current_fn)
             if (!qq->slot[i].valid) continue;
             if (best < 0 || bsp_fn_delta(qq->slot[i].fn, best_fn) < 0) { best = i; best_fn = qq->slot[i].fn; }
         }
-        if (best >= 0) calypso_bsp_deliver_buffered(best_fn);  /* exact match on this slot */
+        if (best >= 0) bsp_livrer_trame(best_fn);
         return n;
     }
     /* 2) otherwise: deliver this frame's bursts (DARAM + interrupt). */
@@ -1311,7 +1367,7 @@ skip_udp_listener:
 
 /* TS1..TS7 filler (see calypso_bsp_set_remplissage): a dummy burst padded to a
  * 157-symbol timeslot with guard silence; zeros until the bench registers one. */
-static uint16_t g_remplissage[2 * 157];
+/* g_remplissage and bsp_source_toutes_ts: defined before bsp_livrer_trame() */
 void calypso_bsp_set_remplissage(const int16_t *iq, int n_int16)
 {
     memset(g_remplissage, 0, sizeof g_remplissage);
@@ -1690,9 +1746,8 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
      * frame, the ROM's frame counting and TOA were off by 2x and the DSP did
      * twice the DMA/ISR work per frame. Remembered from the first tn != 0
      * burst seen. */
-    static bool source_toutes_ts;
-    if (tn != 0) source_toutes_ts = true;
-    if (pleine && continu && tn == 0 && n_int16 <= 2 * 157 && !source_toutes_ts) {
+    if (tn != 0) bsp_source_toutes_ts = true;
+    if (pleine && continu && tn == 0 && n_int16 <= 2 * 157 && !bsp_source_toutes_ts) {
         for (int ts = 1; ts < 8; ts++)
             c54x_bsp_load(bsp.dsp, g_remplissage, 2 * (156 + ((ts == 3 || ts == 7) ? 1 : 0)));
     }
