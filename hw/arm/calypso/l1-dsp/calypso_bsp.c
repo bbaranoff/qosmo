@@ -1001,11 +1001,20 @@ static void bsp_livrer_trame(uint32_t fn)
         BspBurstSlot *sl = bsp_slot_exact((uint8_t)tn, fn);
         if (one_shot) {
             if (tn == 0 && sl) {
-                const int marge = 21;
+                /* The window geometry of tpu_window.c: the burst sits 23 symbols
+                 * into the SB window (191 samples taken by the DSP, ALGTH 764)
+                 * and 3 symbols into the NB window (151 samples, ALGTH 604);
+                 * the 64-sample PM window takes the head of the burst. A 21
+                 * margin in a 151-sample window cut the last 18 symbols of
+                 * every normal burst. */
+                int nwin = calypso_rhea_dma_get_len_words() / 2;
+                int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+                int total = nwin > marge + 148 ? nwin : marge + 148;
+                if (total > 256) total = 256;
                 int n = sl->n < 296 ? sl->n : 296;
                 memset(iq, 0, sizeof iq);
                 memcpy(iq + 2 * marge, sl->iq, (size_t)n * sizeof(int16_t));
-                calypso_bsp_rx_burst(0, fn, iq, 2 * (marge + 148 + marge));
+                calypso_bsp_rx_burst(0, fn, iq, 2 * total);
                 bsp.bursts_written++;
             }
         } else if (sl) {
