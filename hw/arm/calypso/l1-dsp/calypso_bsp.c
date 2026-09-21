@@ -595,6 +595,31 @@ static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
     bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this does not move */
     if (!g_ts0_any) { g_ts0_any = 1; g_ts0_next = fn; }
 }
+/* [2026-09-21] L'INTERVALLE DE LA FENETRE, DIT PAR LE FIRMWARE.
+ *
+ * tpu_window.c:89 : tpu_enq_offset((5000 + l1s.tpu_offset + 625*tn) % 5000).
+ * Le registre TPU_OFFSET, que QEMU relaie dans chaque TICK, porte donc le
+ * decalage de synchro ET la position de l'intervalle sur lequel la fenetre RX
+ * est armee. Il etait stocke ici depuis le 2026-09-17 sans jamais etre lu.
+ *
+ * On ne connait pas l1s.tpu_offset, mais on n'en a pas besoin : hors mode
+ * dedie l'ARM ecoute TS0, donc la valeur observee a ce moment-la EST la
+ * reference. L'ecart a la reference, divise par 625, donne l'intervalle.
+ * La reference se reapprend d'elle-meme a chaque resynchro, puisque le mobile
+ * n'est alors pas en dedie. */
+static int g_bsp_tpu_offset = 0;
+static int g_tpu_ref = -1;
+
+/* Intervalle de la fenetre courante, 0 si on ne sait pas. */
+static int bsp_fenetre_tn(void)
+{
+    if (g_tpu_ref < 0) {
+        return 0;
+    }
+    int d = ((g_bsp_tpu_offset - g_tpu_ref) % 5000 + 5000) % 5000;
+    return ((d + 312) / 625) % 8;   /* 625 qbits par intervalle, arrondi */
+}
+
 /* [2026-09-21] L'INTERVALLE DEDIE.
  *
  * Le pont envoie les huit intervalles de chaque trame, le magasin ci-dessus
@@ -616,6 +641,53 @@ static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
  * l'armement et repart a zero si l'intervalle change. */
 #define BSP_DEDIE_RING (1u << 16)   /* ~5 min de trames BTS : le DSP en pas-a-pas derive de plusieurs secondes */
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid; } *g_dedie;
+
+/* [2026-09-21] LA TRAME LIVREE AU DSP EST UNE VRAIE TRAME.
+ *
+ * bsp_ts0_livrer() assemblait « TS0 + sept intervalles de bourrage a zero ».
+ * Le cadencement (un burst par tick, indexe par numero de trame BTS) n'est pas
+ * une bequille : sans lui la ROM voit ~1526 symboles par trame au lieu de 1250
+ * et son TOA ne se stabilise jamais -- mesure du 2026-09-21 en mode sans hack,
+ * TOA a 2967, 3735, 4215, 48, 13536 et « BURST ID 3!=2 », « EMPTY ».
+ * Le bourrage a zero, lui, EN EST une : le mobile n'entend rien de ce que la
+ * BTS emet ailleurs que sur TS0. On garde donc les huit intervalles, et la
+ * trame remise au DSP porte ce que la BTS a reellement emis. */
+#define BSP_AUTRES_RING (1u << 16)
+static struct { uint32_t fn; uint8_t bits[7][148]; uint8_t presents; } *g_autres;
+static unsigned long g_autres_stockes, g_autres_joues;
+
+static void bsp_autres_stocker(uint32_t fn, unsigned tn, const uint8_t *bits)
+{
+    if (tn < 1 || tn > 7) {
+        return;
+    }
+    if (!g_autres) {
+        g_autres = calloc(BSP_AUTRES_RING, sizeof *g_autres);
+        if (!g_autres) {
+            return;
+        }
+    }
+    unsigned i = fn % BSP_AUTRES_RING;
+    if (g_autres[i].fn != fn) {
+        g_autres[i].fn = fn;
+        g_autres[i].presents = 0;
+    }
+    memcpy(g_autres[i].bits[tn - 1], bits, 148);
+    g_autres[i].presents |= (uint8_t)(1u << (tn - 1));
+    g_autres_stockes++;
+}
+
+static const uint8_t *bsp_autres_bits(uint32_t fn, unsigned tn)
+{
+    if (!g_autres || tn < 1 || tn > 7) {
+        return NULL;
+    }
+    unsigned i = fn % BSP_AUTRES_RING;
+    if (g_autres[i].fn != fn || !(g_autres[i].presents & (1u << (tn - 1)))) {
+        return NULL;
+    }
+    return g_autres[i].bits[tn - 1];
+}
 static int g_dedie_tn = -1, g_dedie_ss;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
 
@@ -725,7 +797,31 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     static int16_t iq[2 * 256];
     const uint8_t *bits = g_ts0[i].bits;
     {   /* Sur les trames du canal dedie, c'est son intervalle qui compte. */
+        /* Deux verdicts : la table 45.002 (trames du canal) et ce que dit le
+         * firmware (intervalle de la fenetre). MONTANT_TPU_TN=1 fait foi au
+         * second ; par defaut on garde le premier et on JOURNALISE les
+         * desaccords, parce que la valeur du TICK peut avoir une trame de
+         * retard sur la programmation reelle de la fenetre -- c'est justement
+         * ce qu'il faut mesurer avant de s'y fier. */
         bool a_nous = bsp_dedie_trame(g_ts0[i].fn);
+        {
+            static int suit_tpu = -1;
+            if (suit_tpu < 0) { const char *e = calypso_getenv("MONTANT_TPU_TN"); suit_tpu = (e && *e == '1'); }
+            bool selon_tpu = (bsp_fenetre_tn() == g_dedie_tn);
+            if (g_dedie_tn > 0 && selon_tpu != a_nous) {
+                static unsigned long n;
+                if (++n <= 40 || (n % 200) == 0) {
+                    BSP_LOG("dedie : DESACCORD fn=%u p51=%u p102=%u : table=%d "
+                            "tpu=%d (offset=%d ref=%d, tn_fenetre=%d) [%lu fois]",
+                            g_ts0[i].fn, g_ts0[i].fn % 51u, g_ts0[i].fn % 102u,
+                            (int)a_nous, (int)selon_tpu, g_bsp_tpu_offset,
+                            g_tpu_ref, bsp_fenetre_tn(), n);
+                }
+            }
+            if (suit_tpu) {
+                a_nous = selon_tpu;
+            }
+        }
         const uint8_t *d = a_nous ? bsp_dedie_bits(g_ts0[i].fn) : NULL;
         if (d) {
             bits = d;
@@ -795,8 +891,29 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
      * and no SB ever decoded. One-shot windows take TS0 only. */
     if (!one_shot) {
         extern uint16_t g_remplissage_ts0[];   /* forward: defined below (filler, zeros by default) */
-        for (int tn = 1; tn < 8; tn++)
-            calypso_bsp_rx_burst((uint8_t)tn, g_ts0[i].fn, (const int16_t *)g_remplissage_ts0, 2 * 148);
+        static int16_t iq_autre[2 * 148];
+        for (int tn = 1; tn < 8; tn++) {
+            const uint8_t *b = bsp_autres_bits(g_ts0[i].fn, (unsigned)tn);
+            if (!b) {
+                calypso_bsp_rx_burst((uint8_t)tn, g_ts0[i].fn,
+                                     (const int16_t *)g_remplissage_ts0, 2 * 148);
+                continue;
+            }
+            memset(iq_autre, 0, sizeof iq_autre);
+            gmsk_moduler(b, 148, 30000, 0.0, 0.5, iq_autre);
+            {   /* meme elargissement que les bursts normaux de TS0 */
+                static double sym2 = -2;
+                if (sym2 == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym2 = (e && *e) ? atof(e) : 0.3; }
+                gmsk_elargir(iq_autre, 148, sym2);
+            }
+            calypso_bsp_rx_burst((uint8_t)tn, g_ts0[i].fn, iq_autre, 2 * 148);
+            g_autres_joues++;
+        }
+        if ((g_autres_joues % 5000) == 1) {
+            BSP_LOG("trame complete : %lu bursts hors TS0 stockes, %lu joues "
+                    "(le bourrage a zero ne sert plus que pour les manquants)",
+                    g_autres_stockes, g_autres_joues);
+        }
     }
 }
 static void bsp_ts0_service(uint32_t tick_fn)
@@ -941,8 +1058,14 @@ static void bsp_trxd_readable(void *opaque)
             if (tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
             if (tn == g_dedie_tn && nbits == 148) {
                 /* Le canal dedie : garde, sans rien changer au cadencement -
-                 * bsp_ts0_livrer() le jouera a la place de TS0. */
+                 * bsp_ts0_livrer() le jouera a la place de TS0 quand la
+                 * fenetre est en tir unique. */
                 bsp_dedie_stocker(fn, bits);
+            }
+            if (tn >= 1 && tn <= 7 && nbits == 148) {
+                /* Les autres intervalles de la MEME trame : ils prendront la
+                 * place du bourrage a zero dans la trame continue. */
+                bsp_autres_stocker(fn, tn, bits);
                 bsp.bursts_seen++;
                 return;
             }
@@ -1265,9 +1388,14 @@ static void bsp_trxd_readable(void *opaque)
  * firmware shifts its RX window (synchronize_tdma) the burst must follow so
  * the measured ToA converges to 23, i.e. native acquisition without a canned
  * ToA. Units: 4 qbits = 1 bit = 1 sample at 1 SPS. */
-static int  g_bsp_tpu_offset = 0;
 static int  g_bsp_tpu_ref = 0x7fffffff;   /* premier offset observe = origine */
-void calypso_bsp_set_tpu_offset(int qbits) { g_bsp_tpu_offset = qbits; }
+void calypso_bsp_set_tpu_offset(int qbits)
+{
+    g_bsp_tpu_offset = qbits;
+    if (g_dedie_tn <= 0) {
+        g_tpu_ref = qbits;          /* pas de canal dedie : l'ARM est sur TS0 */
+    }
+}
 
 /* Native ToA lock (CALYPSO_BSP_TOA_LOCK=1): slow closed loop driving the burst
  * placement bias so the ToA the DSP measures reaches 23 ("on time") WITHOUT
