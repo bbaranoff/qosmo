@@ -122,14 +122,15 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             s->lk_used = true;
             break;
         case 0xE: { /* *+AR(x)(lk)% - circular */
+            /* [2026-09-21] Same rule as modes 8-11: c54x_circ_ref (base on a 2^N
+             * boundary, index = AR & (2^N-1)). The old "base = AR - AR % BK" grid
+             * broke the xCCH deinterleaver (PROM0 0x9a15/0x9a34/0x9a59
+             * `mar *+AR4(57)%`, BK=456, buffer 0x2a00): AR4=0x2aab+57 gave
+             * 0x291c instead of 0x2ae4, so the odd-nibble half of every 456-bit
+             * block landed below the buffer and the Viterbi saw stale words. */
             uint16_t lk = prog_fetch(s, s->pc + 1);
-            uint16_t v  = s->ar[cur_arp] + lk;
-            if (s->bk) {
-                uint16_t base = s->ar[cur_arp] - (s->ar[cur_arp] % s->bk);
-                if (v >= base + s->bk) v -= s->bk;
-            }
-            s->ar[cur_arp] = v;
-            addr = v;
+            s->ar[cur_arp] = c54x_circ_ref(s->ar[cur_arp], (int16_t)lk, s->bk);
+            addr = s->ar[cur_arp];
             s->lk_used = true;
             break;
         }

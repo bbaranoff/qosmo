@@ -235,11 +235,18 @@ static void c54x_sfta_exec(C54xState *s, uint16_t op)
     if (shift > 15) shift -= 32;
     int64_t sv = sext40(src ? s->b : s->a);
 
-    /* [2026-09-21] left shift: C = the last bit shifted out of bit 31, i.e.
-     * src(32 - SHIFT) (SPRU172C SFTA example: 80AA001234 << 5 -> C = 1, the
-     * bit 27); bit 39 - SHIFT read 0 there. isa_test 188. */
+    /* [2026-09-21] left shift: C = the last bit shifted out of the 40-bit
+     * accumulator, src(40 - SHIFT) - the SFTL rule (src(31-(SHIFT-1)), i.e.
+     * 32 - SHIFT) transposed to 40 bits. Measured on the ROM's Fire-code LFSR
+     * (PROM0 0xa168-0xa175: `sfta A,1` then `xc 1,C -> xor #0x0482,16,A /
+     * xor @60(=9),A`): the 40-bit syndrome register only reaches zero on a
+     * correct 224-bit block when C is the old bit 39; with bit 31 (or the
+     * manual's literal src(39-SHIFT) = bit 38) every block reads FIRE1 and
+     * the ARM drops it. The SPRU172C example (80AA001234 << 5 -> C = 1) fits
+     * bit 39 or 27 but not 35, so isa_test 188 now fails: manual example vs
+     * silicon, the ROM wins. */
     int cbit = (shift < 0) ? (int)((sv >> ((-shift) - 1)) & 1)
-             : (shift > 0) ? (int)((sv >> (32 - shift)) & 1) : ((s->st0 & ST0_C) ? 1 : 0);
+             : (shift > 0) ? (int)((sv >> (40 - shift)) & 1) : ((s->st0 & ST0_C) ? 1 : 0);
     if (cbit) s->st0 |= ST0_C;
     else      s->st0 &= ~ST0_C;
 
@@ -3192,17 +3199,17 @@ int c54x_exec_one(C54xState *s)
                 int64_t result = src;
                 switch (sub) {
                 case 0x4: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (dst_in << shift)
-                                                      : (dst_in >> (-shift));
-                            result = src & sh; break; }
+                            int64_t sh = (shift >= 0) ? (src << shift)
+                                                      : (src >> (-shift));
+                            result = dst_in & sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x5: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (dst_in << shift)
-                                                      : (dst_in >> (-shift));
-                            result = src | sh; break; }
+                            int64_t sh = (shift >= 0) ? (src << shift)
+                                                      : (src >> (-shift));
+                            result = dst_in | sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x6: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (dst_in << shift)
-                                                      : (dst_in >> (-shift));
-                            result = src ^ sh; break; }
+                            int64_t sh = (shift >= 0) ? (src << shift)
+                                                      : (src >> (-shift));
+                            result = dst_in ^ sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
                     c54x_sftl_exec(s, op);
                     return consumed + s->lk_used;
@@ -3505,20 +3512,20 @@ int c54x_exec_one(C54xState *s)
                 switch (sub) {
                 case 0x4: { /* AND src,SHIFT,DST: DST = SRC & (DST_in << shift) */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (dst_in << shift) : (dst_in >> (-shift));
-                    result = src & sh;
+                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
+                    result = dst_in & sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x5: { /* OR */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (dst_in << shift) : (dst_in >> (-shift));
-                    result = src | sh;
+                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
+                    result = dst_in | sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x6: { /* XOR */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (dst_in << shift) : (dst_in >> (-shift));
-                    result = src ^ sh;
+                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
+                    result = dst_in ^ sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
