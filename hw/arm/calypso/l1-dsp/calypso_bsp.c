@@ -772,7 +772,28 @@ static void bsp_trxd_readable(void *opaque)
          * happens per DSP tick in calypso_bsp_service(). */
         static int stream = -1;
         if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e == '1') ? 1 : 0; }
-        if (stream && tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
+        if (stream) {
+            if (tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
+            /* [2026-09-21] TS1..TS7 STOP HERE. The frame handed to the ROM is
+             * assembled by bsp_ts0_livrer(), which already appends its own
+             * seven filler timeslots after the stored TS0 burst - exactly 1250
+             * symbols per tick. Letting the bridge's other timeslots carry on
+             * to calypso_bsp_rx_burst() at the end of this function fed the RIF
+             * a SECOND, unpaced stream on top of that one: measured 157
+             * non-TS0 bursts/s against ~89 DSP ticks/s, i.e. ~276 extra
+             * samples per ARM frame. The ROM, which counts its frame sample by
+             * sample, then saw ~1526 symbols per frame instead of 1250: its FB
+             * ToA never settled on 23 + n*1250 (observed residues 280/652/810/
+             * 1152 modulo 1250), the RIF transit stage saturated (rif_avant=
+             * 8196, oldest samples destroyed) and the narrow FB1 search never
+             * found the tone again - FB0 hit, FB1 never, FBSB result=255.
+             * bursts_seen must still move: the drain loop of
+             * calypso_bsp_service() stops as soon as it does not. */
+            bsp.bursts_seen++;
+            { static unsigned long n_hors; if (n_hors++ == 0 || n_hors % 20000 == 0)
+                  BSP_LOG("STREAM : %lu bursts hors TS0 ignores (la trame est assemblee par bsp_ts0_livrer)", n_hors); }
+            return;
+        }
     }
 
     /* Log burst type: check if all-zero (FB) or mixed (NB/SB) */
