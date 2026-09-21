@@ -5684,7 +5684,16 @@ int c54x_exec_one(C54xState *s)
             case 0x2: case 0x3: /* MPYR Smem, dst : dst = rnd(T * Smem) */
                 product = (int64_t)(int16_t)s->t * (int64_t)(int16_t)val;
                 if (s->st1 & ST1_FRCT) product <<= 1;
-                product += 0x8000;                 /* round */
+                /* @BEQUILLE [2026-09-21] CALYPSO_HACK_SOFT_SCALE=<k> : diagnostic only.
+                 * The NB soft-bit scaler (0x8166/0x816c/0x8175) multiplies the
+                 * equaliser output by a scale T that comes out as 2 (or 0) on the
+                 * synthetic cell, so rnd(T*soft)>>13 is 0..3 and the 129-entry
+                 * quantiser table is indexed at 0: every soft bit is stored +1.
+                 * Shifting the product by k here says whether a k-bit larger
+                 * scale is all that separates the decoder from the SI. */
+                { static int hk = -1; if (hk < 0) { const char *e = getenv("CALYPSO_HACK_SOFT_SCALE"); hk = (e && *e) ? atoi(e) : 0; }
+                  if (hk && (s->pc == 0x8166 || s->pc == 0x816c || s->pc == 0x8175)) product <<= hk; }
+                product = (product + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd(): +2^15 then bits 15-0 cleared (isa_test 132: MPYR 0,B -> 0x6260000) */
                 if (sub & 1) s->b = sext40(product);
                 else         s->a = sext40(product);
                 return consumed + s->lk_used;      /* T UNCHANGED */
@@ -6391,7 +6400,7 @@ int c54x_exec_one(C54xState *s)
                     ? (int64_t)(uint16_t)xval_d * (int64_t)(int16_t)yval_d
                     : (int64_t)(int16_t)xval_d * (int64_t)(int16_t)yval_d;
                 if (s->st1 & ST1_FRCT) p <<= 1;
-                if (is_macr) p += 0x8000;
+                if (is_macr) p = (p + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
                 int dstb, srcb;
                 if (is_mpy || is_macsu) {          /* mask 0xFE00: bit 8 = acc */
                     dstb = hi8 & 1; srcb = dstb;
@@ -6459,7 +6468,7 @@ int c54x_exec_one(C54xState *s)
             {
                 int64_t pr = (int64_t)(int16_t)xval_p * (int64_t)(int16_t)yval_p;
                 if (s->st1 & ST1_FRCT) pr <<= 1;
-                pr += 0x8000;                       /* round */
+                pr = (pr + 0x8000) & ~0xFFFFLL;     /* round: bits 15-0 cleared [2026-09-21] */
                 int srcr = (op >> 9) & 1, dstr = (op >> 8) & 1;
                 int64_t baser = srcr ? s->b : s->a;
                 if (dstr) s->b = sext40(baser - pr);
@@ -6548,7 +6557,7 @@ ba_handler:
             int arrondi= ((op >> 9)  & 1);           /* 0xAA/0xAE = round       */
             int64_t p_l = (int64_t)(int16_t)s->t * (int64_t)(int16_t)yv_l;
             if (s->st1 & ST1_FRCT) p_l <<= 1;
-            if (arrondi) p_l += 0x8000;
+            if (arrondi) p_l = (p_l + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
             int64_t *acc_ld = dst_l ? &s->b : &s->a;   /* receives the LD  */
             int64_t *acc_op = dst_l ? &s->a : &s->b;   /* receives the MAC */
             *acc_op = sext40(soust ? (*acc_op - p_l) : (*acc_op + p_l));
