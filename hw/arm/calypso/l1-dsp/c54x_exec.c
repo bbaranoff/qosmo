@@ -6417,10 +6417,18 @@ int c54x_exec_one(C54xState *s)
             }
         }
 
-        /* SQDST Xmem, Ymem — Squared Distance (1-word dual-operand)
-         * Encoding: 1010 0001 XXXX YYYY
-         * Per SPRU172C: B += (AH - Xmem)^2; A = Ymem << 16; T = Xmem */
-        if (hi8 == 0xA1) {
+        /* [2026-09-21] 0xA1xx is NOT SQDST. SQDST Xmem,Ymem is 0xE2xx (binutils
+         * { "sqdst", 0xE200, 0xFF00 }); 0xA000-0xA1FF is ADD Xmem,Ymem,dst with
+         * bit 8 = dst, so every `add Xmem,Ymem,B` (a1xx) was run as SQDST:
+         * A <- Ymem<<16 (clobbered), B += (AH-Xmem)^2, T <- Xmem.
+         * Measured on the NB equaliser (PROM0 0x8251 `a189 add *AR2+,*AR3+,B`,
+         * 206 times per burst): the 3-tap sum just built in A was replaced by
+         * the derotated Q sample, so the "soft bits" were the raw Q plane
+         * (clean but one symbol early and inverted), the TSC residual check
+         * saw no correlation (count 6) and the quantiser output +1 everywhere.
+         * Also hits 0x8565, 0x81fa, 0x7f03, 0x7fab-0x80ec (tap threshold /
+         * SB path). The block is kept for reference, never entered. */
+        if (0 && hi8 == 0xA1) {
             /* 2-bit Xmem/Ymem per SPRU131G tables 5-6/5-8. */
             int xar_sq  = ((op >> 4) & 0x03) + 2;
             int yar_sq  = (op & 0x03) + 2;
