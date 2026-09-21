@@ -88,3 +88,19 @@ void gmsk_moduler(const uint8_t *bits, int n, int amp, double phase0, double dec
         iq[2 * k + 1] = (int16_t)lrint(amp * sin(ph));
     }
 }
+
+void gmsk_elargir(int16_t *iq, int n, double a)
+{
+    if (a == 0.0 || n <= 0 || n > GMSK_MAX_BITS) return;
+    double xi[GMSK_MAX_BITS], xq[GMSK_MAX_BITS];
+    for (int k = 0; k < n; k++) { xi[k] = iq[2*k]; xq[k] = iq[2*k+1]; }
+    for (int k = 0; k < n; k++) {
+        double yi = xi[k], yq = xq[k];
+        if (k > 0)     { yi += a * xi[k-1]; yq += a * xq[k-1]; }
+        if (k < n - 1) { yi += a * xi[k+1]; yq += a * xq[k+1]; }
+        yi /= (1 + 2 * a); yq /= (1 + 2 * a);   /* keep the peak amplitude */
+        if (yi > 32767) yi = 32767; if (yi < -32768) yi = -32768;
+        if (yq > 32767) yq = 32767; if (yq < -32768) yq = -32768;
+        iq[2*k] = (int16_t)lrint(yi); iq[2*k+1] = (int16_t)lrint(yq);
+    }
+}

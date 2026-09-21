@@ -30,6 +30,7 @@
 #include "qemu/timer.h"
 #include "calypso_bsp.h"
 #include "calypso_rhea_dma.h"
+#include "calypso_rif.h"
 #include "calypso_c54x.h"
 #include "hw/arm/calypso/calypso_iota.h"
 #include "hw/arm/calypso/calypso_invariants.h"
@@ -562,6 +563,95 @@ uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 
 /* ---- UDP TRXDv0 DL receive callback ---- */
 
+/* [2026-09-21] FN-KEYED TS0 STORE (real chain, CALYPSO_BSP_STREAM=1).
+ * The BTS runs in real time, the emulated DSP does not: delivering each UDP
+ * burst the moment it arrives hands the ROM bursts of arbitrary frames, and
+ * once the ARM has synchronised (its frame counter = the BTS's, learnt from
+ * the SB) the four bursts of a BCCH block are not the four it asked for -
+ * every block failed the Fire code with perfect bursts. So every TS0 burst
+ * is kept by BTS frame number (ring of 2^18 frames, ~20 min at half speed):
+ *  - before synchronisation (FB/SB search) the bursts are played in arrival
+ *    order, one per DSP tick;
+ *  - an SB delivered into an SB window (one-shot RIF DMA of 191 samples)
+ *    fixes offset = SB fn - tick fn, exactly the relation of the synthetic
+ *    cell (whose SB carries the tick fn);
+ *  - afterwards tick T gets the burst of BTS frame T + offset, modulated
+ *    (GMSK, sampling instant 0.5, amplitude 30000, gmsk_elargir on the normal
+ *    bursts) and framed for the armed window (3 or 21 leading samples). */
+#define BSP_TS0_RING (1u << 18)
+#define BSP_FN_MAX   2715648u
+static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
+static uint32_t g_ts0_next; static int g_ts0_any;
+static int64_t g_ts0_offset = INT64_MIN;
+static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
+static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
+static int bsp_ts0_est_fcch(const uint8_t *b) { for (int k = 0; k < 148; k++) if (b[k] & 1) return 0; return 1; }
+static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
+{
+    if (!g_ts0) g_ts0 = calloc(BSP_TS0_RING, sizeof *g_ts0);
+    if (!g_ts0) return;
+    unsigned i = fn % BSP_TS0_RING;
+    g_ts0[i].fn = fn; memcpy(g_ts0[i].bits, bits, 148); g_ts0[i].valid = 1; g_ts0[i].joue = 0;
+    bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this does not move */
+    if (!g_ts0_any) { g_ts0_any = 1; g_ts0_next = fn; }
+}
+static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
+{
+    static int16_t iq[2 * 256];
+    const uint8_t *bits = g_ts0[i].bits;
+    int sb = bsp_ts0_est_sb(bits), fcch = bsp_ts0_est_fcch(bits);
+    memset(iq, 0, sizeof iq);
+    const bool one_shot = calypso_rhea_dma_one_shot();
+    int nwin = one_shot ? calypso_rhea_dma_get_len_words() / 2 : 0;
+    int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    if (!sb && !fcch) {
+        static double sym = -2;
+        if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
+        gmsk_elargir(iq + 2 * marge, 148, sym);
+    }
+    int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
+    if (total > 256) total = 256;
+    if (sb && one_shot && nwin >= 190) {
+        int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;
+        if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
+                                        g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
+        g_ts0_offset = off;
+    }
+    { static unsigned nl; if (nl++ < 400 || nl % 5000 == 0 || fcch || sb || nwin > 0) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d\n", tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u, sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level()); }
+    g_ts0[i].joue = 1;
+    calypso_bsp_rx_burst(0, g_ts0[i].fn, iq, 2 * total);
+    bsp.bursts_written++;
+    /* Continuous DMA (FB search): the ROM counts 1250 samples per frame and
+     * the ARM turns its FB TOA into frames (ntdma) and bits with that
+     * constant, so every tick must carry a WHOLE frame: TS0 (padded to 156
+     * by calypso_bsp_rx_burst) then seven filler timeslots. With TS0 alone
+     * (156 samples per tick) the SB window was armed eight ticks too late
+     * and no SB ever decoded. One-shot windows take TS0 only. */
+    if (!one_shot) {
+        extern uint16_t g_remplissage_ts0[];   /* forward: defined below (filler, zeros by default) */
+        for (int tn = 1; tn < 8; tn++)
+            calypso_bsp_rx_burst((uint8_t)tn, g_ts0[i].fn, (const int16_t *)g_remplissage_ts0, 2 * 148);
+    }
+}
+static void bsp_ts0_service(uint32_t tick_fn)
+{
+    if (!g_ts0 || !g_ts0_any) return;
+    static unsigned manques, manques_log;
+    if (g_ts0_offset != INT64_MIN) {
+        int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
+        unsigned i = (unsigned)w % BSP_TS0_RING;
+        if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
+        manques++;
+        if (manques_log++ < 10 || manques % 1000 == 0)
+            printf("  [ts0] tick=%u : pas de burst BTS pour fn=%u (manques=%u) - le BTS est-il en retard sur le DSP ?\n", tick_fn, (uint32_t)w, manques);
+        return;
+    }
+    for (unsigned k = 0; k < BSP_TS0_RING; k++) {
+        unsigned i = (g_ts0_next + k) % BSP_TS0_RING;
+        if (g_ts0[i].valid && !g_ts0[i].joue) { bsp_ts0_livrer(tick_fn, i); g_ts0_next = g_ts0[i].fn + 1; return; }
+    }
+}
 static void bsp_trxd_readable(void *opaque)
 {
     /* The bridge sends 8 header bytes + 4*148 I/Q = 600 bytes, and a burst at
@@ -678,6 +768,12 @@ static void bsp_trxd_readable(void *opaque)
     if (nbits <= 0) return;
 
     const uint8_t *bits = buf + 8;
+    {   /* FN-keyed store of the TS0 bursts (see bsp_ts0_stocker); delivery
+         * happens per DSP tick in calypso_bsp_service(). */
+        static int stream = -1;
+        if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e == '1') ? 1 : 0; }
+        if (stream && tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
+    }
 
     /* Log burst type: check if all-zero (FB) or mixed (NB/SB) */
     {
@@ -862,6 +958,21 @@ static void bsp_trxd_readable(void *opaque)
          * against 27 on 76 with GMSK, and the FB frequency estimate wandered to
          * +1050 Hz. Amplitude 30000 as the synthetic cell. */
         gmsk_moduler(bits, nbits, 30000, 0.0, 0.5, iq + iq_count);
+        /* [2026-09-21] Same widening as the synthetic cell (gmsk_elargir,
+         * CALYPSO_BSP_NB_SYM, default 0.3) on the normal bursts: the ROM zeroes
+         * the +-1 channel taps of a plain 1-sps GMSK on about 60 percent of the
+         * bursts and the block fails. FCCH (all zeros) and SB (training
+         * sequence at bits 42..105) are left as they are: FB/SB lock natively
+         * on them. */
+        if (nbits == 148) {
+            static const uint8_t train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
+            static double sym = -2;
+            if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
+            int zeros = 1, sb = 1;
+            for (int k = 0; k < 148 && zeros; k++) if (bits[k]) zeros = 0;
+            for (int k = 0; k < 64 && sb; k++) if ((bits[42 + k] & 1) != train_sb[k]) sb = 0;
+            if (!zeros && !sb) gmsk_elargir(iq + iq_count, nbits, sym);
+        }
         iq_count += 2 * nbits;
 
         /* WINDOW WIDENING — CALYPSO_BSP_RX_WINDOW.
@@ -917,6 +1028,28 @@ static void bsp_trxd_readable(void *opaque)
      * the RIF delivers them on silicon. There is no FN rendez-vous to keep —
      * the burst carries its own frame number for the SCH, and the correlator
      * only ever sees the window it is given. */
+    /* [2026-09-21] Frame the TS0 burst like the synthetic cell when the ARM
+     * has armed a task window (one-shot RIF DMA of 151 samples for a normal
+     * burst, 191 for the SB; tpu_window.c): 3 (NB) or 21 (SB) silent samples
+     * ahead, the window length in all. Measured on the real chain before: the
+     * bare 148-sample burst put the ROM's NB TOA at 2 instead of 5, the
+     * equaliser's pre-cursor tap fell outside its 3-tap window and every BCCH
+     * block failed the Fire code; the SB read TOA 3 instead of 23. */
+    if (tn == 0 && calypso_rhea_dma_one_shot()) {
+        int nwin = calypso_rhea_dma_get_len_words() / 2;
+        int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+        if (marge > 0 && iq_count >= 2 * 148) {
+            static int16_t cadre[2 * 256];
+            int total = nwin > marge + 148 ? nwin : marge + 148;
+            if (total > 256) total = 256;
+            int n = iq_count < 2 * 148 ? iq_count : 2 * 148;   /* the burst alone, guard dropped */
+            memset(cadre, 0, sizeof cadre);
+            memcpy(cadre + 2 * marge, iq, (size_t)n * sizeof(int16_t));
+            { static unsigned nl; if (nl++ < 24 || nl % 5000 == 0) printf("  [livre] fn=%u p51=%u fenetre=%d marge=%d\n", fn, fn % 51u, nwin, marge); }
+            calypso_bsp_rx_burst(tn, fn, cadre, 2 * total);
+            return;
+        }
+    }
     calypso_bsp_rx_burst(tn, fn, iq, iq_count);
 
     /* Delivery is handled exclusively by calypso_bsp_deliver_buffered()
@@ -983,7 +1116,8 @@ void calypso_bsp_toa_feedback(int toa)
  *     (21 silent samples before and after), which is what puts the ROM's
  *     SB TOA near 23.
  * Slots older than the delivered frame are purged (their TS0 was lost). */
-static uint16_t g_remplissage[2 * 157];
+uint16_t g_remplissage_ts0[2 * 157];
+#define g_remplissage g_remplissage_ts0
 static bool bsp_source_toutes_ts;   /* the source delivers TS1..7 itself: no automatic fillers */
 static BspBurstSlot *bsp_slot_exact(uint8_t tn, uint32_t fn)
 {
@@ -1016,11 +1150,29 @@ static void bsp_livrer_trame(uint32_t fn)
                 memcpy(iq + 2 * marge, sl->iq, (size_t)n * sizeof(int16_t));
                 calypso_bsp_rx_burst(0, fn, iq, 2 * total);
                 bsp.bursts_written++;
+                { static unsigned nl; if (nl++ < 40 || nl % 2000 == 0) printf("  [livre] fn=%u p51=%u one_shot=1 nwin=%d marge=%d n=%d total=%d\n", fn, fn % 51u, nwin, marge, n / 2, total); }
             }
         } else if (sl) {
             int n = sl->n < 296 ? sl->n : 296;
-            calypso_bsp_rx_burst((uint8_t)tn, fn, sl->iq, n);
+            /* [2026-09-21] TS0 in STREAM mode: frame it like the one-shot
+             * branch whenever the RIF DMA length is a task window (151 = NB,
+             * 191 = SB), even if the one-shot flag reads false at delivery
+             * time. Measured on the real chain: the NB bursts reached the ROM
+             * at TOA 2 (no margin) instead of 5 as on the synthetic cell, the
+             * equaliser's pre-cursor tap fell outside its window and every
+             * block failed the Fire code. */
+            int nwin = tn == 0 ? calypso_rhea_dma_get_len_words() / 2 : 0;
+            int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+            if (tn == 0 && marge > 0) {
+                int total = nwin > marge + 148 ? nwin : marge + 148;
+                if (total > 256) total = 256;
+                memset(iq, 0, sizeof iq);
+                memcpy(iq + 2 * marge, sl->iq, (size_t)n * sizeof(int16_t));
+                calypso_bsp_rx_burst(0, fn, iq, 2 * total);
+            } else
+                calypso_bsp_rx_burst((uint8_t)tn, fn, sl->iq, n);
             bsp.bursts_written++;
+            { static unsigned nl; if (tn == 0 && (nl++ < 40 || nl % 2000 == 0)) printf("  [livre] fn=%u p51=%u one_shot=0 nwin=%d marge=%d n=%d\n", fn, fn % 51u, nwin, marge, n / 2); }
         } else {
             calypso_bsp_rx_burst((uint8_t)tn, fn, (const int16_t *)g_remplissage, 2 * 148);
         }
@@ -1056,14 +1208,10 @@ int calypso_bsp_service(uint32_t current_fn)
     if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e=='1') ? 1 : 0;
                       if (stream) BSP_LOG("STREAM on : 1 burst TS0/trame en ordre FN (cohérence horloge)"); }
     if (stream) {
-        /* oldest valid TS0 slot (smallest FN in circular order) */
-        BspBurstQueue *qq = &bsp.q[0];
-        int best = -1; uint32_t best_fn = 0;
-        for (int i = 0; i < BSP_QUEUE_LEN; i++) {
-            if (!qq->slot[i].valid) continue;
-            if (best < 0 || bsp_fn_delta(qq->slot[i].fn, best_fn) < 0) { best = i; best_fn = qq->slot[i].fn; }
-        }
-        if (best >= 0) bsp_livrer_trame(best_fn);
+        /* [2026-09-21] FN-keyed TS0 store (bsp_ts0_service): arrival order
+         * until an SB fixes the ARM/tick offset, then the burst of the ARM's
+         * frame at every tick. */
+        bsp_ts0_service(current_fn);
         return n;
     }
     /* 2) otherwise: deliver this frame's bursts (DARAM + interrupt). */
