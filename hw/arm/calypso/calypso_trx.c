@@ -95,6 +95,19 @@ typedef struct CalypsoTRX {
     unsigned burst_w, burst_r;
     uint16_t burst_cur;
     uint32_t burst_last_fn;
+    /* [2026-09-21] Reference de requete de l'IMMEDIATE ASSIGNMENT, cf.
+     * pont_reqref_corrigee() : la RA de la derniere ecriture de d_rach, et la
+     * trame que le firmware a memorisee pour chacune (son last_rach, relevee
+     * une fois par trame). */
+    uint8_t  rach_ra;
+    bool     rach_ra_vue;
+    uint32_t rach_fn[256];
+    uint8_t  rach_file[8];       /* RA ecrites, en attente de leur RACH_CONF */
+    unsigned rach_file_w, rach_file_r;
+    /* Canal dedie a annoncer au DSP au prochain TICK (PONT_DCCH). */
+    bool     dcch_a_dire;
+    uint8_t  dcch_tn, dcch_ss;
+    int      dcch_genre;
 } CalypsoTRX;
 
 static CalypsoTRX *g_trx;
@@ -233,6 +246,154 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
     calypso_l1_disable("DSP externe");
 }
 
+/* ── Reference de requete de l'IMMEDIATE ASSIGNMENT (montage DSP) ────────
+ *
+ * Le mobile n'accepte un IMM ASS que si sa reference de requete correspond
+ * EXACTEMENT a ce que SA couche 1 lui a confirme : gsm48_match_ra()
+ * (osmocom-bb gsm48_rr.c:3359) compare la RA *et* T1'/T2/T3, et journalise
+ * sinon « request %02x matches but not frame number ».
+ *
+ * Or le banc n'emet pas l'access-burst a la trame ou le firmware a cru
+ * l'emettre : pont.py le programme sur SA propre horloge (pont/uplink.py,
+ * _poll_rach -> _next_fn(4, ...)), plusieurs trames plus tard. La BTS
+ * horodate donc la reference avec une autre trame, et le mobile jette
+ * l'assignation. Mesure du 2026-09-21 sur le banc reel : RACH publie
+ * ra=0x0d, IMM ASS revenue avec la meme RA mais T1'=3 T2=9 T3=35, et le
+ * mobile est reste en « connection pending », sans jamais poser de tache
+ * SDCCH montante (/dev/shm/calypso_sdcch_ul jamais cree) ; cote BSC, douze
+ * lchan SDCCH ouverts puis « lchan allocation failed ... Timeout ».
+ *
+ * La couche 1 gr-gsm reglait deja exactement ca en reecrivant les octets 8-9
+ * du bloc (l1-grgsm/calypso_l1_grgsm.c:836-845, feed_agch). Avec un DSP
+ * externe elle est desactivee : on refait la meme chose ici, sur la lecture
+ * ARM du mot concerne de a_cd, a partir de « last_rach » du firmware — la
+ * trame que le firmware a lui-meme memorisee et remontee en L1CTL_RACH_CONF.
+ *
+ * On ne corrige que si la RA de l'assignation est celle de la derniere
+ * ecriture de d_rach : sinon l'assignation repond a une tentative plus
+ * ancienne que last_rach, et fabriquer une correspondance serait pire que
+ * l'echec. MONTANT_REQREF=0 desactive la correction.
+ */
+static uint32_t pont_last_rach_fn(void)
+{
+    static uint32_t adr;
+    static int cherche;
+    if (!cherche) {
+        cherche = 1;
+        adr = calypso_firmware_symbol("last_rach");
+        fprintf(stderr, "[trx] reference de requete : last_rach %s (%s)\n",
+                adr ? "trouve" : "INTROUVABLE",
+                calypso_firmware_elf() ? calypso_firmware_elf() : "pas d'ELF");
+    }
+    if (!adr) {
+        return 0;
+    }
+    uint32_t fn = 0;
+    cpu_physical_memory_read(adr, &fn, sizeof(fn));
+    return le32_to_cpu(fn);
+}
+
+/* Appariement RA -> trame d'emission.
+ *
+ * [2026-09-21] Premiere version : relever last_rach.fn une fois par trame et
+ * l'attribuer a la derniere RA ecrite. Mesure sur le banc : trois « IMM ASS
+ * ra=0x0c : aucune trame memorisee » d'affilee. En rafale, le firmware ecrit
+ * le d_rach de la tentative suivante AVANT que last_rach n'ait bouge pour la
+ * precedente : la trame partait alors dans la mauvaise case et la RA d'avant
+ * n'en avait aucune.
+ *
+ * Deuxieme version, exacte : les RA sont mises en file a l'ecriture de
+ * d_rach, et chaque L1CTL_RACH_CONF (vu par calypso_dcch_tap.c dans le flux
+ * sercomm) en depile une. C'est le meme appariement que fait le mobile, qui
+ * range cr_ra et le fn du RACH_CONF ensemble dans cr_hist -- et c'est
+ * exactement la valeur que gsm48_match_ra() comparera. */
+/* calypso_dcch_tap.c vient d'apprendre le canal dedie du mobile. On ne
+ * l'envoie pas tout de suite : le protocole du pont est synchrone, et un
+ * message glisse pendant l'attente d'un PONT_GO serait ignore par le DSP.
+ * Il part juste avant le prochain TICK. */
+void calypso_trx_dcch(int genre, int ss, int tn)
+{
+    CalypsoTRX *s = g_trx;
+    if (!s || !s->pont) {
+        return;
+    }
+    s->dcch_genre = genre;
+    s->dcch_ss = (uint8_t)ss;
+    s->dcch_tn = (uint8_t)tn;
+    s->dcch_a_dire = true;
+}
+
+void calypso_trx_rach_conf(uint32_t fn)
+{
+    CalypsoTRX *s = g_trx;
+    if (!s || !fn) {
+        return;
+    }
+    if (s->rach_file_r == s->rach_file_w) {
+        static unsigned n;
+        if (n++ < 5) {
+            fprintf(stderr, "[trx] RACH_CONF fn=%u sans RA en attente\n", fn);
+        }
+        return;
+    }
+    uint8_t ra = s->rach_file[s->rach_file_r++ % ARRAY_SIZE(s->rach_file)];
+    s->rach_fn[ra] = fn;
+    s->rach_ra = ra;
+    s->rach_ra_vue = true;
+}
+
+static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
+{
+    static int actif = -1;
+    if (actif < 0) {
+        const char *e = getenv("MONTANT_REQREF");
+        actif = (e && *e == '0') ? 0 : 1;
+    }
+    if (!actif || woff != API_NDB + NDB_A_CD + 14) {
+        return false;
+    }
+
+    /* a_cd : mot 0 = etat, les 23 octets L2 commencent au mot 3 (octet +6).
+     * L3 = [pseudo-longueur, PD, type, ...] -> 06 3f = IMMEDIATE ASSIGNMENT,
+     * la RA est l'octet 7 et la reference de requete les octets 8-9. */
+    const uint8_t *d = (const uint8_t *)s->api_ram + API_NDB + NDB_A_CD + 6;
+    if (d[1] != 0x06 || d[2] != 0x3f) {
+        return false;
+    }
+    uint32_t memo = s->rach_fn[d[7]];
+    if (!memo && s->rach_ra_vue && d[7] == s->rach_ra) {
+        memo = pont_last_rach_fn();
+    }
+    if (!memo) {
+        static unsigned n;
+        if (n++ < 5) {
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : aucune trame memorisee "
+                    "pour cette RA - reference laissee telle quelle\n", d[7]);
+        }
+        return false;
+    }
+
+    uint16_t t1p = (uint16_t)((memo / 1326u) % 32u);
+    uint8_t t2 = (uint8_t)(memo % 26u);
+    uint8_t t3 = (uint8_t)(memo % 51u);
+    uint8_t o8 = (uint8_t)((t1p << 3) | ((t3 >> 3) & 7));
+    uint8_t o9 = (uint8_t)(((t3 & 7) << 5) | (t2 & 0x1f));
+    *out = (uint16_t)(o8 | (o9 << 8));
+
+    if (*out != (uint16_t)(d[8] | (d[9] << 8))) {
+        static unsigned n;
+        if (n++ < 20) {
+            uint8_t at1 = (d[8] >> 3) & 0x1f;
+            uint8_t at3 = (uint8_t)(((d[8] & 7) << 3) | ((d[9] >> 5) & 7));
+            uint8_t at2 = d[9] & 0x1f;
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference %u/%u/%u de la BTS "
+                    "-> %u/%u/%u (last_rach fn=%u)\n",
+                    d[7], at1, at2, at3, t1p, t2, t3, memo);
+        }
+    }
+    return true;
+}
+
 static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
 {
     CalypsoTRX *s = opaque;
@@ -243,6 +404,21 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
     uint64_t val = (size == 2) ? src[0] :
                    (size == 4) ? ((uint32_t)src[0] | ((uint32_t)src[1] << 16)) :
                    ((const uint8_t *)src)[off & 1];
+    if (s->pont && (size == 2 || size == 4)) {
+        uint16_t fix;
+        if (size == 2) {
+            if (pont_reqref_corrigee(s, off, &fix)) {
+                val = fix;
+            }
+        } else {
+            if (pont_reqref_corrigee(s, off, &fix)) {
+                val = (val & 0xFFFF0000u) | fix;
+            }
+            if (pont_reqref_corrigee(s, off + 2, &fix)) {
+                val = (val & 0x0000FFFFu) | ((uint32_t)fix << 16);
+            }
+        }
+    }
     if (size != 2) {
         return val;
     }
@@ -323,6 +499,14 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
         calypso_l1_do_burst_written((uint16_t)value);
     }
     if (off == API_NDB + NDB_D_RACH && value != 0 && (size == 2 || size == 4)) {
+        /* prim_rach.c:72 ecrit (uic|bsic)<<2 | ra<<8 juste avant de poser
+         * d_task_ra. On retient la RA : pont_reqref_corrigee() s'en sert pour
+         * ne corriger que l'assignation qui repond a CETTE tentative. */
+        uint8_t ra = (uint8_t)((value >> 8) & 0xff);
+        if (s->rach_file_w - s->rach_file_r >= ARRAY_SIZE(s->rach_file)) {
+            s->rach_file_r++;   /* file pleine : la plus ancienne degage */
+        }
+        s->rach_file[s->rach_file_w++ % ARRAY_SIZE(s->rach_file)] = ra;
         calypso_l1_do_rach_written((uint16_t)value, s->fn);
     }
     if (off == API_NDB + NDB_D_DSP_PAGE && size == 2) {
@@ -639,6 +823,10 @@ static void pont_echange(CalypsoTRX *s)
         if (s->deux_phases) {
             b |= CALYPSO_PONT_TICK_DEUX_PHASES;
         }
+    }
+    if (libre && s->dcch_a_dire) {
+        s->dcch_a_dire = false;
+        pont_send(s, PONT_DCCH, s->dcch_tn, (uint32_t)s->dcch_genre, s->dcch_ss);
     }
     if (libre && pont_send(s, PONT_TICK, s->fn, b, s->tpu_regs[TPU_OFFSET / 2])) {
         s->pont_pending = true;

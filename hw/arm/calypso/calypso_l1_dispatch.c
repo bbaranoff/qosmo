@@ -14,10 +14,85 @@
  */
 #include "qemu/osdep.h"
 #include <stdlib.h>
+#include <string.h>
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
+#include "hw/arm/calypso/calypso_dcch_tap.h"
 
 static const CalypsoL1Ops *l1;
+
+/* ── Le firmware charge ──────────────────────────────────────────────────
+ *
+ * calypso_mb.c passe -kernel ici ; on le retient pour ceux qui ont besoin
+ * d'un SYMBOLE du firmware plutot que d'une adresse en dur. La couche 1
+ * gr-gsm le faisait pour son compte (elf_symbol/arm_read32) ; avec un DSP
+ * externe elle est desactivee, et c'est calypso_trx.c qui en a besoin pour
+ * « last_rach ». */
+static const char *g_firmware_elf;
+
+const char *calypso_firmware_elf(void)
+{
+    return g_firmware_elf;
+}
+
+/* Adresse d'un symbole de l'ELF charge, 0 si introuvable. Table des symboles
+ * ELF32 little-endian, comme l1-grgsm/calypso_l1_grgsm.c:elf_symbol(). */
+uint32_t calypso_firmware_symbol(const char *want)
+{
+    if (!g_firmware_elf || !want) {
+        return 0;
+    }
+    FILE *f = fopen(g_firmware_elf, "rb");
+    if (!f) {
+        return 0;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 52 || sz > (64L << 20)) {
+        fclose(f);
+        return 0;
+    }
+    uint8_t *b = g_malloc((size_t)sz);
+    size_t got = fread(b, 1, (size_t)sz, f);
+    fclose(f);
+    uint32_t ret = 0;
+    if (got == (size_t)sz && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' &&
+        b[3] == 'F' && b[4] == 1) {
+#define R16(o) ((uint32_t)b[o] | ((uint32_t)b[(o) + 1] << 8))
+#define R32(o) (R16(o) | (R16((o) + 2) << 16))
+        uint32_t shoff = R32(0x20), shent = R16(0x2e), shnum = R16(0x30);
+        for (uint32_t si = 0; si < shnum; si++) {
+            uint32_t sh = shoff + si * shent;
+            if ((long)(sh + 40) > sz) {
+                break;
+            }
+            if (R32(sh + 4) != 2) {          /* SHT_SYMTAB */
+                continue;
+            }
+            uint32_t symoff = R32(sh + 0x10), symsz = R32(sh + 0x14);
+            uint32_t link = R32(sh + 0x18), entsz = R32(sh + 0x24);
+            uint32_t strsh = shoff + link * shent;
+            if ((long)(strsh + 40) > sz || entsz < 16) {
+                break;
+            }
+            uint32_t stroff = R32(strsh + 0x10), strsz = R32(strsh + 0x14);
+            for (uint32_t o = 0; o + 16 <= symsz && (long)(symoff + o + 16) <= sz;
+                 o += entsz) {
+                uint32_t ni = R32(symoff + o);
+                if (ni < strsz && !strcmp((const char *)(b + stroff + ni), want)) {
+                    ret = R32(symoff + o + 4);
+                    break;
+                }
+            }
+            break;
+        }
+#undef R16
+#undef R32
+    }
+    g_free(b);
+    return ret;
+}
 
 void calypso_l1_register(const CalypsoL1Ops *ops)
 {
@@ -52,6 +127,7 @@ const char *calypso_l1_name(void)
 
 void calypso_l1_do_init(const char *firmware_elf)
 {
+    g_firmware_elf = firmware_elf;   /* avant tout retour: voir calypso_firmware_symbol() */
     /* First of all: with an external DSP the shunt must not even open its
      * ports, hence the check here - calypso_mb.c calls this before
      * calypso_trx_init(). */
@@ -110,6 +186,10 @@ void calypso_l1_do_page_written(uint16_t d_dsp_page)
 {
     if (l1 && l1->page_written) {
         l1->page_written(d_dsp_page);
+    } else if (d_dsp_page == 0) {
+        /* Le firmware remet sa couche 1 a zero (meme condition que le
+         * l1_reset() de la couche 1 gr-gsm) : le canal dedie n'existe plus. */
+        calypso_dcch_tap_reset();
     }
 }
 
@@ -117,6 +197,10 @@ void calypso_l1_do_uart_tx_byte(uint8_t ch)
 {
     if (l1 && l1->uart_tx_byte) {
         l1->uart_tx_byte(ch);
+    } else {
+        /* Pas de couche 1 enregistree (DSP externe) : le tap du pont publie
+         * quand meme le canal dedie, sans quoi pont.py jette le montant. */
+        calypso_dcch_tap_tx_byte(ch);
     }
 }
 

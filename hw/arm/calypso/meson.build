@@ -13,6 +13,7 @@ arm_ss.add(when: 'CONFIG_CALYPSO', if_true: files(
   'calypso_trf6151.c',
   'calypso_sim.c',
   'calypso_l1_dispatch.c',
+  'calypso_dcch_tap.c',
 ))
 
 # ─── DEVICES DE LA CARTE E88 : PRESENTS DANS L'ARBRE, PAS DANS LE BUILD ──────

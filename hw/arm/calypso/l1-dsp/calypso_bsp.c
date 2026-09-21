@@ -618,7 +618,18 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                                         g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
         g_ts0_offset = off;
     }
-    { static unsigned nl; if (nl++ < 400 || nl % 5000 == 0 || fcch || sb || nwin > 0) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d\n", tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u, sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level()); }
+    /* [2026-09-21] Une ligne par trame livree : c'etait la sonde de calage des
+     * fenetres (nwin > 0 est vrai pour TOUT burst normal depuis la DMA one-shot,
+     * donc elle imprimait en continu). Repliee derriere
+     * CALYPSO_BSP_TS0_DEBUG=1 ; par defaut, les 20 premieres livraisons puis
+     * une sur 5000, de quoi voir que le flux tourne sans noyer la console. */
+    { static int ts0_dbg = -1;
+      if (ts0_dbg < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TS0_DEBUG"); ts0_dbg = (e && *e && *e != '0'); }
+      static unsigned nl;
+      bool trace = ts0_dbg ? (nl < 400 || nl % 5000 == 0 || fcch || sb || nwin > 0)
+                           : (nl < 20 || nl % 5000 == 0);
+      nl++;
+      if (trace) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d\n", tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u, sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level()); }
     g_ts0[i].joue = 1;
     calypso_bsp_rx_burst(0, g_ts0[i].fn, iq, 2 * total);
     bsp.bursts_written++;

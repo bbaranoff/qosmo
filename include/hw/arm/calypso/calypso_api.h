@@ -60,6 +60,8 @@
 #define PM_DSP_TASK             1
 #define FB_DSP_TASK             5
 #define SB_DSP_TASK             6
+#define RACH_DSP_TASK           10   /* firmware include/calypso/l1_environment.h:49 */
+#define AUL_DSP_TASK            11
 #define DUL_DSP_TASK            12
 #define TCHT_DSP_TASK           13
 #define TCHA_DSP_TASK           14
@@ -70,6 +72,8 @@
 #define GSM_TDMA_NS             4615384
 
 uint16_t *calypso_api_ram(void);
+const char *calypso_firmware_elf(void);
+uint32_t calypso_firmware_symbol(const char *name);
 uint32_t calypso_trx_get_fn(void);
 void calypso_trx_autosync_fn(uint32_t sch_fn);
 void calypso_trx_force_tick(uint32_t fn);

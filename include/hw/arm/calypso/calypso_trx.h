@@ -65,6 +65,14 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs);
 /* Ligne RESET_DSP du registre CNTL_RST (calypso_soc.c) : en DSP externe, le
  * front asserte -> relache relance la ROM de boot du C54x (PONT_RESET). */
 void calypso_trx_dsp_reset_line(bool active);
+/* L1CTL_RACH_CONF vu par le tap sercomm : la trame que le firmware remonte a
+ * la couche 2/3 pour la tentative d'acces la plus ancienne non confirmee.
+ * C'est CETTE valeur que gsm48_rr stocke dans cr_hist et compare ensuite a la
+ * reference de requete de l'IMMEDIATE ASSIGNMENT. */
+void calypso_trx_rach_conf(uint32_t fn);
+/* Canal dedie appris du flux L1CTL : genre 0 = SDCCH/4, 1 = SDCCH/8,
+ * 0xFF = libere. Relaye au DSP par PONT_DCCH. */
+void calypso_trx_dcch(int genre, int ss, int tn);
 void calypso_tpu_run_scenario(uint16_t *tpu_ram, uint32_t fn, uint16_t *tpu_regs);
 void calypso_tpu_sequencer_tick(uint32_t fn);
 
