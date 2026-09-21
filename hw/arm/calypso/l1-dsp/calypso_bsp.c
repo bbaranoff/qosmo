@@ -595,10 +595,164 @@ static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
     bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this does not move */
     if (!g_ts0_any) { g_ts0_any = 1; g_ts0_next = fn; }
 }
+/* [2026-09-21] L'INTERVALLE DEDIE.
+ *
+ * Le pont envoie les huit intervalles de chaque trame, le magasin ci-dessus
+ * n'en garde qu'un (TS0) et bsp_ts0_livrer() complete la trame avec du
+ * bourrage a zero. Tant que le mobile lit la BCCH et la CCCH, c'est exact :
+ * tout ce qui l'interesse est sur TS0. Des qu'il passe en mode dedie, non :
+ * le BSC lui alloue un SDCCH/8 sur TS1 (mesure du 2026-09-21 :
+ * « [dcch] canal dedie arme : chan_nr=0x51 SDCCH/8 SS=2 TN=1 », suivi d'une
+ * liberation immediate), et il n'entendait donc ni le UA ni le LOCATION
+ * UPDATING ACCEPT.
+ *
+ * QEMU apprend cet intervalle du flux L1CTL du firmware et l'annonce par
+ * PONT_DCCH ; on garde alors les bursts de CET intervalle-la, par numero de
+ * trame du BTS, et bsp_ts0_livrer() les joue A LA PLACE de TS0. La trame
+ * reste d'un seul burst par tick : le cadencement en 1250 symboles, si
+ * durement regle, n'est pas touche.
+ *
+ * Un seul intervalle a la fois, comme le mobile : le magasin est alloue a
+ * l'armement et repart a zero si l'intervalle change. */
+#define BSP_DEDIE_RING (1u << 16)   /* ~5 min de trames BTS : le DSP en pas-a-pas derive de plusieurs secondes */
+static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid; } *g_dedie;
+static int g_dedie_tn = -1, g_dedie_ss;
+static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
+
+/* Cette trame du BTS appartient-elle au canal dedie du mobile ?
+ *
+ * [2026-09-21, mesure] Premiere version : une fois arme, l'intervalle dedie
+ * remplacait TS0 a CHAQUE trame. Le BTS emet sur TS1 en permanence (bursts de
+ * bourrage compris), donc le mobile n'avait plus de TS0 du tout : « FBSB RESP:
+ * result=255 », « MON: no cell info », « LOS during RACH request » des qu'il
+ * tentait une mise a jour, sans meme emettre un RACH. Il faut donc ne prendre
+ * QUE les trames du canal, celles ou sa couche 1 arme justement sa fenetre sur
+ * TS1 -- ailleurs il lit la BCCH et la CCCH sur TS0, et il en a besoin.
+ *
+ * 45.002, SDCCH/8 + SACCH/8, multitrame de 51 comptee par paires :
+ *   SDCCH descendant, sous-voie i : trames 4i..4i+3 de chaque multitrame ;
+ *   SACCH descendante, i = 0..3   : trames 32+4i..35+4i, multitrame paire ;
+ *                      i = 4..7   : memes trames, multitrame impaire. */
+static bool bsp_dedie_trame(uint32_t fn)
+{
+    unsigned p51 = fn % 51u;
+    unsigned ss = (unsigned)g_dedie_ss & 7u;
+    if (p51 >= 4u * ss && p51 <= 4u * ss + 3u) {
+        return true;
+    }
+    unsigned base = 32u + 4u * (ss & 3u);
+    if (p51 >= base && p51 <= base + 3u) {
+        return ((fn / 51u) % 2u) == (ss < 4u ? 0u : 1u);
+    }
+    return false;
+}
+
+/* Etat du canal dedie, lisible sans le terminal du DSP :
+ * /dev/shm/calypso_bsp_dedie, une ligne reecrite a chaque changement notable.
+ * C'est la seule facon de savoir, de l'exterieur, si les bursts de
+ * l'intervalle dedie arrivent jusqu'ici et s'ils sont joues. */
+static void bsp_dedie_etat(const char *quoi)
+{
+    static unsigned long dernier_joues, dernier_stockes;
+    if (quoi == NULL && g_dedie_joues == dernier_joues &&
+        g_dedie_stockes == dernier_stockes) {
+        return;
+    }
+    dernier_joues = g_dedie_joues;
+    dernier_stockes = g_dedie_stockes;
+    FILE *f = fopen("/dev/shm/calypso_bsp_dedie", "w");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu %s\n",
+            g_dedie_tn, g_dedie_ss, g_dedie_stockes, g_dedie_joues,
+            g_dedie_manques, quoi ? quoi : "");
+    fclose(f);
+}
+
+void calypso_bsp_set_dedie(int tn, int genre, int ss)
+{
+    if (tn <= 0 || tn > 7 || genre == 0xFF) {
+        if (g_dedie_tn > 0) {
+            BSP_LOG("canal dedie libere (TS%d) : %lu bursts stockes, %lu joues",
+                    g_dedie_tn, g_dedie_stockes, g_dedie_joues);
+        }
+        g_dedie_tn = -1;
+        bsp_dedie_etat("libere");
+        return;
+    }
+    if (g_dedie_tn != tn) {
+        if (!g_dedie) {
+            g_dedie = calloc(BSP_DEDIE_RING, sizeof *g_dedie);
+        }
+        if (g_dedie) {
+            memset(g_dedie, 0, BSP_DEDIE_RING * sizeof *g_dedie);
+        }
+        g_dedie_stockes = g_dedie_joues = 0;
+    }
+    g_dedie_tn = tn;
+    g_dedie_ss = ss;
+    bsp_dedie_etat("arme");
+    BSP_LOG("canal dedie arme : SDCCH/%d SS=%d TS%d - ses bursts remplacent TS0 sur les "
+            "trames du canal (fn%%51 = %u-%u et SACCH %u-%u), TS0 ailleurs",
+            genre ? 8 : 4, ss, tn, 4u * ((unsigned)ss & 7u), 4u * ((unsigned)ss & 7u) + 3u,
+            32u + 4u * ((unsigned)ss & 3u), 32u + 4u * ((unsigned)ss & 3u) + 3u);
+}
+
+static void bsp_dedie_stocker(uint32_t fn, const uint8_t *bits)
+{
+    if (!g_dedie) {
+        return;
+    }
+    unsigned i = fn % BSP_DEDIE_RING;
+    g_dedie[i].fn = fn;
+    memcpy(g_dedie[i].bits, bits, 148);
+    g_dedie[i].valid = 1;
+    g_dedie_stockes++;
+}
+
+static const uint8_t *bsp_dedie_bits(uint32_t fn)
+{
+    if (g_dedie_tn <= 0 || !g_dedie) {
+        return NULL;
+    }
+    unsigned i = fn % BSP_DEDIE_RING;
+    return (g_dedie[i].valid && g_dedie[i].fn == fn) ? g_dedie[i].bits : NULL;
+}
+
 static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
 {
     static int16_t iq[2 * 256];
     const uint8_t *bits = g_ts0[i].bits;
+    {   /* Sur les trames du canal dedie, c'est son intervalle qui compte. */
+        bool a_nous = bsp_dedie_trame(g_ts0[i].fn);
+        const uint8_t *d = a_nous ? bsp_dedie_bits(g_ts0[i].fn) : NULL;
+        if (d) {
+            bits = d;
+            g_dedie_joues++;
+            if (g_dedie_joues <= 40 || g_dedie_joues % 1000 == 0) {
+                /* Combien de 1 dans les 148 bits : un burst de bourrage en a
+                 * toujours le meme nombre, un vrai bloc varie. De quoi voir
+                 * d'un coup d'oeil si la BTS emet vraiment le SDCCH. */
+                int uns = 0;
+                for (int k = 0; k < 148; k++) uns += (d[k] & 1);
+                BSP_LOG("dedie : TS%d joue (fn=%u p51=%u uns=%d, %lu fois)",
+                        g_dedie_tn, g_ts0[i].fn, g_ts0[i].fn % 51u, uns, g_dedie_joues);
+            }
+        } else if (a_nous) {
+            /* La trame est au canal, mais aucun burst de cet intervalle n'est
+             * arrive : le bloc sera incomplet et echouera au code de Fire. */
+            g_dedie_manques++;
+            if (g_dedie_manques <= 40 || g_dedie_manques % 1000 == 0) {
+                BSP_LOG("dedie : TS%d MANQUANT pour fn=%u p51=%u (%lu fois) - "
+                        "le bloc partira incomplet",
+                        g_dedie_tn, g_ts0[i].fn, g_ts0[i].fn % 51u, g_dedie_manques);
+            }
+        }
+        if (a_nous) {
+            bsp_dedie_etat(NULL);
+        }
+    }
     int sb = bsp_ts0_est_sb(bits), fcch = bsp_ts0_est_fcch(bits);
     memset(iq, 0, sizeof iq);
     const bool one_shot = calypso_rhea_dma_one_shot();
@@ -785,6 +939,13 @@ static void bsp_trxd_readable(void *opaque)
         if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e == '1') ? 1 : 0; }
         if (stream) {
             if (tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
+            if (tn == g_dedie_tn && nbits == 148) {
+                /* Le canal dedie : garde, sans rien changer au cadencement -
+                 * bsp_ts0_livrer() le jouera a la place de TS0. */
+                bsp_dedie_stocker(fn, bits);
+                bsp.bursts_seen++;
+                return;
+            }
             /* [2026-09-21] TS1..TS7 STOP HERE. The frame handed to the ROM is
              * assembled by bsp_ts0_livrer(), which already appends its own
              * seven filler timeslots after the stored TS0 burst - exactly 1250

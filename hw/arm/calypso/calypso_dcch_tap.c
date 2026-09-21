@@ -39,12 +39,20 @@
 #define SHM_DCCH_CFG        "/dev/shm/calypso_dcch_cfg"
 #define DCCH_RELEASED       0xFF
 
+/* Combien de trames doivent separer le dernier bloc du canal dedie d'un bloc
+ * sur une voie commune avant de conclure que le canal est libere. Un bloc CCCH
+ * en retard, delivre juste apres la bascule, porte un numero de trame proche
+ * de ceux du canal dedie : il ne doit pas liberer quoi que ce soit. */
+#define DCCH_LIBERE_APRES_TRAMES  100
+
 static struct {
     enum { SC_IDLE, SC_IN_FRAME, SC_ESCAPE } state;
     uint8_t buf[512];
     int len;
     uint8_t dernier_chan_nr;
     uint32_t seq;
+    uint32_t fn_dedie;       /* derniere trame vue sur le canal dedie */
+    bool     fn_dedie_vue;
 } tap = { .dernier_chan_nr = 0xFF };
 
 /* 16 octets, comme les attend pont/state.py:Dedicated.read() :
@@ -100,9 +108,52 @@ static void trame_complete(void)
         kind = 1;
         ss = (chan_nr >> 3) & 0x07;
     }
-    if (kind >= 0 && chan_nr != tap.dernier_chan_nr) {
-        tap.dernier_chan_nr = chan_nr;
-        dcch_cfg_publier(kind, ss, chan_nr);
+    uint32_t fn = (plen >= 12) ? ldl_be_p(charge + 8) : 0;
+    if (kind >= 0) {
+        tap.fn_dedie = fn;
+        tap.fn_dedie_vue = true;
+        if (chan_nr != tap.dernier_chan_nr) {
+            tap.dernier_chan_nr = chan_nr;
+            dcch_cfg_publier(kind, ss, chan_nr);
+        }
+        return;
+    }
+    /* [2026-09-21] LA LIBERATION SE LIT ICI, pas sur d_dsp_page.
+     *
+     * Premiere version : publier « libere » quand le firmware remet
+     * d_dsp_page a 0, comme le l1_reset() de la couche 1 gr-gsm. Faux : le
+     * firmware fait justement un l1s_dsp_abort() (sync.c:308) au moment ou il
+     * bascule vers le canal dedie -- « resetting scheduler » dans le journal
+     * du mobile, juste apres l'IMMEDIATE ASSIGNMENT. On annoncait donc
+     * « arme » puis « libere » dans la seconde, pont.py voyait un canal
+     * libere, et jetait le SABM : lchan en WAIT_RLL_RTP_ESTABLISH puis
+     * Timeout. Avant que le SABM ne soit publie une seule fois, le defaut
+     * etait masque, une republication finissait par tomber dans une fenetre
+     * ou le canal etait arme.
+     *
+     * Signal juste : un bloc recu ou emis sur un canal NON dedie (BCCH, CCCH)
+     * veut dire que le mobile est revenu sur les voies communes. En mode
+     * dedie il n'en lit aucun, donc ca ne peut pas arriver au milieu d'une
+     * connexion. */
+    /* Et seulement pour un VRAI canal commun : 44.004 8.3 donne 0x80 BCCH,
+     * 0x88 RACH, 0x90 PCH/AGCH. Un chan_nr de 0x00 n'est pas un canal, et
+     * c'est pourtant ce qu'on voyait passer -- releve du 2026-09-21 :
+     * « arme » et « libere » en alternance des dizaines de fois par seconde
+     * pendant la connexion, le BSP basculant entre TS0 et TS1 a chaque bloc,
+     * donc aucune descente dediee decodable. */
+    if (tap.dernier_chan_nr != 0xFF && (chan_nr & 0xE0) == 0x80) {
+        /* [2026-09-21] Et pas au premier bloc CCCH venu : la couche 1 en
+         * delivre encore un ou deux juste apres la bascule vers le canal
+         * dedie. Liberer la, c'est couper la descente dediee en plein
+         * etablissement -- mesure : tous les blocs a 110/98/87 erreurs
+         * jusqu'au MDL-ERROR-IND, aucun UA. On exige donc que le bloc commun
+         * soit nettement POSTERIEUR au dernier bloc du canal dedie. */
+        uint32_t ecart = tap.fn_dedie_vue ? ((fn - tap.fn_dedie) % 2715648u) : 0xFFFFFFFFu;
+        if (!tap.fn_dedie_vue || (ecart >= DCCH_LIBERE_APRES_TRAMES && ecart < 2715648u / 2)) {
+            tap.dernier_chan_nr = 0xFF;
+            tap.fn_dedie_vue = false;
+            dcch_cfg_publier(DCCH_RELEASED, 0, 0);
+        }
     }
 }
 

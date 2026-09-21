@@ -186,11 +186,10 @@ void calypso_l1_do_page_written(uint16_t d_dsp_page)
 {
     if (l1 && l1->page_written) {
         l1->page_written(d_dsp_page);
-    } else if (d_dsp_page == 0) {
-        /* Le firmware remet sa couche 1 a zero (meme condition que le
-         * l1_reset() de la couche 1 gr-gsm) : le canal dedie n'existe plus. */
-        calypso_dcch_tap_reset();
     }
+    /* [2026-09-21] Ne PAS liberer le canal dedie sur d_dsp_page == 0 : le
+     * firmware fait un l1s_dsp_abort() en basculant VERS le canal dedie. La
+     * liberation se deduit du retour sur une voie commune, dans le tap. */
 }
 
 void calypso_l1_do_uart_tx_byte(uint8_t ch)

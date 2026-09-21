@@ -31,6 +31,10 @@ struct C54xState;
 void calypso_bsp_init(struct C54xState *dsp);
 
 void calypso_bsp_set_tpu_offset(int qbits);
+/* Canal dedie annonce par QEMU (PONT_DCCH) : genre 0 = SDCCH/4, 1 = SDCCH/8,
+ * 0xFF (ou tn <= 0) = libere. Les bursts de cet intervalle remplacent ceux de
+ * TS0 dans la fenetre livree au DSP. */
+void calypso_bsp_set_dedie(int tn, int genre, int ss);
 void calypso_bsp_toa_feedback(int toa);
 int  calypso_bsp_service(uint32_t current_fn);  /* drains UDP 6702 and delivers the current frame (standalone host) */
 
