@@ -32,7 +32,81 @@ extern CalypsoUARTState *g_uart_modem;
 extern CalypsoUARTState *g_uart_irda;
 
 #define FRAME_IRQ_PULSE_NS     1000000
-#define CPU_KICK_NS            5000000
+
+/* [2026-09-22] PERIODE DU COUP DE POUCE AU CPU -- suspect no 1 du retard.
+ *
+ * cpu_kick() fait `cpu_exit(first_cpu)` + `qemu_notify_event()` : c'est ce qui
+ * rend la main a la boucle principale, donc ce qui permet de SERVIR le timer
+ * TDMA. Tant que le CPU ne sort pas, le timer peut bien etre echu, personne ne
+ * le regarde. La periode valait 5 ms, soit PLUS qu'une trame GSM (4,615 ms) :
+ * la coincidence etait frappante : 5 ms de kick, 5,11 ms mesurees par trame.
+ *
+ * MESURE (2026-09-22) : HYPOTHESE FAUSSE ELLE AUSSI. Balayage sur un facteur
+ * 17 -- 5,00 ms : 195,8 tr/s ; 1,15 ms : 195,9 ; 0,58 ms : 195,8 ;
+ * 0,29 ms : 195,9. Parfaitement plat. (Verifie dans /proc/<qemu>/environ que
+ * la variable atteignait bien QEMU : elle y etait.)
+ *
+ * Restent donc, pour expliquer les 5,11 ms : le TRAVAIL lui-meme. Sans
+ * pas-a-pas QEMU seul fait 588 tr/s (1,70 ms/trame) ; le pas-a-pas serialise
+ * l'ARM et le DSP au lieu de les laisser se recouvrir. Le reste, ~3,4 ms,
+ * c'est l'interpreteur C54x qui execute la trame. INSNS n'y change rien (plat
+ * de 60000 a 30000) parce que c'est un PLAFOND : la ROM finit son travail et
+ * passe en idle bien avant, donc baisser le plafond ne retire aucun travail.
+ * La piste suivante est donc la VITESSE de l'interpreteur, pas son budget.
+ * CALYPSO_CPU_KICK_NS reste reglable pour mesurer. */
+#define CPU_KICK_NS_DEFAUT     5000000    /* mesure : sans effet, on garde l'original */
+static int64_t cpu_kick_ns(void)
+{
+    static int64_t ns;
+    if (!ns) {
+        const char *e = getenv("CALYPSO_CPU_KICK_NS");
+        ns = e ? (int64_t)strtoll(e, NULL, 0) : 0;
+        if (ns < 10000 || ns > 100000000) {
+            ns = CPU_KICK_NS_DEFAUT;
+        }
+    }
+    return ns;
+}
+#define CPU_KICK_NS            cpu_kick_ns()
+
+/* [2026-09-22] QUANTUM DE RE-ESSAI DU PAS-A-PAS -- la cause du retard de 9,7 %.
+ *
+ * Quand l1_sync de l'ARM ou le DSP n'a pas fini, on ne bloque pas : on
+ * replanifie le tick TDMA un peu plus tard et on repasse. Le « un peu plus
+ * tard » valait GSM_TDMA_NS/16 = 288 us, et /8 = 577 us pour le DSP. Or ce
+ * qu'on attend se termine en DIZAINES de microsecondes : on payait donc, a
+ * chaque trame, un arrondi pouvant aller jusqu'a 288 us, une a deux fois.
+ *
+ * MESURE (2026-09-22) : HYPOTHESE FAUSSE. Balayage du quantum sur un facteur
+ * 4 -- /16 (288 us) : 195,7 tr/s ; /64 (72 us) : 195,5. Aucun effet. Le
+ * quantum n'est PAS la cause du retard de 9,7 %. On garde la valeur d'origine
+ * et la molette, qui reste utile pour mesurer.
+ * Ce qui suit reste vrai et important : tdma_pacer() rattrape un retard en SAUTANT une trame
+ * (`while (target <= now) target += GSM_TDMA_NS`), ce depassement ne se voit
+ * nulle part : il se transforme en trames perdues. En aval, osmo-bts-trx ne
+ * sait pas suivre une horloge lente (son filtre de derive est un TODO vide,
+ * scheduler_trx.c:571), il resynchronise, et pendant ce temps il ne produit
+ * rien : des coupures de ~200 trames d'affilee.
+ *
+ * Le budget d'attente TOTAL est conserve : les plafonds de re-essai sont
+ * mis a l'echelle du meme facteur (voir PONT_ATTENTES_MAX).
+ * CALYPSO_PONT_RETRY_DIV permet de mesurer d'autres valeurs sans recompiler. */
+#define PONT_RETRY_DIV_DEFAUT  16        /* mesure : sans effet, on garde l'original */
+static int pont_retry_div(void)
+{
+    static int div;
+    if (!div) {
+        const char *e = getenv("CALYPSO_PONT_RETRY_DIV");
+        div = e ? atoi(e) : 0;
+        if (div < 1 || div > 8192) {
+            div = PONT_RETRY_DIV_DEFAUT;
+        }
+    }
+    return div;
+}
+#define PONT_RETRY_NS      ((int64_t)GSM_TDMA_NS / pont_retry_div())
+/* meme budget mural qu'avec 256 essais de GSM_TDMA_NS/16 */
+#define PONT_ATTENTES_MAX  (256 * pont_retry_div() / 16)
 #define IDLE_PC_LO             0x00823000u
 #define IDLE_PC_HI             0x00826000u
 #define INTH_MASK_ADDR         0xFFFFFA08u
@@ -905,7 +979,7 @@ static void tdma_tick(void *opaque)
         bool fini = s->phase_a_recue &&
                     (calypso_inth_frame_eoi() >= s->eoi_cible ||
                      calypso_inth_irq_masked(CALYPSO_IRQ_TPU_FRAME));
-        if (!fini && ++s->eoi_attentes < 256) {
+        if (!fini && ++s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX) {
             if (g_uart_modem) {
                 calypso_uart_poll_backend(g_uart_modem);
                 calypso_uart_kick_rx(g_uart_modem);
@@ -914,7 +988,7 @@ static void tdma_tick(void *opaque)
                 calypso_uart_poll_backend(g_uart_irda);
                 calypso_uart_kick_rx(g_uart_irda);
             }
-            timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 16);
+            timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
             return;
         }
         if (!fini) {
@@ -970,7 +1044,7 @@ static void tdma_tick(void *opaque)
                     calypso_uart_poll_backend(g_uart_irda);
                     calypso_uart_kick_rx(g_uart_irda);
                 }
-                timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 8);
+                timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
                 return;
             }
         }
@@ -1055,7 +1129,7 @@ static void tdma_tick(void *opaque)
         s->phase_a_recue = false;
         s->go_inutile = false;
         s->tick_phase = 1;
-        timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS / 16);
+        timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
         return;
     }
     calypso_timer_lost_frame_tick(s->fn);

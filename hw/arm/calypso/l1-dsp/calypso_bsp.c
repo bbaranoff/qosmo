@@ -583,15 +583,23 @@ uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
 static uint32_t g_ts0_next; static int g_ts0_any;
 static int64_t g_ts0_offset = INT64_MIN;
+static uint32_t g_ts0_fn_max;   /* trame BTS la plus recente stockee */
 static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
 static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
 static int bsp_ts0_est_fcch(const uint8_t *b) { for (int k = 0; k < 148; k++) if (b[k] & 1) return 0; return 1; }
+static int g_toa_bias = 0;   /* biais de placement, en echantillons ; voir calypso_bsp_toa_feedback() */
 static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
 {
     if (!g_ts0) g_ts0 = calloc(BSP_TS0_RING, sizeof *g_ts0);
     if (!g_ts0) return;
     unsigned i = fn % BSP_TS0_RING;
     g_ts0[i].fn = fn; memcpy(g_ts0[i].bits, bits, 148); g_ts0[i].valid = 1; g_ts0[i].joue = 0;
+    /* [2026-09-22] La trame la plus recente recue du BTS. Sert a dire, sur un
+     * manque, DE QUEL COTE vient l'ecart : si la trame reclamee depasse
+     * celle-ci, le DSP court devant le BTS (il faut plus d'avance) ; si elle
+     * est en-dessous, le burst a bien existe et c'est autre chose. Sans ce
+     * signe, « pas de burst BTS » n'oriente vers rien. */
+    if (!g_ts0_any || (int32_t)(fn - g_ts0_fn_max) > 0) { g_ts0_fn_max = fn; }
     bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this does not move */
     if (!g_ts0_any) { g_ts0_any = 1; g_ts0_next = fn; }
 }
@@ -690,6 +698,15 @@ static const uint8_t *bsp_autres_bits(uint32_t fn, unsigned tn)
 }
 static int g_dedie_tn = -1, g_dedie_ss;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
+/* [2026-09-22] g_dedie_perdues : les trames dediees que bsp_ts0_service() saute
+ * ENTIEREMENT, faute de burst du BTS pour la trame reclamee. Elle repart par un
+ * `return` avant bsp_ts0_livrer(), donc ni `joues` ni `manques` ne les voient :
+ * les deux comptaient 0 pendant que 79 trames dediees sur 172 n'etaient jamais
+ * livrees. C'est ce zero qui m'a fait conclure « le pont livre tout, le defaut
+ * est dans la demodulation du DSP » -- conclusion fausse, batie sur un
+ * instrument aveugle a la perte majoritaire. Ne jamais lire manques=0 comme
+ * « rien ne se perd » sans lire perdues en meme temps. */
+static unsigned long g_dedie_perdues;
 
 /* Cette trame du BTS appartient-elle au canal dedie du mobile ?
  *
@@ -723,22 +740,24 @@ static bool bsp_dedie_trame(uint32_t fn)
  * /dev/shm/calypso_bsp_dedie, une ligne reecrite a chaque changement notable.
  * C'est la seule facon de savoir, de l'exterieur, si les bursts de
  * l'intervalle dedie arrivent jusqu'ici et s'ils sont joues. */
+static unsigned long g_dedie_replis;   /* voir bsp_dedie_bits() */
 static void bsp_dedie_etat(const char *quoi)
 {
-    static unsigned long dernier_joues, dernier_stockes;
+    static unsigned long dernier_joues, dernier_stockes, dernier_perdues;
     if (quoi == NULL && g_dedie_joues == dernier_joues &&
-        g_dedie_stockes == dernier_stockes) {
+        g_dedie_stockes == dernier_stockes && g_dedie_perdues == dernier_perdues) {
         return;
     }
     dernier_joues = g_dedie_joues;
     dernier_stockes = g_dedie_stockes;
+    dernier_perdues = g_dedie_perdues;
     FILE *f = fopen("/dev/shm/calypso_bsp_dedie", "w");
     if (!f) {
         return;
     }
-    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu %s\n",
+    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu replis=%lu perdues=%lu %s\n",
             g_dedie_tn, g_dedie_ss, g_dedie_stockes, g_dedie_joues,
-            g_dedie_manques, quoi ? quoi : "");
+            g_dedie_manques, g_dedie_replis, g_dedie_perdues, quoi ? quoi : "");
     fclose(f);
 }
 
@@ -760,7 +779,7 @@ void calypso_bsp_set_dedie(int tn, int genre, int ss)
         if (g_dedie) {
             memset(g_dedie, 0, BSP_DEDIE_RING * sizeof *g_dedie);
         }
-        g_dedie_stockes = g_dedie_joues = 0;
+        g_dedie_stockes = g_dedie_joues = g_dedie_manques = g_dedie_replis = g_dedie_perdues = 0;
     }
     g_dedie_tn = tn;
     g_dedie_ss = ss;
@@ -783,19 +802,68 @@ static void bsp_dedie_stocker(uint32_t fn, const uint8_t *bits)
     g_dedie_stockes++;
 }
 
+/* [2026-09-22] LE MAGASIN DEDIE COMMENCE TROP TARD : ON RETOMBE SUR g_autres.
+ *
+ * `g_dedie` n'est alloue et rempli qu'a l'ARMEMENT du canal
+ * (`calypso_bsp_set_dedie`), et l'armement vient du tap L1CTL de QEMU, donc du
+ * PREMIER bloc dedie recu -- pas de l'IMMEDIATE ASSIGNMENT. Or le BSP joue la
+ * trame BTS `tick + g_ts0_offset`, en retard sur celle qui arrive : toutes les
+ * trames du canal anterieures a l'armement etaient jouees VIDES.
+ *
+ * Mesure du 2026-09-22, `/dev/shm/calypso_bsp_dedie` a la liberation :
+ *     stockes=4311 joues=404 manques=138
+ * 138 sur 542 trames du canal, soit une sur quatre sans burst -- exactement la
+ * signature des « Dropping frame with 110 bit errors » (110 sur 456 = un burst
+ * sur quatre), des « MON: lev=<=-110 snr=0 » sur l'intervalle dedie, et des
+ * « Received frame for unsupported SAPI 2 » / « MDL-ERROR-IND cause 3 » que
+ * LAPDm sort d'un bloc reconstitue a partir de trois bursts sur quatre.
+ * Cote TS0 au meme moment : 11 manques en tout. Ce n'est donc pas la BTS qui
+ * est en retard, c'est ce magasin-ci qui ne couvre pas assez loin.
+ *
+ * Il n'y avait rien a stocker de plus : `g_autres` garde DEJA les sept
+ * intervalles de chaque trame, sans condition et des le premier burst (il sert
+ * a completer la trame continue). `g_dedie` en est un doublon partiel. On le
+ * garde -- c'est lui qui compte les bursts du canal -- mais quand il n'a pas la
+ * trame, on prend celle de `g_autres` au lieu de rendre NULL.
+ *
+ * MONTANT_DEDIE_STRICT=1 retablit l'ancien comportement (sans repli), pour
+ * pouvoir remesurer l'ecart. */
 static const uint8_t *bsp_dedie_bits(uint32_t fn)
 {
-    if (g_dedie_tn <= 0 || !g_dedie) {
+    if (g_dedie_tn <= 0) {
         return NULL;
     }
-    unsigned i = fn % BSP_DEDIE_RING;
-    return (g_dedie[i].valid && g_dedie[i].fn == fn) ? g_dedie[i].bits : NULL;
+    if (g_dedie) {
+        unsigned i = fn % BSP_DEDIE_RING;
+        if (g_dedie[i].valid && g_dedie[i].fn == fn) {
+            return g_dedie[i].bits;
+        }
+    }
+    static int strict = -1;
+    if (strict < 0) {
+        const char *e = calypso_getenv("MONTANT_DEDIE_STRICT");
+        strict = (e && *e == '1');
+    }
+    if (strict) {
+        return NULL;
+    }
+    const uint8_t *b = bsp_autres_bits(fn, (unsigned)g_dedie_tn);
+    if (b) {
+        g_dedie_replis++;
+    }
+    return b;
 }
 
 static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
 {
     static int16_t iq[2 * 256];
     const uint8_t *bits = g_ts0[i].bits;
+    /* [2026-09-22] Ce que la trace [ts0] ne disait pas : si la trame livree
+     * appartient au canal dedie, et si son burst vient bien de cet
+     * intervalle-la. Sans quoi on ne peut pas comparer la geometrie de fenetre
+     * d'un bloc SDCCH a celle d'un bloc BCCH -- la question ouverte apres
+     * « manques=0 » et des blocs a 96 erreurs sur 456. */
+    bool trame_dediee = false, burst_dedie = false;
     {   /* Sur les trames du canal dedie, c'est son intervalle qui compte. */
         /* Deux verdicts : la table 45.002 (trames du canal) et ce que dit le
          * firmware (intervalle de la fenetre). MONTANT_TPU_TN=1 fait foi au
@@ -803,7 +871,17 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
          * desaccords, parce que la valeur du TICK peut avoir une trame de
          * retard sur la programmation reelle de la fenetre -- c'est justement
          * ce qu'il faut mesurer avant de s'y fier. */
-        bool a_nous = bsp_dedie_trame(g_ts0[i].fn);
+        /* [2026-09-22] SANS CANAL ARME, AUCUNE TRAME N'EST « A NOUS ».
+         * bsp_dedie_trame() lit g_dedie_ss, qui vaut 0 tant que rien n'est
+         * arme : hors connexion, une trame sur huit etait donc declaree du
+         * canal, bsp_dedie_bits() rendait NULL sur sa garde g_dedie_tn <= 0 et
+         * g_dedie_manques montait. Le compteur melangeait ainsi le temps de
+         * campement (ou jouer TS0 est la bonne chose) avec les vrais trous du
+         * canal -- releve du 2026-09-22 : « joues=72 manques=162 », plus de
+         * manques que de trames jouees, ce qui n'a aucun sens pour un canal
+         * ouvert quelques secondes. Un compteur qu'on ne peut pas lire est
+         * pire qu'absent : il a servi de preuve a un diagnostic faux. */
+        bool a_nous = g_dedie_tn > 0 && bsp_dedie_trame(g_ts0[i].fn);
         {
             static int suit_tpu = -1;
             if (suit_tpu < 0) { const char *e = calypso_getenv("MONTANT_TPU_TN"); suit_tpu = (e && *e == '1'); }
@@ -822,9 +900,11 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 a_nous = selon_tpu;
             }
         }
+        trame_dediee = a_nous;
         const uint8_t *d = a_nous ? bsp_dedie_bits(g_ts0[i].fn) : NULL;
         if (d) {
             bits = d;
+            burst_dedie = true;
             g_dedie_joues++;
             if (g_dedie_joues <= 40 || g_dedie_joues % 1000 == 0) {
                 /* Combien de 1 dans les 148 bits : un burst de bourrage en a
@@ -875,11 +955,19 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
      * une sur 5000, de quoi voir que le flux tourne sans noyer la console. */
     { static int ts0_dbg = -1;
       if (ts0_dbg < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TS0_DEBUG"); ts0_dbg = (e && *e && *e != '0'); }
-      static unsigned nl;
+      static unsigned nl, nd;
+      /* Les trames du canal dedie sont rares (4 sur 51, plus la SACCH) et ne
+       * durent que le temps d'une connexion : on les trace TOUTES, jusqu'a 300,
+       * sans dependre de CALYPSO_BSP_TS0_DEBUG. C'est la seule facon de
+       * comparer leur fenetre et leur marge a celles d'un bloc BCCH. */
       bool trace = ts0_dbg ? (nl < 400 || nl % 5000 == 0 || fcch || sb || nwin > 0)
                            : (nl < 20 || nl % 5000 == 0);
       nl++;
-      if (trace) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d\n", tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u, sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level()); }
+      if (trame_dediee && nd < 300) { trace = true; nd++; }
+      if (trace) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d%s\n",
+                        tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u,
+                        sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level(),
+                        trame_dediee ? (burst_dedie ? "  <- canal dedie" : "  <- canal dedie, BURST MANQUANT") : ""); }
     g_ts0[i].joue = 1;
     calypso_bsp_rx_burst(0, g_ts0[i].fn, iq, 2 * total);
     bsp.bursts_written++;
@@ -979,8 +1067,23 @@ static void bsp_ts0_service(uint32_t tick_fn)
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);
         if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
         manques++;
-        if (manques_log++ < 10 || manques % 1000 == 0)
-            printf("  [ts0] tick=%u : pas de burst BTS pour fn=%u (manques=%u) - le BTS est-il en retard sur le DSP ?\n", tick_fn, (uint32_t)w, manques);
+        if (g_dedie_tn > 0 && bsp_dedie_trame((uint32_t)w)) {
+            /* Trame du canal dedie sautee en entier : hors de portee de
+             * g_dedie_manques, qui n'est touche que dans bsp_ts0_livrer(). */
+            g_dedie_perdues++;
+            if (g_dedie_perdues <= 40 || g_dedie_perdues % 200 == 0) {
+                BSP_LOG("canal dedie (TS%d) : trame fn=%u perdue, aucun burst du BTS (perdues=%lu, joues=%lu)",
+                        g_dedie_tn, (uint32_t)w, g_dedie_perdues, g_dedie_joues);
+            }
+            bsp_dedie_etat(NULL);
+        }
+        if (manques_log++ < 10 || manques % 200 == 0) {
+            int32_t devant = (int32_t)((uint32_t)w - g_ts0_fn_max);
+            printf("  [ts0] tick=%u : pas de burst BTS pour fn=%u (manques=%u/%u) ; derniere trame recue fn=%u, soit %+d : %s\n",
+                   tick_fn, (uint32_t)w, manques, tick_fn, g_ts0_fn_max, devant,
+                   devant > 0 ? "le DSP COURT DEVANT le BTS (avance insuffisante)"
+                              : "le burst a existe puis a disparu (autre cause)");
+        }
         return;
     }
     bsp_horloge_publier(0, tick_fn, 0);
@@ -1408,7 +1511,29 @@ static void bsp_trxd_readable(void *opaque)
      * block failed the Fire code; the SB read TOA 3 instead of 23. */
     if (tn == 0 && calypso_rhea_dma_one_shot()) {
         int nwin = calypso_rhea_dma_get_len_words() / 2;
+        /* [2026-09-22] LE BIAIS DE LA BOUCLE TOA EST APPLIQUE ICI.
+         * calypso_bsp_toa_feedback() (plus bas) mesure l'ecart entre le TOA vu
+         * par la ROM et la cible 23, et l'integre dans g_toa_bias. Mais
+         * g_toa_bias n'etait LU nulle part : la boucle calculait sa correction
+         * et la jetait, malgre le commentaire « applied to the DARAM
+         * placement » de sa declaration. CALYPSO_BSP_TOA_LOCK=1 n'avait donc
+         * aucun effet observable.
+         * Mesure du 2026-09-22 : la SB atterrit a TOA 7 (71 fois) ou 11 (17),
+         * jamais 23 -- 16 echantillons trop tot -- et son CRC ne passe que
+         * 31 fois sur 118 (26 %). En aval : la resynchro FB+SB echoue une fois
+         * sur deux, d'ou « LOS during RACH request » et l'echec du SMS.
+         * On ne corrige QUE la fenetre SB (nwin >= 190). Le burst normal garde
+         * sa marge de 3, qui lui donne le TOA 5 attendu et mesure -- 7353
+         * bursts sur 8046 -- et auquel il ne faut pas toucher. */
         int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+        { static unsigned n; if (n++ < 40 || (n % 500) == 0)
+            printf("  [cadre] nwin=%d marge=%d biais=%d iq=%d %s\n",
+                   nwin, marge, g_toa_bias, iq_count, nwin >= 190 ? "(fenetre SB)" : "(NB)"); }
+        if (nwin >= 190) {
+            marge += g_toa_bias;
+            if (marge < 0)  marge = 0;
+            if (marge > 96) marge = 96;   /* la fenetre SB fait ~191 echantillons */
+        }
         if (marge > 0 && iq_count >= 2 * 148) {
             static int16_t cadre[2 * 256];
             int total = nwin > marge + 148 ? nwin : marge + 148;
@@ -1456,7 +1581,7 @@ void calypso_bsp_set_tpu_offset(int qbits)
  * placement bias so the ToA the DSP measures reaches 23 ("on time") WITHOUT
  * canning the output. The firmware then sees the alignment and stops
  * correcting. One-sample-per-frame integrator, for stability. */
-static int g_toa_bias = 0;   /* samples, applied to the DARAM placement */
+/* defini plus haut, avant le cadrage qui l'applique */
 void calypso_bsp_toa_feedback(int toa)
 {
     static int en = -1;
@@ -1464,6 +1589,8 @@ void calypso_bsp_toa_feedback(int toa)
         const char *e = calypso_getenv("CALYPSO_BSP_TOA_LOCK"); en = (e && *e=='1') ? 1 : 0;
         if (en) BSP_LOG("TOA_LOCK on : verrouillage natif du TOA sur 23 (biais placement)");
     }
+    { static unsigned n; if (n++ < 40 || (n % 500) == 0)
+        printf("  [toaloop] appel n=%u en=%d toa=%d biais=%d\n", n, en, toa, g_toa_bias); }
     if (!en || toa <= 0) return;
     int within = toa % 156;              /* intra-frame position (ntdma removed) */
     int err = within - 23;               /* target: 23 */

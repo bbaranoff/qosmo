@@ -100,6 +100,15 @@
 /* Read-only bits: kept by the model, never overwritten by the ARM. */
 #define CTRL_RO_MASK  (CTRL_IDLE | CTRL_IRQ_STATE | CTRL_RHEA_ERROR)
 
+/* [2026-09-22] COMBIEN DE TRANSFERTS SE TERMINENT, COMBIEN LA ROM EN ACQUITTE.
+ * La ROM ferme un transfert en LISANT DMAn_CTRL (IRQ_STATE s'efface a la
+ * lecture, CAL207 §11.3.5). Si elle lit moins souvent que la DMA ne termine,
+ * ses files de requetes -- 14 entrees circulaires, 0xaa83/0xaaad/0xaad1 --
+ * debordent : c'est le `DSP Error Status: 24` (DMA_PROG|DMA_TASK) permanent
+ * depuis le boot, 18492 occurrences sur un run. La trace existante etait
+ * plafonnee a 20 lignes et ne comptait donc rien. */
+static unsigned long long g_rd_fini, g_rd_acquitte;
+
 static struct {
     bool     init;
     uint16_t ctrl_cfg, alloc_cfg;
@@ -210,10 +219,32 @@ uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
                  * ═════════════════════════════════════════════════════════════ */
                 if (rd.ch[n].ctrl & (CTRL_IRQ_STATE | CTRL_RHEA_ERROR)) {
                     static unsigned long long n_clr;
-                    if (n_clr++ < 20)
-                        fprintf(stderr, "[rhea-dma] DMA%d_CTRL lu = 0x%04x : "
-                                "IRQ_STATE/RHEA_ERROR effaces a la lecture "
-                                "(CAL207 §11.3.5)\n", n + 1, v);
+                    if (rd.ch[n].ctrl & CTRL_IRQ_STATE) {
+                        g_rd_acquitte++;
+                        if ((g_rd_acquitte % 200) == 1) {
+                            /* [2026-09-22] NIVEAU DE VERBOSITE. verbosite.c
+                             * classe par mots-cles : cette ligne ne contient que
+                             * « DMA », donc niveau 3, invisible au -v par
+                             * defaut. C'est pour ca qu'elle avait « disparu » --
+                             * pas parce que la ROM avait cesse d'acquitter.
+                             * Plutot que de forcer un « ERR » sur une ligne saine
+                             * (elle sortirait en niveau 0 a chaque run normal),
+                             * on ne promeut QUE l'anomalie : retard
+                             * d'acquittement = WARN, donc niveau 1. */
+                            double pc = g_rd_fini ? 100.0 * g_rd_acquitte / g_rd_fini : 0.0;
+                            bool mauvais = g_rd_fini > 100 && pc < 90.0;
+                            fprintf(stderr, "[rhea-dma] %sbilan : %llu transferts finis, "
+                                    "%llu acquittes par la ROM (%.0f%%)\n",
+                                    mauvais ? "WARN " : "", g_rd_fini, g_rd_acquitte, pc);
+                        }
+                    }
+                    /* [2026-09-22] Plafond leve de 20 a 4000 et compteurs
+                     * joints : c'est le rapport « transferts finis / acquittes »
+                     * qui dit si les files de la ROM debordent. */
+                    if (n_clr++ < 4000)
+                        fprintf(stderr, "[rhea-dma] DMA%d_CTRL lu = 0x%04x : acquitte "
+                                "(finis=%llu acquittes=%llu)\n",
+                                n + 1, v, g_rd_fini, g_rd_acquitte);
                     rd.ch[n].ctrl &= (uint16_t)~(CTRL_IRQ_STATE | CTRL_RHEA_ERROR);
                 }
                 break;
@@ -531,8 +562,16 @@ void calypso_rhea_dma_rx_request(C54xState *s)
      * pages under the ISR. Measured: 13 pairs handed over per frame, the ROM
      * counted 6 (0x3fb4 += 12 instead of 26). The words wait in the receiver;
      * calypso_rhea_dma_pump() moves them once the DSP is idle. */
-    if (!one_shot && (ctrl & CTRL_IRQ_STATE))
+    if (!one_shot && (ctrl & CTRL_IRQ_STATE)) {
+        /* [2026-09-22] Rendre IDLE avant de sortir. La ligne 517 l'a efface
+         * (« transfert en cours ») et TOUTES les autres sorties le reposent :
+         * skip_pending, rien-a-transferer, fin de transfert. Celle-ci seule ne
+         * le faisait pas, laissant le canal annoncer indefiniment un transfert
+         * qui n'aura pas lieu -- la ROM qui scrute IDLE pour savoir si elle peut
+         * reprogrammer le canal attend alors sans fin. */
+        rd.ch[n].ctrl |= CTRL_IDLE;
         return;
+    }
     if (!one_shot && rd_skip_pending > 0) {
         static uint16_t poubelle[256];
         while (rd_skip_pending > 0) {
@@ -640,6 +679,9 @@ void calypso_rhea_dma_rx_request(C54xState *s)
     int got = total;
 
     /* §11.3.5: transfer complete -> IRQ_STATE set, DMA_START drops. */
+    if (!(rd.ch[n].ctrl & CTRL_IRQ_STATE)) {
+        g_rd_fini++;   /* un transfert de plus que la ROM devra acquitter */
+    }
     rd.ch[n].ctrl = (uint16_t)((rd.ch[n].ctrl | CTRL_IRQ_STATE | CTRL_IDLE)
                                & ~CTRL_DMA_START);   /* done -> IDLE=1 */
     if (rd.ch[n].ctrl & CTRL_ONE_SHOT) {
