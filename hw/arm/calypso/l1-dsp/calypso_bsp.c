@@ -585,6 +585,7 @@ static uint32_t g_ts0_next; static int g_ts0_any;
 static int64_t g_ts0_offset = INT64_MIN;
 static uint32_t g_ts0_fn_max;   /* trame BTS la plus recente stockee */
 static unsigned long g_ts0_recales;      /* nb de recalages d'offset (voir bsp_ts0_service) */
+static unsigned long g_ts0_silences;     /* effacements deposes (voir bsp_ts0_service) */
 static long long     g_ts0_recul_total;  /* somme des reculs, en trames */
 static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
 static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
@@ -757,10 +758,10 @@ static void bsp_dedie_etat(const char *quoi)
     if (!f) {
         return;
     }
-    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu replis=%lu perdues=%lu recales=%lu recul=%lld %s\n",
+    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu replis=%lu perdues=%lu recales=%lu recul=%lld silences=%lu %s\n",
             g_dedie_tn, g_dedie_ss, g_dedie_stockes, g_dedie_joues,
             g_dedie_manques, g_dedie_replis, g_dedie_perdues,
-            g_ts0_recales, g_ts0_recul_total, quoi ? quoi : "");
+            g_ts0_recales, g_ts0_recul_total, g_ts0_silences, quoi ? quoi : "");
     fclose(f);
 }
 
@@ -1160,6 +1161,74 @@ static void bsp_ts0_service(uint32_t tick_fn)
                    tick_fn, (uint32_t)w, manques, tick_fn, g_ts0_fn_max, devant,
                    devant > 0 ? "le DSP COURT DEVANT le BTS (avance insuffisante)"
                               : "le burst a existe puis a disparu (autre cause)");
+        }
+        /* [2026-09-22] UNE TRAME MANQUANTE DOIT ETRE UN EFFACEMENT, PAS LA
+         * TRAME PRECEDENTE REJOUEE.
+         *
+         * Sortir ici sans rien deposer ne « troue » pas le flux : la page API
+         * GARDE le burst du tick precedent, et la tache de decodage du DSP
+         * tourne quand meme dessus. Chaine verifiee :
+         *   - calypso_bsp_rx_burst() est le seul ecrivain de la DARAM des
+         *     bursts, et n'est appelee que depuis bsp_ts0_livrer() -- que ce
+         *     chemin-ci saute ;
+         *   - calypso_rif_drain() rend 0 sur FIFO vide (calypso_rif.c) ;
+         *   - le transfert sort alors par `if (got <= 0) break`
+         *     (calypso_rhea_dma.c) SANS rien ecrire dans la page ;
+         *   - sur le chemin DRR c'est pire encore, le dernier mot est repete :
+         *     « On an empty FIFO, DRR keeps its last value [...] returning 0
+         *     would fabricate a sample » (calypso_rif.c).
+         *
+         * SIGNATURE MESUREE, 2026-09-22 : les blocs rejetes par le mobile ont
+         * un nombre d'erreurs IDENTIQUE -- 17 rejets = 96 neuf fois, 105 cinq
+         * fois, puis 95, 73, 62. Un canal bruite ne rend pas neuf fois le meme
+         * compte ; un decodeur qui relit deux fois la meme page, si.
+         *
+         * C'est aussi ce que l'A/B du recalage (voir plus haut) ne pouvait pas
+         * voir : ses deux bras substituaient un burst FAUX -- le plus recent
+         * d'un cote, le precedent de l'autre -- jamais un effacement. Des
+         * echantillons nuls donnent des bits souples proches de zero, la seule
+         * entree que le desentrelaceur puisse traiter comme une incertitude
+         * plutot que comme une donnee.
+         *
+         * Ne touche a aucune trame livree : ce bloc ne s'execute QUE sur les
+         * ticks ou, aujourd'hui, le DSP relit des echantillons perimes. Et il
+         * ne fait pas baisser `perdues` -- c'est voulu, `perdues` sert ici de
+         * temoin de non-effet.
+         * CALYPSO_BSP_SILENCE=0 retablit exactement le comportement d'avant. */
+        {
+            static int silence = -1;
+            if (silence < 0) {
+                const char *e = calypso_getenv("CALYPSO_BSP_SILENCE");
+                silence = (e && *e == '0') ? 0 : 1;
+                if (silence) BSP_LOG("effacement actif : une trame sans burst depose des echantillons nuls");
+            }
+            if (silence) {
+                static int16_t vide[2 * 256];
+                const bool one_shot = calypso_rhea_dma_one_shot();
+                int nwin  = one_shot ? calypso_rhea_dma_get_len_words() / 2 : 0;
+                int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+                int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
+                if (total > 256) total = 256;
+                memset(vide, 0, (size_t)(2 * total) * sizeof *vide);
+                calypso_bsp_rx_burst(0, (uint32_t)w, vide, 2 * total);
+                bsp.bursts_written++;
+                /* En mode continu la trame doit faire 1250 echantillons, sinon
+                 * le compteur de symboles de la ROM derive : memes remplissages
+                 * que bsp_ts0_livrer(). */
+                if (!one_shot) {
+                    extern uint16_t g_remplissage_ts0[];
+                    for (int tn = 1; tn < 8; tn++) {
+                        calypso_bsp_rx_burst((uint8_t)tn, (uint32_t)w,
+                                             (const int16_t *)g_remplissage_ts0, 2 * 148);
+                    }
+                }
+                g_ts0_silences++;
+                if (g_ts0_silences <= 20 || g_ts0_silences % 500 == 0) {
+                    printf("  [ts0] silence %lu : fn=%u sans burst, effacement depose "
+                           "(au lieu de relire la page du tick precedent)\n",
+                           g_ts0_silences, (uint32_t)w);
+                }
+            }
         }
         return;
     }
