@@ -916,6 +916,59 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         }
     }
 }
+/* [2026-09-22] L'HORLOGE DU BANC EST CELLE DU DSP, PAS CELLE DU MUR.
+ *
+ * bsp_ts0_service() joue la trame BTS `tick + g_ts0_offset`. L'offset est fixe
+ * une fois pour toutes sur la premiere SB, et le tick de l'ARM avance au
+ * rythme du C54x emule (~6,7 ms par trame) alors que la BTS, elle, tourne en
+ * temps reel (4,615 ms). Le DSP consomme donc l'anneau 20 % moins vite qu'il
+ * ne se remplit, et le retard n'est borne par rien.
+ *
+ * Mesure du 2026-09-22 (run de 10:01) : a 10:09, pont.py annoncait fn=99674
+ * et le BSP jouait la trame BTS 80410 -- 19000 trames, 87 secondes de retard.
+ * A 10 s de banc la mise a jour de localisation passait encore (retard ~2 s) ;
+ * a 10:04 l'IMMEDIATE ASSIGNMENT arrivait 40 s apres le RACH (T3126 expire,
+ * « lchan allocation failed : Timeout » cote BSC) ; a 10:06 plus rien ne
+ * passait. Meme cause pour les « Dropping frame with 110 bit errors » du canal
+ * dedie : l'anneau TS1 ne commence a se remplir qu'a l'armement du canal, or le
+ * DSP lit des trames d'AVANT cet instant, d'ou les bursts « MANQUANT ».
+ *
+ * Le rattrapage cote DSP est impossible (il tourne deja a fond). C'est donc la
+ * BTS qui doit ralentir : on publie ici la trame que le DSP reclame, et
+ * pont.py (pont/trx.py, classe Clock) freine son horloge -- donc les IND CLOCK
+ * de la BTS -- pour ne jamais la devancer de plus de quelques trames.
+ *
+ * Format, 16 octets : seq (non nul, incremente a chaque ecriture), cale
+ * (0 avant le premier calage sur SB : l'horloge reste libre), trame BTS
+ * reclamee, tick de l'ARM. CALYPSO_BSP_HORLOGE=0 coupe la publication. */
+#define SHM_HORLOGE "/dev/shm/calypso_horloge"
+static void bsp_horloge_publier(uint32_t fn_bts, uint32_t tick_fn, int cale)
+{
+    static int actif = -1, fd = -1;
+    static uint32_t seq;
+    if (actif < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_HORLOGE");
+        actif = (e && *e == '0') ? 0 : 1;
+    }
+    if (!actif) {
+        return;
+    }
+    if (fd < 0) {
+        fd = open(SHM_HORLOGE, O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) {
+            actif = 0;
+            return;
+        }
+    }
+    if (++seq == 0) {
+        seq = 1;            /* 0 veut dire « rien de publie » cote lecteur */
+    }
+    uint32_t rec[4] = { seq, (uint32_t)cale, fn_bts, tick_fn };
+    if (pwrite(fd, rec, sizeof rec, 0) != (ssize_t)sizeof rec) {
+        /* rien a faire : l'horloge libre reprend la main cote pont */
+    }
+}
+
 static void bsp_ts0_service(uint32_t tick_fn)
 {
     if (!g_ts0 || !g_ts0_any) return;
@@ -923,12 +976,14 @@ static void bsp_ts0_service(uint32_t tick_fn)
     if (g_ts0_offset != INT64_MIN) {
         int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
         unsigned i = (unsigned)w % BSP_TS0_RING;
+        bsp_horloge_publier((uint32_t)w, tick_fn, 1);
         if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
         manques++;
         if (manques_log++ < 10 || manques % 1000 == 0)
             printf("  [ts0] tick=%u : pas de burst BTS pour fn=%u (manques=%u) - le BTS est-il en retard sur le DSP ?\n", tick_fn, (uint32_t)w, manques);
         return;
     }
+    bsp_horloge_publier(0, tick_fn, 0);
     for (unsigned k = 0; k < BSP_TS0_RING; k++) {
         unsigned i = (g_ts0_next + k) % BSP_TS0_RING;
         if (g_ts0[i].valid && !g_ts0[i].joue) { bsp_ts0_livrer(tick_fn, i); g_ts0_next = g_ts0[i].fn + 1; return; }
