@@ -584,6 +584,8 @@ static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
 static uint32_t g_ts0_next; static int g_ts0_any;
 static int64_t g_ts0_offset = INT64_MIN;
 static uint32_t g_ts0_fn_max;   /* trame BTS la plus recente stockee */
+static unsigned long g_ts0_recales;      /* nb de recalages d'offset (voir bsp_ts0_service) */
+static long long     g_ts0_recul_total;  /* somme des reculs, en trames */
 static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
 static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
 static int bsp_ts0_est_fcch(const uint8_t *b) { for (int k = 0; k < 148; k++) if (b[k] & 1) return 0; return 1; }
@@ -755,9 +757,10 @@ static void bsp_dedie_etat(const char *quoi)
     if (!f) {
         return;
     }
-    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu replis=%lu perdues=%lu %s\n",
+    fprintf(f, "tn=%d ss=%d stockes=%lu joues=%lu manques=%lu replis=%lu perdues=%lu recales=%lu recul=%lld %s\n",
             g_dedie_tn, g_dedie_ss, g_dedie_stockes, g_dedie_joues,
-            g_dedie_manques, g_dedie_replis, g_dedie_perdues, quoi ? quoi : "");
+            g_dedie_manques, g_dedie_replis, g_dedie_perdues,
+            g_ts0_recales, g_ts0_recul_total, quoi ? quoi : "");
     fclose(f);
 }
 
@@ -1066,6 +1069,80 @@ static void bsp_ts0_service(uint32_t tick_fn)
         unsigned i = (unsigned)w % BSP_TS0_RING;
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);
         if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
+        /* [2026-09-22] LE DSP COURT DEVANT LE BTS : RECULER, NE PAS TROUER.
+         *
+         * L'offset tick->trame BTS etait pose UNE SEULE FOIS, au premier calage,
+         * et jamais revu. Or le BTS s'arrete par a-coups : osmo-bts-trx bat ses
+         * trames sur un timerfd cale en dur a 4615 us et ne sait pas suivre une
+         * horloge plus lente -- son filtre de derive est un TODO vide
+         * (scheduler_trx.c:571). Notre DSP tourne a 195,7 trames/s au lieu de
+         * 216,7 (deficit 9,7 %, reproduit sur ~15 demarrages), donc le BTS se
+         * croit en permanence « plus rapide que le TRX », compense, puis
+         * resynchronise -- et pendant ce temps il ne produit RIEN. Le DSP, lui,
+         * continue de ticker : il reclame alors des trames qui n'existent pas
+         * encore. Mesure : ecart TOUJOURS positif, +1 a +40, 0 occurrence de
+         * signe negatif sur 27200 manques ; par fenetres de ~200 trames a 100 %
+         * de perte, ~43 fois par run.
+         *
+         * Trouer le flux est le pire choix possible : un bloc LAPDm, ce sont
+         * QUATRE bursts consecutifs. Avec 42 % de trames dediees manquantes
+         * (mesure du 2026-09-22) presque aucun bloc ne se forme, le
+         * desentrelaceur sort du bruit, et le mobile lit 69 a 99 bits faux sur
+         * 184 : ni SABM/UA, ni LU ACCEPT, ni CP-DATA du SMS.
+         *
+         * On recule donc l'offset pour repartir de la trame la plus recente
+         * recue. Le DSP prend du retard sur le temps mural, mais son flux reste
+         * CONTIGU -- et c'est tout ce que le montage demande : le commentaire du
+         * mode STREAM le dit, « Decouples the absolute FN (BTS) from the tick FN
+         * (QEMU): only the ORDER matters, and the SCH carries the real FN for
+         * synchronisation. » Les trous deviennent de la latence.
+         *
+         * MESURE A/B DU 2026-09-22 (2 x 6 min, meme banc, meme protocole) :
+         *
+         *   |                      | temoin | recalage |
+         *   | perdues / joues      | 20/132 |   0/161  |  <- fait ce qu'il annonce
+         *   | MDL-ERROR            |   18   |     4    |  <- mieux
+         *   | LU ACCEPT / REQUEST  |  1/3   |    1/2   |  <- egal
+         *   | TRAMES JETEES        |  686   |  *1409*  |  <- DEUX FOIS PIRE
+         *   | bits faux (mediane)  |   95   |    96    |  <- inchange
+         *
+         * CONCLUSION : ca ne marche pas. En remplacant une trame absente par la
+         * plus recente disponible, on ne livre pas un trou mais LE MAUVAIS BURST
+         * A LA BONNE PLACE. Pour le desentrelaceur une donnee fausse mais
+         * plausible est pire qu'une absence : il ne peut plus la traiter comme
+         * un effacement. On a converti des effacements en erreurs.
+         * Corollaire : « perdues » n'est PAS un predicteur du succes. La
+         * correlation vue sur trois runs (7 %, 0 %, 42 %) ne survit pas au test
+         * controle.
+         *
+         * DESACTIVE PAR DEFAUT. CALYPSO_BSP_RECALE=1 pour le reessayer -- par
+         * exemple en ne recalant que hors du canal dedie, ou en marquant le
+         * burst rejoue comme peu fiable pour que le desentrelaceur l'efface.
+         * Attention aussi : ce chemin sort avant `manques++`, donc il aveugle
+         * le compteur « manques » -- les deux bras n'etaient pas comparables
+         * sur cette metrique-la. */
+        if ((int32_t)((uint32_t)w - g_ts0_fn_max) > 0) {
+            static int recale = -1;
+            if (recale < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RECALE");
+                              recale = (e && *e == '1') ? 1 : 0;   /* OFF par defaut : voir la mesure ci-dessus */
+                              if (recale) BSP_LOG("recalage actif : le flux TS0 reste contigu quand le BTS prend du retard"); }
+            if (recale) {
+                unsigned j = g_ts0_fn_max % BSP_TS0_RING;
+                if (g_ts0[j].valid && g_ts0[j].fn == g_ts0_fn_max) {
+                    int64_t recul = (int64_t)(uint32_t)w - (int64_t)g_ts0_fn_max;
+                    g_ts0_offset -= recul;
+                    if (g_ts0_offset < 0) g_ts0_offset += BSP_FN_MAX;
+                    g_ts0_recales++;
+                    g_ts0_recul_total += recul;
+                    if (g_ts0_recales <= 20 || g_ts0_recales % 200 == 0) {
+                        printf("  [ts0] recalage %lu : le BTS avait %lld trames de retard (fn=%u -> %u), flux garde contigu\n",
+                               g_ts0_recales, (long long)recul, (uint32_t)w, g_ts0_fn_max);
+                    }
+                    bsp_ts0_livrer(tick_fn, j);
+                    return;
+                }
+            }
+        }
         manques++;
         if (g_dedie_tn > 0 && bsp_dedie_trame((uint32_t)w)) {
             /* Trame du canal dedie sautee en entier : hors de portee de
