@@ -168,7 +168,7 @@ ERROR: calypso: --enable-l1-grgsm et --enable-l1-dsp sont exclusives.
 | couture `CalypsoL1Ops` | ✅ 9 points d'appel, vérifiée avec la L1 gr-gsm |
 | `--enable-l1-grgsm` | ✅ |
 | `--enable-l1-dsp` (C54x dans QEMU) | 🔧 les ~28 600 lignes de `l1-dsp/` compilent et se lient ; la vtable reste vide (seul `.name = "c54x"`) |
-| DSP externe (`CALYPSO_DSP_EXTERN`) | ✅ mask-ROM dans `c54x_exe`, couplée à l'ARM par le pont ; SCH (BSIC/FN), BCCH SI1-4 et LU sur SDCCH atteints sur le banc ; appel TCH établi, SACCH en appel pas encore validée (LOS après ~20 s avant les correctifs du 2026-09-23) |
+| DSP externe (`CALYPSO_DSP_EXTERN`) | ✅ mask-ROM dans `c54x_exe`, couplée à l'ARM par le pont ; SCH (BSIC/FN), BCCH SI1-4 et LU sur SDCCH atteints sur le banc ; appels TCH/F de bout en bout, parole décodée par la ROM (runs du 2026-09-23 20:22 et 20:32) ; toutes les trames de parole marquées `B_BFI`, un LOS en appel à 20:32 — voir ci-dessous |
 | devices de la carte E88 | 🔧 présents, compilent, pas branchés — voir ci-dessous |
 
 Neuf devices (`calypso_iota.c`, `calypso_rf3166.c`, `calypso_asm4532.c`,
@@ -210,9 +210,67 @@ L'ordre pour les débloquer est dans
   ordre) ; coprocesseur A5 sur les ports XIO `0x2800..0x2818`
   ([`calypso_a5.c`](hw/arm/calypso/l1-dsp/calypso_a5.c), `osmo_a5()`).
 
-À valider sur le banc au 2026-09-23 : SACCH du TCH en appel (ordre
-`MVKD`/`MVDK`, coprocesseur A5, journal `[a5]`), rattrapage du pacer pour la
-parole (`CALYPSO_PACER_RATTRAPAGE`).
+### Banc DSP : runs du 2026-09-23 20:22 et 20:32
+
+Montage pont DSP (`c54x_exe`), mobile DSP = MS 1 (MSISDN 100101). Journaux :
+`osmo-*.log`, archives du pont `20260923-202448` et `20260923-203413`.
+
+Constaté :
+
+- **Parole TCH/F décodée par la ROM.** Appel MO vers l'écho 600 à 20:22
+  (ACTIVE 20:22:55, DISCONNECT 20:23:27, ~32 s ; TCH dl=1607 ul=1601
+  trames), appel MT 100102 → 100101 (ACTIVE 20:24:28, release normal
+  20:24:32), appel MO à 20:33:39 → DISCONNECT 20:34:06 au run suivant. La ROM
+  TI fait démodulation, égalisation, désentrelacement et Viterbi TCH/F
+  descendant ; codec (GAPK FR) et codage canal montant tournent sur l'hôte.
+  Audible dans les deux sens.
+- **Ordre `MVKD`/`MVDK` / SACCH `0x3d89`** : à 20:22, les deux appels vont
+  jusqu'à la libération normale sans LOS (plus de LOS après ~20 s). Pas
+  vrai du premier appel de 20:32, voir plus bas.
+- **Coprocesseur A5** : journal `[a5]` actif sur les deux runs (Kc lu sur
+  les ports XIO, `NOUVEAU Kc` à chaque changement) ; chiffrement descendant
+  confirmé par la BTS 5 fois à 20:22 (LU, appel 600, SMS MT, SMS MO, appel
+  MT : chaque établissement) et 3 fois à 20:32.
+- **Temps réel** : 29 513 trames à 20:22 (28 441 à 20:32), un seul tick
+  sauté par run, au boot (`fn=0`). Marge : en TCH, `[chrono]` à 20:22
+  (fn 5997-11997) A 0,32-0,34 + go 0,39-0,49 + B 0,15-0,16 + après DONE
+  3,37-3,68 ms ; à 20:32 A 0,29-0,33 + go 0,40-0,50 + B 0,11-0,16 + après
+  DONE 3,33-3,59 ms. Soit ~4,2-4,6 ms de travail DSP pour 4,62 ms de trame ;
+  l'attente de QEMU tombe à 0,04-0,45 ms. Hors TCH ~0,6-2 ms. Tenu, mais
+  sans réserve : c'est aussi une alerte.
+
+Anomalies ouvertes, par ordre d'importance :
+
+1. **`B_BFI` sur toutes les trames de parole.** Sonde `[a_dd]` à 20:32 :
+   `vues=2200 bfi=2200`. Sur les 42 lignes échantillonnées : 19 × `c214`
+   err=0, toutes parmi les 20 premières après la bascule (la 18e est un
+   `8084` err=58), puis 17 × `c204` err=15..80 et 5 × `80c4` err=81..93
+   (`err` = `a_dd_0[2]`, `num_biterr`). Premier appel (fn 5839-9306, celui
+   du LOS) : err 58 à 93 hors `c214` ; appel de 20:33:39 (fn 21248-26881) :
+   `c204` err=15..38. Ce n'est donc pas « bits bons, BFI faux » :
+   la ROM mesure ~3 à 20 % d'erreurs sur 456 bits codés et le FR reste
+   intelligible (le firmware ne remonte pas le BFI, GAPK décode tel quel).
+   Origine à trancher : signal (BSP, IQ, égalisation) ou cœur C54x
+   (Viterbi, recodage qui compte les erreurs). Comparaison bit à bit avec
+   les trames BTS à faire. Le `ko=376` de la sonde compte `B_FIRE1`, sans
+   sens défini sur la parole.
+2. **LOS en appel à 20:32.** Appel MO ACTIVE 20:32:30 ; le compteur ACCH
+   descend de 31 à 0 sans remonter (aucun SACCH descendant accepté) et le
+   mobile jette ~400 blocs en 15 s (« Dropping frame with 54..111 bit
+   errors », `mobile.log` de l'archive `20260923-203413`) ; « LOS during
+   dedicated mode » à 20:32:45. La tentative suivante (20:32:57) reste sans
+   réponse jusqu'à 20:33:13, celle de 20:33:26 est relâchée aussitôt ;
+   l'appel de 20:33:36 va au bout. Non reproduit à 20:22.
+3. **SACCH descendant du SDCCH/8** : ~la moitié des blocs jetés (7 entre
+   20:22:42 et 20:22:47 sur le LU). Suspect : la table 45.002 du BSP pour
+   le SACCH/8 sur 102 trames.
+
+Pas une anomalie : les échecs CRC du moniteur TCH descendant du pont tant que
+le RTP ne coule pas (décodage du pont, indépendant du DSP) ; le `ko` de
+`[a_dd]` ; le tick sauté à `fn=0`.
+
+Reste à valider : rattrapage du pacer pour la parole
+(`CALYPSO_PACER_RATTRAPAGE`), rien dans les journaux de ces runs.
 
 ## Documentation liée
 
