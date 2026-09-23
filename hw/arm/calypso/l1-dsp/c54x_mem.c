@@ -247,6 +247,11 @@ static void rmap_note(uint16_t addr, uint16_t pc)
 
 static uint16_t data_read_locked(C54xState *s, uint16_t addr)
 {
+    /* [2026-09-23] Toutes les sondes de lecture (DTASKD-WATCH .. FBWATCH-PAGE-RD :
+     * RMAP, FLOWTRACE, read_stats, histogrammes, WATCH-READ, ...) ne font que
+     * lire et compter : derriere l'interrupteur C54X_SONDES. La semantique
+     * (timers, MMR, API RAM, bequille FORCE_3FAD_KERNEL) suit, inchangee. */
+    if (C54X_SONDES) {
     {   /* DTASKD-WATCH, leg 4/4 - CALYPSO_DTASKD_WATCH=1, default 0. Read-only,
          * capped. Legs 1-2 are in calypso_trx.c, leg 3 in data_write_locked.
          *
@@ -847,6 +852,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
                         s->pc, s->insn_count);
         }
     }
+    }   /* C54X_SONDES : sondes de lecture */
     /* Timer registers (0x0024-0x0026) - read returns current value */
     if (addr == TIM_ADDR) return s->data[TIM_ADDR];
     if (addr == PRD_ADDR) return s->data[PRD_ADDR];
@@ -1561,6 +1567,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
      * FCCH est une tonalite pure, donc a 1 ech/symbole elle tourne de +pi/2 par
      * echantillon avec une coherence ~1. On mesure coherence et dphi SUR LE
      * CONTENU DU TAMPON au moment ou la tache FB rend son resultat. */
+    /* [2026-09-23] Sondes pures d'ecriture BUF-0cce, ANGLE-LAW : derriere
+     * l'interrupteur C54X_SONDES. */
+    if (C54X_SONDES) {
     if ((addr == 0x08fc || addr == 0x08fa) && val != 0 && s->ar[2] == 0x0cce) {
         static unsigned nb;
         if (nb < 20) {
@@ -1589,6 +1598,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     (long long)s->a, (long long)s->b, s->t, s->pc);
         na++;
     }
+    }   /* C54X_SONDES : BUF-0cce, ANGLE-LAW */
     if (addr == 0x08fa) {
         static unsigned nt;
         /* [2026-09-19] Deux producteurs de TOA sortent de la MEME instruction
@@ -1605,6 +1615,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
          * discontinuite a chaque frontiere de page. On imprime les mots de part
          * et d'autre des frontieres (96 et 192) du tampon 0x0cce : sur un burst
          * GMSK continu, |IQ| est quasi constant et rien ne doit sauter la. */
+        /* [2026-09-23] g_toa_* ci-dessus alimente le pont (pont.c) : reste
+         * actif. COUTURE et TOA-LAW sont des sondes pures. */
+        if (C54X_SONDES) {
         if (val != 0 && nt < 12 && s->pc == 0x795a) {
             const uint16_t B0 = 0x0cce;
             fprintf(stderr, "[c54x] COUTURE TOA=%d | p1 94,95 -> 96,97 : "
@@ -1621,6 +1634,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     (int)(int16_t)val, (long long)s->b, (int)(int16_t)s->t,
                     (long long)s->a, s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->pc);
         nt++;
+        }   /* C54X_SONDES : COUTURE, TOA-LAW */
     }
     /* [2026-09-19] A_SERV-WR : read_sb_result (prim_fbsb.c:148) lit
      * dsp_api.db_r->a_serv_demod[], donc la PAGE R aux mots 8..11 =
@@ -1654,6 +1668,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
      * A prend 0x8000 (B_BLUD seul) puis 0x8100, l'instruction 0x98b4 ayant
      * pour operandes 0x2bf8 et 0x0c08. Si data[0x0c08] porte 0x0100, c'est la
      * cellule du verdict CRC, et son ecrivain est le decodeur lui-meme. */
+    /* [2026-09-23] Sondes pures CRC-CELL .. DISPTAB-WR (dont dio_note,
+     * wmap_note, flow_log) : derriere l'interrupteur. */
+    if (C54X_SONDES) {
     if (addr == 0x0c08) {
         static unsigned n7;
         if (n7 < 60) {
@@ -1913,6 +1930,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     addr, val, s->pc, s->insn_count);
         }
     }
+    }   /* C54X_SONDES : CRC-CELL .. DISPTAB-WR */
     {
         /* @BEQUILLE - DEMOD_NOCLOBBER  (CALYPSO_DEMOD_NOCLOBBER, default OFF)
          *   masque  : the emulated demod stage (PC 0x9fb8 = I, 0x9fe2 = Q) fills
@@ -1936,6 +1954,8 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             return;
         }
     }
+    /* [2026-09-23] Sondes pures B4 .. WATCH-VEC : derriere l'interrupteur. */
+    if (C54X_SONDES) {
     /* B4 (gate CALYPSO_B4): watchpoint on d_fb_det (0x08f8) - separates "the DSP
      * writes 0" (correlator concludes negative) from "never written" (path not
      * reached). Two different bugs. */
@@ -2316,6 +2336,8 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         }
     }
 
+    }   /* C54X_SONDES : B4 .. WATCH-VEC */
+
     /* The DROM LUT column is read-only (SPRU172C: with PMST.DROM=1 the DSP ROM
      * in data space is read-only).
      *
@@ -2347,6 +2369,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         return;
     }
 
+    /* [2026-09-23] Sondes pures FBDB, COEFFS-WR : derriere l'interrupteur.
+     * L'INVARIANT qui suit reste actif (il peut signaler/arreter). */
+    if (C54X_SONDES) {
     /* FBDB-PROBE write to 0x3DC0 (= SARAM flag polled by fc63 BITF).
      * Env CALYPSO_FBDB_PROBE=1. Logs old->new + which bits set, with focus
      * on bit 4 (= 0x0010) since that's the bit fc63 tests via BITF. */
@@ -2379,6 +2404,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         static WatchWriteState wws_coeffs;
         watch_write_zone_check(s, addr, val, "COEFFS", 0x2bc0, 0x2bff, &wws_coeffs);
     }
+    }   /* C54X_SONDES : FBDB, COEFFS-WR */
     /* INVARIANT (gate CALYPSO_INVARIANTS, default off): correlator pointers.
      * AR4 (write pointer) must take more than 2 distinct values, otherwise it is
      * a 2-word loop. AR5 (I/Q read pointer) must stay inside the buffer
@@ -2403,6 +2429,9 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                           a5 >= 0x2a00 && a5 <= 0x2b27,
                           "AR5 (read ptr I/Q) = 0x%04x HORS buffer [0x2a00..0x2b27]", a5);
     }
+    /* [2026-09-23] Sondes pures A_CD-WR .. DARAM[0x40..0x90] : derriere
+     * l'interrupteur. */
+    if (C54X_SONDES) {
     /* A_CD-WR: tracks whether the DSP CCCH demod (DSP_TASK_ALLC) writes its
      * results into a_cd[15]. */
     {
@@ -2855,6 +2884,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             }
         }
     }
+    }   /* C54X_SONDES : A_CD-WR .. DARAM[0x40..0x90] */
     /* Timer registers (0x0024-0x0026) - before MMR check */
     if (addr == TCR_ADDR) {
         /* TRB: write 1 -> reload TIM from PRD, PSC from TDDR */
@@ -2993,7 +3023,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             g_last_st0w_op = prog_fetch(s, s->pc); g_last_st0w_xpc = s->xpc;
             g_last_st0w_prev = g_prev_pc;
             st0_ring_rec(s, val, 'p'); /* pop/write ST0 */
-            if (g_orphan_on > 0 && (s->pc == 0xf48b || s->pc == 0x7737 || (val & 0x1FF) == 0x124)) {
+            if (C54X_SONDES && g_orphan_on > 0 && (s->pc == 0xf48b || s->pc == 0x7737 || (val & 0x1FF) == 0x124)) {   /* [2026-09-23] sonde : lit g_spring, alimente sous C54X_SONDES */
                 /* POPM ST0 at 0xf48b: the slot just popped is data[sp-1]. Look
                  * up its last writer in the stack ring. NO-WRITER means a stale
                  * slot, i.e. SP misaligned by a POP with no matching PUSH. */
@@ -3627,6 +3657,9 @@ inline uint32_t c54x_prog_xlate(const C54xState *s, uint16_t addr16)
     return addr16;   /* 0x0000-0x7FFF on-chip + 0xE000-0xFFFF PROM1 ROM (XPC-independent) */
 }
 
+/* [2026-09-23] Definition hors ligne, gardee pour les appelants externes
+ * (pont.c) ; le coeur passe par la copie en ligne de c54x_internal.h. */
+#undef prog_fetch
 uint16_t prog_fetch(C54xState *s, uint16_t pc)
 {
     if ((s->pmst & PMST_OVLY) && pc >= c54x_ovly_bas() && pc < 0x2800)
@@ -3643,11 +3676,13 @@ uint16_t prog_fetch(C54xState *s, uint16_t pc)
  * coef(prog)=0xf4e4). Gate CALYPSO_OVLY_SCRATCH, default 1.
  * Warning: GLOBAL effect - the alias serves everything executed or read in
  * overlay. */
+uint16_t g_c54x_ovly_bas = 0;   /* [2026-09-23] cache pour c54x_prog_fetch_vite */
 uint16_t c54x_ovly_bas(void)
 {
     static int g = -1;
     if (g < 0) {
         g = calypso_gate("CALYPSO_OVLY_SCRATCH", 1);
+        g_c54x_ovly_bas = g ? 0x0060 : 0x0080;
         fprintf(stderr, "[c54x] OVLY-SCRATCH %s : plancher de l alias programme "
                 "a 0x%04x (scratch-pad DARAM 0x0060-0x007F %s)\n",
                 g ? "ACTIF" : "INACTIF", g ? 0x0060 : 0x0080,

@@ -354,8 +354,9 @@ int c54x_exec_one(C54xState *s)
     uint16_t op = prog_fetch(s, s->pc);
     /* B1 probe (CALYPSO_B1): at the MAC kernel 0xa076, dump the correlator
      * reference table data[0x2c00..0x2c0f] plus a checksum, which tells whether
-     * the boot copy 0x76f8 -> 0x2c00 ran or the table is still zero. */
-    {
+     * the boot copy 0x76f8 -> 0x2c00 ran or the table is still zero.
+     * [2026-09-23] Sonde pure, derriere l'interrupteur C54X_SONDES. */
+    if (C54X_SONDES) {
         static int _b1 = -1; static unsigned _b1n = 0;
         if (_b1 < 0) _b1 = calypso_gate("CALYPSO_B1", 0);
         if (_b1 && s->xpc == 0 && s->pc == 0xa076 && _b1n < 20) {
@@ -406,8 +407,8 @@ int c54x_exec_one(C54xState *s)
     /* CORR-FLOW probe (CALYPSO_CORR_FLOW): traces the FB handler flow in bank 0
      * (0x8600..0xa200, XPC=0) -- raw PC/opcode, ST0 TC/C, AR1..AR5 -- to check
      * against SPRU172C where and why the flow leaves the MAC kernel at 0xa076.
-     * Marks 0xa076 and 0x9a80. */
-    {
+     * Marks 0xa076 and 0x9a80. [2026-09-23] sonde pure. */
+    if (C54X_SONDES) {
         static int cf = -1; static unsigned cfn = 0;
         if (cf < 0) cf = calypso_gate("CALYPSO_CORR_FLOW", 0);
         /* The range starts at 0x8600 to cover the handshake subroutine at
@@ -447,7 +448,10 @@ int c54x_exec_one(C54xState *s)
     /* DERAIL-EE00 probe: catches jumps into the empty PROM window 0xee00
      * (op=0x0000). Logs the source PC, its opcode and XPC, which separates a
      * runaway firmware branch from an XPC paging bug (a legitimate banked
-     * address fetched from page 0). Capped at 12 hits. */
+     * address fetched from page 0). Capped at 12 hits.
+     * [2026-09-23] Sondes pures DERAIL-EE00 .. AR0_DEBUG, derriere
+     * l'interrupteur. */
+    if (C54X_SONDES) {
     if (s->pc >= 0xee00 && s->pc < 0xef00 &&
         !(s->last_exec_pc >= 0xee00 && s->last_exec_pc < 0xef00)) {
         static unsigned dr = 0;
@@ -595,6 +599,7 @@ int c54x_exec_one(C54xState *s)
                     s->prog[0x7234], s->prog[0x7235], s->prog[0x7236], s->prog[0x7237]);
         }
     }
+    }   /* C54X_SONDES : DERAIL-EE00 .. AR0_DEBUG */
     uint8_t hi4 = (op >> 12) & 0xF;
     uint8_t hi8 = (op >> 8) & 0xFF;
 
@@ -744,8 +749,9 @@ int c54x_exec_one(C54xState *s)
      * is preemption rather than a stale DP. */
     if (s->pc == 0x7234) {
         /* One-shot dump of the 0x7234 scheduler (CALYPSO_AR0_DEBUG): what it does
-         * and which indirect pointer sends it to 0x013b. */
-        if (calypso_getenv("CALYPSO_AR0_DEBUG")) {
+         * and which indirect pointer sends it to 0x013b.
+         * [2026-09-23] sonde pure ; FORCE_DISPATCH ci-dessous reste active. */
+        if (C54X_SONDES && calypso_getenv("CALYPSO_AR0_DEBUG")) {
             static int d7 = 0;
             if (!d7) { d7 = 1;
                 fprintf(stderr, "[c54x] SCHED-7234 A=0x%06llx ST0=0x%04x DP=0x%03x "
@@ -801,7 +807,9 @@ int c54x_exec_one(C54xState *s)
      * B_SCH_CRC rightly: a TIMING failure, not a processing one.
      * Prints the fn of the last deposit, fn%51 (SCH frames are {1,11,21,31,41},
      * GSM 45.002), how many bursts were deposited since the previous SB, and the
-     * buffer amplitude. Writes nothing, so it cannot change behaviour. */
+     * buffer amplitude. Writes nothing, so it cannot change behaviour.
+     * [2026-09-23] Sondes pures SBFN, SUBC, MVDD derriere l'interrupteur. */
+    if (C54X_SONDES) {
     if (s->pc == 0x9841) {
         static int on = -1;
         if (on < 0) { const char *e = calypso_getenv("CALYPSO_SBFN"); on = (e && *e && atoi(e)) ? 1 : 0; }
@@ -937,6 +945,7 @@ int c54x_exec_one(C54xState *s)
             }
         }
     }
+    }   /* C54X_SONDES : SBFN, SUBC, MVDD */
     if (s->pc == 0x8341) {
         /* @BEQUILLE — FORCE_DP (+ FORCE_DP_FROM as a scope)  (CALYPSO_FORCE_DP,
          *              VALUE, default OFF)
@@ -960,7 +969,7 @@ int c54x_exec_one(C54xState *s)
                 s->st0 = (uint16_t)((s->st0 & ~0x1FF) | (force_dp & 0x1FF));
         }
     }
-    if (s->pc == 0x8341 && calypso_debug_enabled("DISP-ENTRY")) {
+    if (C54X_SONDES && s->pc == 0x8341 && calypso_debug_enabled("DISP-ENTRY")) {   /* [2026-09-23] sonde */
         static unsigned de_n = 0;
         if (de_n++ < 20000) {
             uint16_t lut_ea = (uint16_t)(((s->st0 & 0x1FF) << 7) | 0x07);
@@ -1001,7 +1010,7 @@ int c54x_exec_one(C54xState *s)
      * 0x8359 (B 0x8365/0x8394/...). A at the ENTRY (0x8341) is the index
      * preloaded by the caller (task selector / d_task_md): if A is already
      * garbage there, the fault is upstream and the dispatcher is innocent. */
-    if (s->pc >= 0x8341 && s->pc <= 0x8354 && calypso_debug_enabled("DISP-TRACE")) {
+    if (C54X_SONDES && s->pc >= 0x8341 && s->pc <= 0x8354 && calypso_debug_enabled("DISP-TRACE")) {   /* [2026-09-23] sonde */
         static unsigned disp_n = 0;
         if (disp_n++ < 300) {
             /* At 0x834d (op 0x6f07 = LD Smem<<1,A): compute the exact direct EA
@@ -1028,7 +1037,11 @@ int c54x_exec_one(C54xState *s)
 
     /* INTM-TRANS probe: logs every INTM 0->1 transition, with the PC that set it
      * and the stack return address, to name the caller of an orphan SSBX INTM.
-     * Capped at 200 transitions, otherwise boot floods the log. */
+     * Capped at 200 transitions, otherwise boot floods the log.
+     * [2026-09-23] Sondes pures INTM-TRANS .. NOP-SLIDE (dont COEFFS-DUMP,
+     * D_FB_DET-WR-SITE, READ-AMONT, CORR-PUBLISH-A, ENTER-7740/7700, ...),
+     * derriere l'interrupteur. */
+    if (C54X_SONDES) {
     {
         static int prev_intm = -1;
         static unsigned itrans_total;
@@ -1588,6 +1601,7 @@ int c54x_exec_one(C54xState *s)
         }
         nop_slide++;
     }
+    }   /* C54X_SONDES : INTM-TRANS .. NOP-SLIDE */
 
     switch (hi4) {
     case 0xF:
@@ -1738,7 +1752,9 @@ int c54x_exec_one(C54xState *s)
                     }
                     fprintf(stderr, "\n");
                     /* SP-event ring: the last 28 push/pop events (pc:op delta).
-                     * A push (delta<0) with no matching pop is the leak. */
+                     * A push (delta<0) with no matching pop is the leak.
+                     * [2026-09-23] l'anneau n'est alimente que sous C54X_SONDES. */
+                    if (C54X_SONDES) {
                     fprintf(stderr, "[c54x]     SP-EVENTS net_words=%lld pushes=%llu pops=%llu (récents, anciens→récents):\n[c54x]    ",
                             (long long)g_sp_ledger.net_words,
                             (unsigned long long)g_sp_ledger.sp_pushes,
@@ -1748,6 +1764,7 @@ int c54x_exec_one(C54xState *s)
                         fprintf(stderr, " %04x:%04x%+d", e->pc, e->op, e->delta);
                     }
                     fprintf(stderr, "\n");
+                    }   /* C54X_SONDES : SP-EVENTS */
                     fflush(stderr);
                 }
             }
@@ -1903,7 +1920,9 @@ int c54x_exec_one(C54xState *s)
                 static int _ra_g = -1; static unsigned long long _ra_n = 0;
                 static unsigned _ra_log = 0;
                 if (_ra_g < 0) _ra_g = calypso_gate("CALYPSO_RETE_AUDIT", 0);
-                if (_ra_g) {
+                /* [2026-09-23] net_words vient de l'anneau SP, alimente seulement
+                 * sous C54X_SONDES : la sonde suit le meme interrupteur. */
+                if (_ra_g && C54X_SONDES) {
                     static unsigned long long _ra_vec = 0;   /* RETE inside the vector zone */
                     _ra_n++;
                     /* RETE has two distinct uses and only one may be compared with
@@ -5799,7 +5818,19 @@ int c54x_exec_one(C54xState *s)
                 uint16_t val = data_read(s, addr);
                 s->rpt_count = val;
                 s->rpt_active = true; s->rpt_fresh = true;
-                s->pc += 1;
+                /* [2026-09-23] + lk_used : avec Smem absolu (47f8 = RPT *(lk))
+                 * l'instruction fait DEUX mots. `pc += 1` laissait l'adresse lk
+                 * s'executer comme l'instruction repetee. Mesure : PROM0 0x724a
+                 * `47f8 3fd8` (RPT *(0x3fd8), puis NOP) -- dans la queue de l'IT
+                 * trame, contexte de l'interrompu deja restaure -- executait
+                 * 0x3fd8 (`*AR0+0%`) : AR0 1 -> 2, resauve par le prologue 0x013b
+                 * et rendu a la boucle RPTB 0xe93e..0xe957 (tampon circulaire
+                 * `*AR5+0%`, BK=16). AR5 derivait alors en lineaire, les appels
+                 * suivants de 0xe931 (BRC 0x77) ecrasaient data[0x2d0d] (pointeur
+                 * pose a 0x2d0e par 0xe68a), AR5 = 0 + 8 au CALLD 0xea0c, et
+                 * 0xeac9 `MVDD *AR2+,*AR5+` sous RPT #16 ecrivait SP : le
+                 * « SP-CORRUPT pc=0xeac9 sp -> 0x0004 » de chaque appel en TCH. */
+                s->pc += 1 + s->lk_used;
                 return 0;
             }
             if (op8 == 0x48 || op8 == 0x49) {

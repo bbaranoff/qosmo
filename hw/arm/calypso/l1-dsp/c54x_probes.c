@@ -14,7 +14,7 @@
 
 /* Forward decl: used by data_write() VECDUMP at MMR_PMST. */
 uint16_t prog_read(C54xState *s, uint32_t addr);
-uint16_t prog_fetch(C54xState *s, uint16_t pc);
+uint16_t (prog_fetch)(C54xState *s, uint16_t pc);   /* [2026-09-23] entre parentheses : prog_fetch est aussi une macro (c54x_internal.h) */
 
 /* Propagated by D_BURST_D probe, consumed by A_CD-BY-BURST correlation. */
 uint16_t g_last_d_burst_d;

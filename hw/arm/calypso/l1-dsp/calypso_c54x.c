@@ -20,15 +20,78 @@ extern void calypso_inth_arm_ack(void);
 
 int c54x_rapide = 0;
 
-static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
+/* [2026-09-23] Interrupteur des sondes pures, voir c54x_internal.h. Resolu une
+ * fois ; un appelant (main.c de c54x_exe, -vvvv) peut l'avoir pose avant. */
+int c54x_sondes = -1;
+void c54x_sondes_resoudre(void)
 {
-    static int     ff_enabled = -1;
-    static int     ff_n_ranges = 0;
-    static uint16_t ff_lo[DSP_IDLE_FF_MAX_RANGES];
-    static uint16_t ff_hi[DSP_IDLE_FF_MAX_RANGES];
-    static uint64_t ff_hits = 0;
+    if (c54x_sondes >= 0) return;
+    const char *d = calypso_getenv("CALYPSO_DEBUG");
+    c54x_sondes = calypso_gate("CALYPSO_SONDES", (d && *d) ? 1 : 0);
+}
 
-    if (ff_enabled < 0) {
+/* [2026-09-23] ANNEAU-EXEC + vidage au SP-CORRUPT (demande du banc : plantage
+ * en communication TCH, « SP-CORRUPT pc=0xeac9 op=0xe58b sp 0x5ac0 -> 0x0004 »,
+ * PDROM 0xeac6 STM #0x2ba3,AR2 ; 0xeac8 RPT #16 ; 0xeac9 MVDD *AR2+,*AR5+).
+ * TOUJOURS actif, hors interrupteur des sondes : l'anneau coute une dizaine
+ * d'ecritures par instruction, le vidage ne coute qu'au SP-CORRUPT (3 premiers,
+ * hors l'artefact du reset a insn=0). Une entree par PASSAGE dans la boucle,
+ * donc une par iteration de RPT (le RPT refait tout le haut de boucle sans
+ * avancer le PC). Etat AVANT l'instruction, plus SP APRES et « IT prise ».
+ * Les lignes contiennent « SP-CORRUPT » : niveau 0 de verbosite.c, visibles
+ * sans -v. Ecrit seulement dans l'anneau et sur stderr : ne change rien au DSP. */
+unsigned g_c54x_it_prises = 0;
+typedef struct {
+    uint32_t insn;
+    uint16_t pc, op, sp, sp_apres, ar2, ar5, rpt_count;
+    uint8_t  xpc, rpt, intm, it;
+    uint16_t it_n;
+} C54xAnneauExec;
+static C54xAnneauExec g_anneau_exec[64];
+static unsigned g_anneau_exec_idx = 0;
+
+static void __attribute__((noinline, cold))
+sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_courante)
+{
+    fprintf(stderr, "[c54x] SP-CORRUPT-DUMP insn=%u exec_pc=0x%04x SP 0x%04x -> 0x%04x | "
+            "IT prise dans l'instruction courante : %s | IT prises au total=%u, "
+            "derniere vec=%d a insn=%llu (fg_pc=0x%04x)\n",
+            s->insn_count, exec_pc, sp_avant, s->sp, it_courante ? "OUI" : "non",
+            g_c54x_it_prises, g_last_intr_vec,
+            (unsigned long long)g_last_intr_insn, g_last_intr_fg_pc);
+    fprintf(stderr, "[c54x] SP-CORRUPT-DUMP AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x "
+            "AR5=%04x AR6=%04x AR7=%04x BK=%04x SP=%04x ST0=%04x ST1=%04x INTM=%d "
+            "IMR=%04x IFR=%04x XPC=%u PMST=%04x BRC=%u RSA=%04x REA=%04x rptb=%d "
+            "rpt=%d/%u delay=%u\n",
+            s->ar[0], s->ar[1], s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->ar[6], s->ar[7],
+            s->bk, s->sp, s->st0, s->st1, !!(s->st1 & ST1_INTM), s->imr, s->ifr,
+            (unsigned)s->xpc, s->pmst, (unsigned)s->brc, s->rsa, s->rea,
+            (int)s->rptb_active, (int)s->rpt_active, (unsigned)s->rpt_count,
+            (unsigned)s->delay_slots);
+    unsigned n = g_anneau_exec_idx < 64 ? g_anneau_exec_idx : 64;
+    for (unsigned k = n; k >= 1; k--) {
+        const C54xAnneauExec *e = &g_anneau_exec[(g_anneau_exec_idx - k) & 63];
+        fprintf(stderr, "[c54x] SP-CORRUPT-ANNEAU[-%02u] insn=%u pc=0x%04x op=0x%04x "
+                "xpc=%u sp=%04x->%04x ar2=%04x ar5=%04x rpt=%u/%u intm=%u it=%u(n=%u)%s\n",
+                k, e->insn, e->pc, e->op, e->xpc, e->sp, e->sp_apres, e->ar2, e->ar5,
+                e->rpt, e->rpt_count, e->intm, e->it, e->it_n,
+                (e->sp_apres != e->sp) ? "  <== SP change ici" : "");
+    }
+}
+
+/* [2026-09-23] Etat de l'avance rapide sorti de la fonction : la resolution
+ * (getenv, message d'armement) passe dans dsp_idle_ff_init(), appelee une fois,
+ * et dsp_idle_fast_forward() devient assez courte pour etre mise en ligne dans
+ * la boucle. Logique strictement inchangee. */
+static int     ff_enabled = -1;
+static int     ff_n_ranges = 0;
+static uint16_t ff_lo[DSP_IDLE_FF_MAX_RANGES];
+static uint16_t ff_hi[DSP_IDLE_FF_MAX_RANGES];
+static uint64_t ff_hits = 0;
+
+static void __attribute__((noinline, cold)) dsp_idle_ff_init(void)
+{
+    {
         const char *e = calypso_getenv("CALYPSO_DSP_IDLE_FF");
         ff_enabled = (!e || *e != '0') ? 1 : 0;
         /* Defaults: two empirically observed dispatcher loops in the
@@ -66,6 +129,11 @@ static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
         C54_LOG("DSP IDLE FF: %s, ranges=[%s]",
                 ff_enabled ? "enabled" : "disabled", buf);
     }
+}
+
+static inline bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
+{
+    if (__builtin_expect(ff_enabled < 0, 0)) dsp_idle_ff_init();
     if (!ff_enabled) return false;
     bool in_range = false;
     for (int i = 0; i < ff_n_ranges; i++) {
@@ -532,6 +600,11 @@ int c54x_run(C54xState *s, int n_insns)
     static int run_num = 0;
     run_num++;
 
+    /* [2026-09-23] Sondes de tete (une passe par appel, mais le banc et le
+     * rejeu appellent c54x_run par tranches de 1 a 64 instructions) : toutes
+     * pures, derriere l'interrupteur. */
+    if (__builtin_expect(c54x_sondes < 0, 0)) c54x_sondes_resoudre();
+    if (C54X_SONDES) {
     /* SP history ring buffer (64 entries × insn/PC/SP). Sampled every
      * 1M insns at top of run-loop. Dumped on STATE-DUMP. Reveals whether
      * SP descends monotonically (cumulative leak — each ISR entry leaks
@@ -989,8 +1062,10 @@ int c54x_run(C54xState *s, int n_insns)
             }
         }
     }
+    }   /* C54X_SONDES : sondes de tete */
 
     while (executed < n_insns && s->running && !s->idle) {
+        unsigned it_avant = g_c54x_it_prises;   /* [2026-09-23] ANNEAU-EXEC */
         /* Cold-reset redirect to the firmware entry point, off by default.
          * The PROM dump does not contain the Calypso silicon mask-ROM, which
          * on real hardware runs at reset, sets SP=0x5AC8 plus the MMRs and
@@ -1119,6 +1194,9 @@ int c54x_run(C54xState *s, int n_insns)
                 s->pc = 0xc704;
             }
         }
+        /* [2026-09-23] Sondes pures D247-TRACE .. PROM3-VISIT, derriere
+         * l'interrupteur (aucune n'ecrit l'etat du DSP). */
+        if (C54X_SONDES) {
         /* D247-TRACE (read-only). 0xd247 has exactly one native caller, PROM0
          * 0x7102, inside the operational block 0x70ce-0x7106. These probes
          * force nothing:
@@ -1444,6 +1522,7 @@ int c54x_run(C54xState *s, int n_insns)
             }
         }
         }   /* !c54x_rapide */
+        }   /* C54X_SONDES : D247-TRACE .. PROM3-VISIT */
         /* Top-of-loop SP chokepoint. The end-of-loop SP hook is bypassed by
          * every instruction that exits early (goto unimpl, return, continue, a
          * handler that leaves the dispatch chain): the SP write happens but is
@@ -1585,6 +1664,7 @@ int c54x_run(C54xState *s, int n_insns)
                  * s->pc is overwritten by the vector. */
                 g_last_intr_insn = s->insn_count; g_last_intr_vec = vec;
                 g_last_intr_fg_pc = (uint16_t)s->pc; g_last_intr_fg_dp = dp(s);
+                g_c54x_it_prises++;   /* [2026-09-23] diagnostic ANNEAU-EXEC */
                 s->xpc = 0;
                 uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
                 s->pc = (iptr * 0x80) + vec * 4;
@@ -1601,6 +1681,9 @@ int c54x_run(C54xState *s, int n_insns)
         pc_ring[pc_ring_idx & 255] = s->pc;
         pc_ring_idx++;
 
+        /* [2026-09-23] Sondes pures HIT-b906 .. HOT-OPS (INTM-TRANS, SP-WATCH,
+         * SP-DRAIN, CALLSITE, XPC-WR, AR2-WR, histogrammes de PC, ...). */
+        if (C54X_SONDES) {
         /* Push counter at PC=0xb906. Logs at powers of ten to track the
          * cadence; SP is captured at the hit. */
         {
@@ -2135,16 +2218,22 @@ int c54x_run(C54xState *s, int n_insns)
                         s->ar[4], s->ar[5], s->ar[6], s->ar[7]);
             }
         }
+        }   /* C54X_SONDES : HIT-b906 .. HOT-OPS */
 
         /* Track SP changes inside RPTB loops */
         uint16_t sp_before = s->sp;
         /* Snapshot for the transfer ring, the A-write ring and the NOP-region
-         * guard. */
+         * guard. [2026-09-23] pre_op ne sert qu'au bloc !c54x_rapide de fin de
+         * boucle : plus de prog_fetch quand ce bloc est coupe. Sous C54X_SONDES
+         * on le garde, pour que le message d'armement OVLY-SCRATCH (premier
+         * appel de c54x_ovly_bas) sorte au meme endroit qu'avant. */
         uint16_t pre_pc  = s->pc;
         uint8_t  pre_xpc = s->xpc & 0x3;
-        uint16_t pre_op  = prog_fetch(s, s->pc);
+        uint16_t pre_op  = (c54x_rapide && !C54X_SONDES) ? 0 : prog_fetch(s, s->pc);
         int64_t  pre_a   = s->a;
 
+        /* [2026-09-23] Sondes pures EB04 .. BOOT trace, derriere l'interrupteur. */
+        if (C54X_SONDES) {
         /* EB04 loop: dump the first 20 iterations. */
         if (s->pc == 0xEB04) {
             static int eb04_log = 0;
@@ -2345,10 +2434,13 @@ int c54x_run(C54xState *s, int n_insns)
                     51 - g_boot_trace, s->pc, prog_fetch(s, s->pc), s->sp, s->pmst);
             g_boot_trace--;
         }
+        }   /* C54X_SONDES : EB04 .. BOOT trace */
 
         /* Execute the instruction. */
         int consumed;
         uint16_t exec_pc = s->pc;
+        /* [2026-09-23] Sondes pures FIRS-BANK, CORR-SLIDE, TERMINAL-DISP. */
+        if (C54X_SONDES) {
         /* FIRS-BANK (CALYPSO_FIRS_BANK, default OFF, read-only). Is the PROM0
          * polyphase filter bank entered through its prologue or in the middle?
          * Eight FIRS in four pairs (pmad 0x64, 0x63, 0x62, 0x61), preceded by
@@ -2443,14 +2535,17 @@ int c54x_run(C54xState *s, int n_insns)
                         s->data[0x4387], s->data[0x43c0],
                         (unsigned long long)(s->a & 0xFFFFFFULL), s->sp, s->insn_count);
         }
+        }   /* C54X_SONDES : FIRS-BANK .. TERMINAL-DISP */
         /* OVLY-TRACE: the frame handler 0x013b..0x0160 (DARAM overlay) derails
          * at the RET in 0x0157 with an empty stack. Traces pc/op/sp of the
          * first pass and dumps the overlay contents, to locate the imbalance
          * (a PSHM with no matching POPM, or a branch wrongly taken before the
-         * POPMs). One-shot, one frame. */
+         * POPMs). One-shot, one frame.
+         * [2026-09-23] La sonde (OVLY-DUMP / OVLY-TRACE) passe derriere
+         * l'interrupteur ; la bequille TEST_3FCD qu'elle contient reste active. */
         if (exec_pc >= 0x0100 && exec_pc <= 0x0160) {
             static unsigned ot = 0; static int dumped = 0;
-            if (!dumped) {
+            if (C54X_SONDES && !dumped) {
                 dumped = 1;
                 fprintf(stderr, "[c54x] OVLY-DUMP data[0x0100..0x0160]:");
                 for (int a = 0x0100; a <= 0x0160; a++) fprintf(stderr, " %04x", s->data[a]);
@@ -2479,7 +2574,7 @@ int c54x_run(C54xState *s, int n_insns)
                     s->data[0x3fcd] = s->data[0x3fce];
                 }
             }
-            if (ot++ < 90)
+            if (C54X_SONDES && ot++ < 90)
                 fprintf(stderr, "[c54x] OVLY-TRACE pc=0x%04x op=0x%04x sp=0x%04x A=0x%06llx insn=%u\n",
                         exec_pc, prog_fetch(s, exec_pc), s->sp,
                         (unsigned long long)(s->a & 0xFFFFFFULL), s->insn_count);
@@ -2506,6 +2601,9 @@ int c54x_run(C54xState *s, int n_insns)
                 s->data[0x435b] = calypso_getenv("CALYPSO_SEED_52FD") ? 0x52fd : 0x52ed;   /* default 0x52ed: without bit 4 (TINT), which avoids the firmware clobber at 0xa509 that strips bit 12 (frame). 0x52fd sets bit 4 and breaks the frame, which shows the firmware does not use TINT0 */
             }
         }
+        /* [2026-09-23] Sondes pures SM-TRACE .. A4CD-BC (dont CALA-WIDE, qui
+         * faisait un prog_fetch a chaque instruction de PROM0). */
+        if (C54X_SONDES) {
         /* SM-TRACE: full path of the go-live state machine 0xa4e4-0xa5b5 once
          * d_dsp_page is aligned - where does it branch or loop back? The
          * deciding values are d_dsp_page (0x3fb0), data[0x09bc] (ARM flag) and
@@ -2677,6 +2775,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->data[s->data[0x434e] & 0xFFFF], s->data[s->data[0x434f] & 0xFFFF],
                         s->data[0x3f70], s->insn_count);
         }
+        }   /* C54X_SONDES : SM-TRACE .. A4CD-BC */
         if (exec_pc == 0xb40f) {
             /* @BEQUILLE - MASKROM_GOLIVE  (CALYPSO_MASKROM_GOLIVE, EXISTS, default OFF)
              *   masks   : the launch vector mem[0x5ac8] at the stack base, pre-loaded on
@@ -2701,10 +2800,43 @@ int c54x_run(C54xState *s, int n_insns)
             }
         }
         uint16_t exec_op = prog_fetch(s, s->pc);
+        /* [2026-09-23] AR5-BAS : en communication, 0xeac9 `MVDD *AR2+,*AR5+`
+         * (sous RPT #16) ecrase SP (SP-CORRUPT sp 0x5ac0 -> 0x0004) : AR5
+         * pointait sur les MMR. AR5 vient de l'appelant (PDROM 0xe88d..0xe8a9 :
+         * MVDM 0x2d0d,AR5 puis CALLD 0xea0c, MAR *+AR5(lk) en creneau). On
+         * photographie l'etat AVANT l'execution, quand AR5 est aberrant. */
+        if (exec_pc == 0xeac9 && s->ar[5] < 0x0100) {
+            static unsigned ar5b_n = 0;
+            if (ar5b_n++ < 8) {
+                uint16_t sp = s->sp;
+                fprintf(stderr,
+                    "[c54x] AR5-BAS pc=0xeac9 insn=%u AR0=%04x AR1=%04x AR2=%04x AR3=%04x "
+                    "AR4=%04x AR5=%04x AR6=%04x AR7=%04x BK=%04x SP=%04x "
+                    "pile=%04x %04x %04x %04x data[2d0d]=%04x rpt=%d/%u XPC=%u\n",
+                    s->insn_count, s->ar[0], s->ar[1], s->ar[2], s->ar[3],
+                    s->ar[4], s->ar[5], s->ar[6], s->ar[7], s->bk, sp,
+                    s->data[sp], s->data[(uint16_t)(sp + 1)],
+                    s->data[(uint16_t)(sp + 2)], s->data[(uint16_t)(sp + 3)],
+                    s->data[0x2d0d], s->rpt_active, (unsigned)s->rpt_count,
+                    (unsigned)s->xpc);
+            }
+        }
+        /* [2026-09-23] ANNEAU-EXEC : etat AVANT l'instruction (voir
+         * sp_corrupt_vidage). Evalue a chaque passage, donc a chaque iteration
+         * de RPT, comme AR5-BAS juste au-dessus. */
+        C54xAnneauExec *ev_anneau = &g_anneau_exec[g_anneau_exec_idx++ & 63];
+        ev_anneau->insn = s->insn_count; ev_anneau->pc = exec_pc; ev_anneau->op = exec_op;
+        ev_anneau->xpc = (uint8_t)s->xpc; ev_anneau->sp = s->sp; ev_anneau->sp_apres = s->sp;
+        ev_anneau->ar2 = s->ar[2]; ev_anneau->ar5 = s->ar[5];
+        ev_anneau->rpt = s->rpt_active; ev_anneau->rpt_count = s->rpt_count;
+        ev_anneau->intm = !!(s->st1 & ST1_INTM);
+        ev_anneau->it = 0; ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
         /* Repeat state BEFORE execution: tells "the repeat was already
          * active" from "the instruction just executed IS the RPT that armed
          * it". Consumed by the RPT block at the end of the loop. */
         bool rpt_was_active = s->rpt_active;
+        /* [2026-09-23] Sondes pures FBWATCH-*, derriere l'interrupteur. */
+        if (C54X_SONDES) {
         /* FBWATCH-ALIVE canary: proves the probe family is armed, and samples
          * the foreground PC. If this line appears, g_fbwatch_on is 1 and the
          * silence of the other FBWATCH probes is real; if it does not, they
@@ -2756,6 +2888,7 @@ int c54x_run(C54xState *s, int n_insns)
                 fprintf(stderr, "[c54x] FBWATCH-DISP #%u insn=%u A_handler=0x%04x DP=0x%03x SP=0x%04x\n",
                         wdp, s->insn_count, (uint16_t)(s->a & 0xffff), s->st0 & 0x1FF, s->sp);
         }
+        }   /* C54X_SONDES : FBWATCH-* */
         /* CORR-ENTRY tracker (CALYPSO_CORRELATOR_TRACE=1): captures the
          * out -> in transition of the FB-det range [0x8d00..0x9000). */
         if (!c54x_rapide) {
@@ -2791,6 +2924,8 @@ int c54x_run(C54xState *s, int n_insns)
         static int64_t  p_last_a_val   = 0;
         int64_t a_before_exec = s->a;
 
+        /* [2026-09-23] Sondes pures CALA-70C3, derriere l'interrupteur. */
+        if (C54X_SONDES) {
         if (s->pc == 0x70c1) p70c1_counter++;
 
         if (s->pc == 0x70c3 && !p70c3_first) {
@@ -2821,6 +2956,7 @@ int c54x_run(C54xState *s, int n_insns)
                     pc_ring[(pc_ring_idx-5)&255],  pc_ring[(pc_ring_idx-4)&255],
                     pc_ring[(pc_ring_idx-3)&255],  pc_ring[(pc_ring_idx-2)&255]);
         }
+        }   /* C54X_SONDES : CALA-70C3 */
 
         {
             /* DISP-ENTRY: predecessor = the PC executed on the previous
@@ -2833,6 +2969,8 @@ int c54x_run(C54xState *s, int n_insns)
             s_last_run_op = exec_op;
         }
 
+        /* [2026-09-23] Sondes pures AR3-TRIP .. LOOPTRACE. */
+        if (C54X_SONDES) {
         /* AR3-TRIP: catches the FIRST instruction that moves AR3 by a large
          * step. At this point s->ar[3] holds the result of the instruction
          * that just ran, i.e. g_prev_pc / g_prev_op. Legitimate
@@ -2963,6 +3101,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->data[(uint16_t)(s->sp+1)], s->insn_count);
             }
         }
+        }   /* C54X_SONDES : AR3-TRIP .. LOOPTRACE */
 
         {
             /* @BEQUILLE - SEED_5AC8 (+ SEED5AC8_VAL)  (CALYPSO_SEED5AC8, atoi>0, default
@@ -3002,6 +3141,8 @@ int c54x_run(C54xState *s, int n_insns)
                 s->data[0x5ac8] = (uint16_t)sval;
             }
         }
+        /* [2026-09-23] Sondes pures GOLIVE-WATCH .. IMR-DYN. */
+        if (C54X_SONDES) {
         /* GOLIVE-WATCH (ungated): does the firmware ever reach the go-live
          * routine (0xa4c9..0xa520) or the trampoline 0x71f4? Logs PC, opcode,
          * INTM, IMR and the soft-vector data[0x3f6d]. 120 lines. */
@@ -3129,6 +3270,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->prog[(uint16_t)(exec_pc + 1)],
                         (s->st1 & ST1_INTM) ? 1 : 0, s->insn_count);
         }
+        }   /* C54X_SONDES : GOLIVE-WATCH .. IMR-DYN */
         {
             /* @BEQUILLE - KEEP_IMR (+ KEEP_IMR_VAL)  (CALYPSO_KEEP_IMR, EXISTS, default 1
              *              in hack/native/native_helped/wire; fallback value 0x52fd)
@@ -3175,7 +3317,9 @@ int c54x_run(C54xState *s, int n_insns)
             { static int fg = -1; if (fg < 0) { const char *e = calypso_getenv("CALYPSO_FORCE_GOLIVE"); fg = (e && atoi(e) > 0) ? 1 : 0; }
               if (fg && !(fl & 0x0002)) { s->data[0x3f70] = (uint16_t)(fl | 0x0002); fl = s->data[0x3f70];
                 static unsigned fgc = 0; if (fgc++ < 8) fprintf(stderr, "[c54x] FORCE-GOLIVE 0x3f70 |= bit1 -> 0x%04x insn=%u\n", fl, s->insn_count); } }
-            if ((fl & 0x0002) || fl != last) {
+            /* [2026-09-23] WAIT-TEST (sonde) derriere l'interrupteur ;
+             * FORCE_GOLIVE ci-dessus reste active. */
+            if (C54X_SONDES && ((fl & 0x0002) || fl != last)) {
                 if (wt++ < 60)
                     fprintf(stderr, "[c54x] WAIT-TEST PC=0xa4d4 data[0x3f70]=0x%04x bit1=%d "
                             "insn=%u\n", fl, !!(fl & 2), s->insn_count);
@@ -3277,7 +3421,7 @@ int c54x_run(C54xState *s, int n_insns)
          * in A. Logs A just before the CALA, to tell whether this dispatcher
          * ever calls anything other than a no-op stub - the same closed
          * self-referential loop as data[0x4387] -> 0xab38. */
-        if (exec_pc == 0x71da) {
+        if (C54X_SONDES && exec_pc == 0x71da) {   /* [2026-09-23] sonde pure */
             static int cala_en = -1;
             if (cala_en < 0) cala_en = calypso_gate("CALYPSO_CALA_71DA", 0);
             if (cala_en) {
@@ -3386,6 +3530,8 @@ int c54x_run(C54xState *s, int n_insns)
                             exec_pc, s->data[0x3f92], s->insn_count);
             }
         }
+        /* [2026-09-23] Sondes pures SM-TRACE .. PBRET. */
+        if (C54X_SONDES) {
         /* SM-TRACE (CALYPSO_SM_TRACE): instruction-by-instruction trace of the
          * handshake state machine 0xdde0-0xde9f (the re-clear route at 0xde8b
          * versus the setter at 0xde9c). Shows PC, opcode, A, TC and the five
@@ -3588,6 +3734,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->data[(uint16_t)(s->sp+2)], s->data[(uint16_t)(s->sp+3)],
                         s->data[(uint16_t)(s->sp+4)], s->insn_count);
         }
+        }   /* C54X_SONDES : SM-TRACE .. PBRET */
 
         {
             /* @BEQUILLE - GOLIVE_REDIRECT  (CALYPSO_DSP_GOLIVE_BOOT, EXISTS, default OFF)
@@ -3614,6 +3761,8 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        /* [2026-09-23] Sondes pures DERAIL-ZERO, DERAIL-ORIGIN. */
+        if (C54X_SONDES) {
         /* DERAIL-ZERO: entering 0x0000-0x0008 means a CALA through a null
          * function pointer (an empty SARAM dispatcher slot). Logs the CALA site
          * (g_prev_pc), the accumulators and the four ROM words BEFORE the CALA,
@@ -3675,6 +3824,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->insn_count);
             }
         }
+        }   /* C54X_SONDES : DERAIL-ZERO, DERAIL-ORIGIN */
         /* Silent capture of the LUT slot read at 0x834d
          * (LD (DP<<7|0x07)<<1,A). One compare per instruction and no log, so
          * no timing impact. Feeds the BLACKHOLE-CALA probe (self-CALA at
@@ -3694,8 +3844,8 @@ int c54x_run(C54xState *s, int n_insns)
         int64_t  sd_a0 = s->a, sd_b0 = s->b;
         uint16_t sd_ar5_0 = s->ar[5], sd_lhi = 0, sd_llo = 0;
         uint8_t  sd_sub = (exec_op >> 8) & 0xFF;
-        int sd_armed = (sd_sub == 0x5a || sd_sub == 0x5b
-                        || sd_sub == 0x5e || sd_sub == 0x5f);
+        int sd_armed = C54X_SONDES && (sd_sub == 0x5a || sd_sub == 0x5b
+                        || sd_sub == 0x5e || sd_sub == 0x5f);   /* [2026-09-23] sonde */
         if (sd_armed) {
             sd_lhi = s->data[s->ar[5]];
             sd_llo = s->data[(uint16_t)(s->ar[5] + 1)];
@@ -3707,7 +3857,7 @@ int c54x_run(C54xState *s, int n_insns)
          * emits 142 zeros on 7 of 12 SB jobs and sane values on the other 5.
          * Unlike the probes in c54x_mem.c, the PC printed here is the one
          * BEFORE the advance, so it is the instruction's real PC. */
-        {
+        if (C54X_SONDES) {   /* [2026-09-23] sonde pure */
             static int pi_init = 0; static long pi_lo = -1, pi_hi = -1, pi_max = 400, pi_n = 0;
             if (!pi_init) { pi_init = 1;
                 const char *l = calypso_getenv("CALYPSO_PISTE_LO"), *h = calypso_getenv("CALYPSO_PISTE_HI"),
@@ -3771,6 +3921,9 @@ int c54x_run(C54xState *s, int n_insns)
         uint16_t t_avant_piste = s->t; uint16_t pc_avant_piste = s->pc;
         int64_t a_avant_piste = s->a, b_avant_piste = s->b;
         consumed = c54x_exec_one(s);
+        ev_anneau->sp_apres = s->sp;                              /* [2026-09-23] ANNEAU-EXEC */
+        ev_anneau->it = (g_c54x_it_prises != it_avant);
+        ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
         /* [2026-09-21] OVERFLOW AND OVM. The core computed 40-bit results and
          * never set OVA/OVB nor honoured OVM (grep: OVM appeared in comments
          * only). On silicon every ALU/MAC/shift result that leaves the 32-bit
@@ -3803,7 +3956,10 @@ int c54x_run(C54xState *s, int n_insns)
          * window (CALYPSO_T_LO / CALYPSO_T_HI, in insns). Motivation: every
          * mpy of the SB chain computes T*Smem with T == 0 while the memory
          * operands are sane, so who loads T and when has to be measured, not
-         * guessed. */
+         * guessed.
+         * [2026-09-23] Sondes pures PISTE-T .. DECODE-AUDIT derriere
+         * l'interrupteur. */
+        if (C54X_SONDES) {
         {
             static int ti_init = 0; static long ti_lo = -1, ti_hi = -1;
             if (!ti_init) { ti_init = 1;
@@ -4046,6 +4202,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->insn_count);
             }
         }
+        }   /* C54X_SONDES : PISTE-T .. DECODE-AUDIT */
         /* INTM-TRANS: every toggle of the INTM bit (ST1 bit 11) with the PC
          * and opcode that caused it. Answers "does INTM ever reach 0, and if
          * so who re-arms it". Silent unless CALYPSO_INTM_TRANS is set. */
@@ -4190,6 +4347,9 @@ int c54x_run(C54xState *s, int n_insns)
             g_intm_prev_tr = intm_now_tr;
         }
 
+        /* [2026-09-23] Sondes pures SP event ring (g_spring, g_sp_ledger,
+         * SP-DANGER, ORPHAN) .. XPCWATCH, derriere l'interrupteur. */
+        if (C54X_SONDES) {
         /* SP event ring: records every SP change (push or pop) with the PC and
          * opcode responsible. Feeds the BLACKHOLE-CALA dump. */
         if (s->sp != sp_before_exec) {
@@ -4735,6 +4895,7 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        }   /* C54X_SONDES : SP event ring .. XPCWATCH */
         {   /* @BEQUILLE - FORCE_VEC  (CALYPSO_FORCE_VEC=<n>, VALUE, inert by default)
              *   masks   : the HARDWARE SOURCE of a DSP interrupt this model does not
              *             implement. Measured: the FB task arms
@@ -4790,6 +4951,9 @@ int c54x_run(C54xState *s, int n_insns)
                 c54x_interrupt_ex(s, _fv, _fvbit);
             }
         }
+        /* [2026-09-23] Sondes pures TRACEFROM .. TASKGO (SCANREF/SCANFB/SCAN43D8
+         * basculent s->xpc le temps du balayage et le restaurent). */
+        if (C54X_SONDES) {
         {   /* TRACEFROM (CALYPSO_TRACEFROM=<pc>): dumps the opcodes at that PC,
              * then follows the control flow from it, printing each
              * discontinuity, until one of the landmarks 0xa076 (MAC kernel),
@@ -5192,6 +5356,7 @@ int c54x_run(C54xState *s, int n_insns)
                     fprintf(stderr, "[c54x] TASKGO fin (250 pas) sans 0x7700 ; PC max vu=0x%04x\n", _hi); }
             }
         }
+        }   /* C54X_SONDES : TRACEFROM .. TASKGO */
         {   /* @BEQUILLE - DISPATCH_INSTALL  (CALYPSO_DISPATCH_INSTALL=0xNNNN,
              *              VALUE, unset by default = inert)
              *   masks   : the routine that ought to install a task handler in
@@ -5388,6 +5553,9 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        /* [2026-09-23] Sondes pures DISPCALL .. B2SEQ-IN. DARAM-DUMP (fichier
+         * /dev/shm lu par tools/corr_iq.py) reste hors interrupteur. */
+        if (C54X_SONDES) {
         {   /* DISPCALL: does the task dispatcher REALLY call the slot
              * data[0x43d8], and where does it land?
              *
@@ -5655,6 +5823,7 @@ int c54x_run(C54xState *s, int n_insns)
                     fprintf(stderr, " (%d,%d)", (int)(int16_t)s->data[0x2a00 + 2*_i], (int)(int16_t)s->data[0x2a00 + 2*_i + 1]);
                 fprintf(stderr, "\n"); }
         }
+        }   /* C54X_SONDES : DISPCALL .. B2SEQ-IN */
         {
             /* DARAM-DUMP (CALYPSO_DARAM_DUMP): writes the correlator input
              * buffer as binary IQ16, so tools/corr_iq.py --src bursts can
@@ -5761,6 +5930,8 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        /* [2026-09-23] Sondes pures DETECTOR-RUN .. BOOT-BRANCH. */
+        if (C54X_SONDES) {
         if (exec_pc == 0x9ac0) {
             /* B2SEQ (CALYPSO_B2SEQ): dumps 16 (I,Q) pairs from 0x2a00, the
              * real correlator input fed by the BSP/ADC. An Fs/4 pattern is
@@ -5902,13 +6073,14 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
+        }   /* C54X_SONDES : DETECTOR-RUN .. BOOT-BRANCH */
 
         /* INT3-CYCLE-TRACE (CALYPSO_INT3_CYCLE_TRACE=1): records the branch
          * decisions taken during the INT3 ISR cycle. */
         if (!c54x_rapide) int3_cycle_track_branch(s, exec_pc, exec_op, consumed);
 
         /* SP changes, logged only after init (insn > 490M). */
-        if (s->sp != sp_before && s->insn_count > 490000000) {
+        if (C54X_SONDES && s->sp != sp_before && s->insn_count > 490000000) {   /* [2026-09-23] sonde */
             static int sp_leak_log = 0;
             if (sp_leak_log < 100) {
                 C54_LOG("SP %+d PC=0x%04x op=0x%04x SP 0x%04x→0x%04x insn=%u",
@@ -6008,7 +6180,10 @@ int c54x_run(C54xState *s, int n_insns)
          *   (b) sp_low watermark: every new low, coalesced per PC on powers of
          *                        ten
          * Gated to insn > 33754, i.e. after the normal init stack move
-         * 0x9022 -> 0x5ac8. */
+         * 0x9022 -> 0x5ac8.
+         * [2026-09-23] Sondes pures (trail/sp_low, SP-CATASTROPHE) derriere
+         * l'interrupteur. */
+        if (C54X_SONDES) {
         {
             static int trap_armed = -1;
             if (trap_armed < 0) {
@@ -6099,6 +6274,7 @@ int c54x_run(C54xState *s, int n_insns)
                         s->insn_count);
             }
         }
+        }   /* C54X_SONDES : trail/sp_low, SP-CATASTROPHE */
         /* TRAP-OOR firing point: halt at a fixed insn checkpoint and dump the
          * trail plus sp_low, for offline analysis of the whole descent. No PC
          * whitelist and no SP edge can catch the clobber, because it lives in
@@ -6130,7 +6306,7 @@ int c54x_run(C54xState *s, int n_insns)
          * encoding (2-bit AR fields plus an offset of 2, AR2..AR5 only). When
          * the two disagree on which AR is used and SP-CATASTROPHE has just
          * fired, the encoding is the suspect. 100 entries. */
-        if ((exec_op & 0xFC00) == 0xC800 && (
+        if (C54X_SONDES && (exec_op & 0xFC00) == 0xC800 && (   /* [2026-09-23] sonde */
              (int32_t)(int16_t)(s->sp - sp_before) > 100 ||
              (int32_t)(int16_t)(s->sp - sp_before) < -100)) {
             static unsigned dop_log;
@@ -6235,6 +6411,15 @@ int c54x_run(C54xState *s, int n_insns)
                 if (wpn++ < 20)
                     fprintf(stderr, "[c54x] SP-CORRUPT pc=0x%04x op=0x%04x sp 0x%04x -> 0x%04x insn=%u\n",
                             exec_pc, exec_op, g_wp_prev_sp, s->sp, s->insn_count);
+                /* [2026-09-23] Vidage ANNEAU-EXEC + registres, 3 premiers
+                 * SP-CORRUPT. insn_count == 0 est l'artefact du reset
+                 * (g_wp_prev_sp demarre a 0x5ac8, le reset pose SP=0x1100) : exclu. */
+                static unsigned wpd = 0;
+                if (s->insn_count > 0 && wpd < 3) {
+                    wpd++;
+                    sp_corrupt_vidage(s, exec_pc, g_wp_prev_sp,
+                                      g_c54x_it_prises != it_avant);
+                }
             }
             g_wp_prev_sp = s->sp;
         }
@@ -6313,7 +6498,7 @@ int c54x_run(C54xState *s, int n_insns)
          * whose target short-circuits the IPTR write, which is then never
          * reached, from (b) the code reaching that write with no effect, which
          * would be an MMR bug. 700 lines. */
-        if (consumed == 0 && exec_pc != 0 && s->pc != 0 && s->insn_count < 6000) {
+        if (C54X_SONDES && consumed == 0 && exec_pc != 0 && s->pc != 0 && s->insn_count < 6000) {   /* [2026-09-23] sonde */
             static unsigned bt = 0;
             if (bt++ < 700) {
                 uint64_t aa = s->a & 0xFFFFFFFFFFULL;
@@ -6399,7 +6584,7 @@ int c54x_run(C54xState *s, int n_insns)
         /* SP-LEDGER: periodic dump to check that net_words tends to 0 over a
          * long run - the push/pop balance metric. About one compare per
          * instruction. */
-        if (s->insn_count - g_sp_ledger.last_dump_insn >= 20000000u) {
+        if (C54X_SONDES && s->insn_count - g_sp_ledger.last_dump_insn >= 20000000u) {   /* [2026-09-23] sonde */
             g_sp_ledger.last_dump_insn = s->insn_count;
             fprintf(stderr,
                 "[c54x] SP-LEDGER insn=%u PC=0x%04x SP=0x%04x net_words=%lld pushes=%llu pops=%llu irq=%llu\n",
@@ -6493,6 +6678,7 @@ C54xState *c54x_init(void)
 {
     C54xState *s = calloc(1, sizeof(C54xState));
     if (!s) return NULL;
+    c54x_sondes_resoudre();   /* [2026-09-23] interrupteur des sondes pures */
     return s;
 }
 
@@ -7011,6 +7197,7 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
             s->xpc = 0;                            /* fetch the vector from page 0 */
             uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
             s->pc = (iptr * 0x80) + vec * 4;
+            g_c54x_it_prises++;   /* [2026-09-23] diagnostic ANNEAU-EXEC */
             if (vec == 28) {
                 if (g_vec28_trace_en < 0)
                     g_vec28_trace_en = calypso_gate("CALYPSO_TRACE_VEC28_STACK", 0);
@@ -7073,6 +7260,7 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
         s->xpc = 0;                                /* fetch the vector from page 0 */
         uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
         s->pc = (iptr * 0x80) + vec * 4;
+        g_c54x_it_prises++;   /* [2026-09-23] diagnostic ANNEAU-EXEC */
         if (vec == 28) {
             if (g_vec28_trace_en < 0)
                 g_vec28_trace_en = calypso_gate("CALYPSO_TRACE_VEC28_STACK", 0);

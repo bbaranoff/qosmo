@@ -65,6 +65,10 @@ bool c54x_irq_level_check(C54xState *s)
     if (calypso_rhea_dma_irq_level()) {
         s->ifr |= (1u << C54X_IT_DMA_BIT);
     }
+    /* [2026-09-23] Sondes pures LEVELCHK-DBG, LEVELCHK-EMPIRICAL,
+     * LEVELCHK-WINDOW (appelees a chaque instruction) : derriere
+     * l'interrupteur C54X_SONDES. La prise d'IT qui suit est inchangee. */
+    if (C54X_SONDES) {
     /* [2026-07-22] LEVELCHK-DBG (gated CALYPSO_AR0_DEBUG): with IMR != 0 (window
      * armed), report which gate keeps the frame IT from being taken - INTM vs
      * IPTR vs pend=0. */
@@ -158,6 +162,7 @@ bool c54x_irq_level_check(C54xState *s)
                     (unsigned long long)w_pend, (unsigned long long)w_ready,
                     s->insn_count);
     }
+    }   /* C54X_SONDES : LEVELCHK-* */
 
     if ((s->st1 & ST1_INTM) || s->delay_slots != 0) return false;
     /* Do not vector until the ROM has relocated IPTR: reset value 0x1ff puts the
@@ -194,6 +199,7 @@ bool c54x_irq_level_check(C54xState *s)
     s->xpc = 0;
     uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
     s->pc = (uint16_t)((iptr * 0x80) + vec * 4);
+    g_c54x_it_prises++;   /* [2026-09-23] diagnostic ANNEAU-EXEC */
     static unsigned lvln = 0;
     if (lvln++ < 60)
         fprintf(stderr, "[c54x] IRQ-LEVEL take bit=%d vec=%d -> PC=0x%04x "

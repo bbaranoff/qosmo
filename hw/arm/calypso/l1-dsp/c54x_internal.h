@@ -24,6 +24,26 @@
 
 #include "calypso_c54x.h"
 extern int c54x_rapide;   /* fast path, see calypso_c54x.h */
+/* [2026-09-23] Interrupteur des SONDES PURES (celles qui ne font que lire
+ * l'etat et journaliser ou compter). Le coeur tournait a ~9 M insn/s parce que
+ * des centaines de tests de PC, de compteurs statiques et de prog_fetch de
+ * diagnostic s'executaient a chaque instruction ; le temps reel en demande 13+.
+ * Resolu UNE fois (c54x_sondes_resoudre, appele par c54x_init et en tete de
+ * c54x_run) : CALYPSO_SONDES=1, ou CALYPSO_DEBUG non vide, ou -vvvv et plus
+ * dans c54x_exe (main.c le pose avant c54x_init). Defaut : coupe.
+ *   -1 = pas encore resolu (traite comme coupe par C54X_SONDES)
+ * Ce qui MODIFIE l'etat (@BEQUILLE, recalages, forcages, OVM, timer, IRQ) et
+ * ce qui alimente d'autres processus (/dev/shm, side-bands) reste HORS de cet
+ * interrupteur, execute tel quel et dans le meme ordre. Avec CALYPSO_SONDES=1
+ * la sortie est identique a celle d'avant l'interrupteur. */
+extern int c54x_sondes;
+void c54x_sondes_resoudre(void);
+#define C54X_SONDES (__builtin_expect(c54x_sondes > 0, 0))
+/* [2026-09-23] Compteur des interruptions PRISES (vectorisees), tous chemins :
+ * rejeu en tete de c54x_run, c54x_irq_level_check, c54x_interrupt_ex. Pur
+ * compteur de diagnostic, toujours tenu (une incrementation par IT prise) ; il
+ * dit a l'anneau ANNEAU-EXEC si une IT a ete prise dans l'instruction courante. */
+extern unsigned g_c54x_it_prises;
 #include "calypso_rif.h"
 #include "calypso_rhea_dma.h"
 #include "hw/arm/calypso/calypso_xio.h"   /* SAM/HOM arbitration */
@@ -418,6 +438,29 @@ extern uint16_t g_arm_taskmd5_ea;
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
 uint16_t prog_read(C54xState *s, uint32_t addr);
 uint16_t c54x_ovly_bas(void);
+
+/* [2026-09-23] prog_fetch en ligne pour le chemin chaud (5,5 appels par
+ * instruction mesures, chacun double d'un appel a c54x_ovly_bas). Copie EXACTE
+ * de prog_fetch + c54x_prog_xlate (c54x_mem.c) : alias OVLY vers data[] au-dessus
+ * du plancher, fenetre 0x8000-0xDFFF banquee par XPC, le reste non banque. Le
+ * plancher OVLY est lu dans g_c54x_ovly_bas, pose par le premier appel de
+ * c54x_ovly_bas() (qui garde son message d'armement au meme instant). La
+ * fonction prog_fetch reste exportee (pont.c l'appelle) ; c54x_mem.c la definit
+ * apres un #undef. */
+extern uint16_t g_c54x_ovly_bas;   /* 0 = pas encore resolu */
+static inline uint16_t c54x_prog_fetch_vite(C54xState *s, uint16_t pc)
+{
+    if (s->pmst & PMST_OVLY) {
+        uint16_t bas = __builtin_expect(g_c54x_ovly_bas != 0, 1)
+                       ? g_c54x_ovly_bas : c54x_ovly_bas();
+        if (pc >= bas && pc < 0x2800)
+            return s->data[pc];
+    }
+    if (pc >= 0x8000 && pc < 0xE000)
+        return s->prog[(((uint32_t)s->xpc << 16) | pc) & (C54X_PROG_SIZE - 1)];
+    return s->prog[pc];
+}
+#define prog_fetch(s, pc) c54x_prog_fetch_vite((s), (pc))
 
 void a_track_init_lazy(void);
 void a_track_iter(C54xState *s, uint16_t prev_pc, uint16_t prev_op);

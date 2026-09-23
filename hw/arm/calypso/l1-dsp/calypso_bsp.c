@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include "qemu/timer.h"
 #include "calypso_bsp.h"
 #include "calypso_rhea_dma.h"
@@ -1871,6 +1872,83 @@ static void bsp_livrer_trame(uint32_t fn)
     { static unsigned nl; if (nl++ < 3) BSP_LOG("STREAM trame fn=%u livree (%s)", fn, one_shot ? "fenetre SB, TS0 + marges" : "8 TS, 1250 symboles"); }
 }
 
+/* [2026-09-23] ATTENDRE LA TRAME EN RETARD PLUTOT QUE LA TROUER.
+ *
+ * osmo-bts-trx bat ses trames sur son propre timer et se recale sur chaque
+ * IND CLOCK du pont (toutes les 51 trames) : il cale, puis rattrape d'un bloc.
+ * Les trames d'une meme phase de la multitrame arrivent donc APRES que le DSP
+ * les reclame, et bsp_ts0_service() les remplace par un effacement. Releve du
+ * 2026-09-23 14:50, SDCCH/8 SS=4 : « canal dedie (TS1) : trame fn=99109..99112
+ * perdue, aucun burst du BTS », puis 99211..99214, 99313..99316 -- le bloc
+ * descendant du mobile (fn%51 = 16..19) un sur deux ; l'UA ne passait jamais
+ * (« I frame ignored in state SABM_SENT », T200).
+ *
+ * La BTS est asservie au DSP (pont/dsp/clock.py) : attendre quelques
+ * millisecondes qu'elle livre ne cree pas de derive, ca cale le DSP sur elle.
+ * On n'attend que si la trame reclamee est DEVANT la derniere recue (la BTS est
+ * en retard, la trame va arriver) et de moins de 200 trames ; sinon (burst
+ * disparu, ou calage perdu) on garde le comportement d'avant.
+ * CALYPSO_BSP_ATTENTE_MS : 0 (defaut, QEMU inchange) = pas d'attente ;
+ * c54x_exe/run.sh pose 40 en MODE=dsp. */
+static void bsp_attendre_trame(uint32_t tick_fn)
+{
+    static int max_ms = -1;
+    static unsigned long attentes, servies, echues;
+    static double total_ms;
+    if (max_ms < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_ATTENTE_MS");
+        max_ms = e ? atoi(e) : 0;
+        if (max_ms > 0) {
+            printf("  [ts0] attente des trames en retard de la BTS : jusqu'a %d ms\n", max_ms);
+        }
+    }
+    if (max_ms <= 0 || !g_ts0 || !g_ts0_any || g_ts0_offset == INT64_MIN || bsp.trxd_fd < 0) {
+        return;
+    }
+    int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX;
+    if (w < 0) w += BSP_FN_MAX;
+    unsigned i = (unsigned)w % BSP_TS0_RING;
+    if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) {
+        return;
+    }
+    int32_t devant = (int32_t)((uint32_t)w - g_ts0_fn_max);
+    if (devant <= 0 || devant > 200) {
+        return;
+    }
+    attentes++;
+    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t fin = t0 + (int64_t)max_ms * 1000000;
+    bool servie = false;
+    for (;;) {
+        int64_t reste = fin - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (reste <= 0) {
+            break;
+        }
+        struct pollfd p = { .fd = bsp.trxd_fd, .events = POLLIN };
+        if (poll(&p, 1, (int)((reste + 999999) / 1000000)) <= 0) {
+            break;
+        }
+        for (int k = 0; k < 256; k++) {
+            unsigned long long avant = bsp.bursts_seen;
+            bsp_trxd_readable(NULL);
+            if (bsp.bursts_seen == avant) break;
+        }
+        if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) {
+            servie = true;
+            break;
+        }
+    }
+    double ms = (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0) / 1e6;
+    total_ms += ms;
+    if (servie) servies++; else echues++;
+    if (attentes <= 10 || attentes % 1000 == 0) {
+        printf("  [ts0] attente %lu : fn=%u (%+d devant la BTS) %s en %.1f ms "
+               "(servies=%lu echues=%lu, %.0f ms au total)\n",
+               attentes, (uint32_t)w, devant, servie ? "arrivee" : "ECHUE", ms,
+               servies, echues, total_ms);
+    }
+}
+
 int calypso_bsp_service(uint32_t current_fn)
 {
     int n = 0;
@@ -1895,6 +1973,7 @@ int calypso_bsp_service(uint32_t current_fn)
         /* [2026-09-21] FN-keyed TS0 store (bsp_ts0_service): arrival order
          * until an SB fixes the ARM/tick offset, then the burst of the ARM's
          * frame at every tick. */
+        bsp_attendre_trame(current_fn);
         bsp_ts0_service(current_fn);
         return n;
     }
