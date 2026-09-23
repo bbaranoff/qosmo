@@ -13,6 +13,11 @@
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
+/* Fournies par QEMU (calypso_trx.c, calypso_inth.c) ou par les cales de
+ * c54x_exe (src/main.c). Sans prototype, l'appel etait implicite (int). */
+extern uint32_t calypso_trx_get_fn(void);
+extern void calypso_inth_arm_ack(void);
+
 int c54x_rapide = 0;
 
 static bool dsp_idle_fast_forward(C54xState *s, int *consumed_out)
@@ -6551,7 +6556,7 @@ bool c54x_early_booted(void)
  *   d_task_md, page 0 = data[0x0804], page 1 = data[0x0818]. */
 uint16_t c54x_task_md(C54xState *s)
 {
-    if (!s || !s->data) {
+    if (!s) {
         return 0;
     }
     uint16_t md = s->data[0x0804];
@@ -7112,7 +7117,6 @@ void c54x_wake(C54xState *s)
 /* Declared at FILE scope, to avoid -Wnested-externs. */
 extern void calypso_twl3025_apply_phase(int16_t *iq_samples, int n_samples,
                                         uint32_t fn, uint8_t tn);
-extern uint32_t calypso_trx_get_fn(void);
 /* c54x_task_md(): declared in calypso_c54x.h, defined earlier in this file. */
 
 void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)

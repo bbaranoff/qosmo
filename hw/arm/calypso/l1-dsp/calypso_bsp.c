@@ -49,6 +49,9 @@ static int rach_force_bsic(void);
 #include "hw/arm/calypso/calypso_debug.h"
 #include "calypso_gmsk.h"
 
+/* calypso_api.h le declare, mais tire tout l'etat QEMU : prototype seul. */
+extern uint32_t calypso_trx_get_fn(void);
+
 /* DARAM write stamp, published for the c54x memory dump. */
 unsigned calypso_daram_last_fn;
 /* [2026-09-19] fn du dernier burst effectivement remis au BSP, pour mesurer
@@ -700,6 +703,12 @@ static const uint8_t *bsp_autres_bits(uint32_t fn, unsigned tn)
     return g_autres[i].bits[tn - 1];
 }
 static int g_dedie_tn = -1, g_dedie_ss;
+/* [2026-09-22] genre du canal dedie : 0 = SDCCH/4, 1 = SDCCH/8,
+ * BSP_DEDIE_TCH = TCH -- sur un TCH TOUTES les trames de l'intervalle sont
+ * a la connexion (multitrame de 26 : 24 trafic + 1 SACCH + 1 libre), pas
+ * seulement les blocs d'un sous-canal. */
+#define BSP_DEDIE_TCH 2
+static int g_dedie_genre = 1;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
 /* [2026-09-22] g_dedie_perdues : les trames dediees que bsp_ts0_service() saute
  * ENTIEREMENT, faute de burst du BTS pour la trame reclamee. Elle repart par un
@@ -727,6 +736,9 @@ static unsigned long g_dedie_perdues;
  *                      i = 4..7   : memes trames, multitrame impaire. */
 static bool bsp_dedie_trame(uint32_t fn)
 {
+    if (g_dedie_genre == BSP_DEDIE_TCH) {
+        return true;    /* TCH : tout l'intervalle est a la connexion */
+    }
     unsigned p51 = fn % 51u;
     unsigned ss = (unsigned)g_dedie_ss & 7u;
     if (p51 >= 4u * ss && p51 <= 4u * ss + 3u) {
@@ -787,7 +799,13 @@ void calypso_bsp_set_dedie(int tn, int genre, int ss)
     }
     g_dedie_tn = tn;
     g_dedie_ss = ss;
+    g_dedie_genre = genre;
     bsp_dedie_etat("arme");
+    if (genre == BSP_DEDIE_TCH) {
+        BSP_LOG("canal dedie arme : TCH TS%d - TOUTES ses trames remplacent TS0", tn);
+        printf("  [ts0] canal dedie arme : TCH TS%d (toutes les trames)\n", tn);
+        return;
+    }
     BSP_LOG("canal dedie arme : SDCCH/%d SS=%d TS%d - ses bursts remplacent TS0 sur les "
             "trames du canal (fn%%51 = %u-%u et SACCH %u-%u), TS0 ailleurs",
             genre ? 8 : 4, ss, tn, 4u * ((unsigned)ss & 7u), 4u * ((unsigned)ss & 7u) + 3u,
@@ -946,6 +964,23 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
     if (total > 256) total = 256;
+    if (sb) {
+        /* [2026-09-22] SONDE : la SB arrive-t-elle dans une VRAIE fenetre SB ?
+         * Le calage de g_ts0_offset et la marge de 21 echantillons exigent
+         * nwin >= 190 (fenetre de 382 mots). Mesure prealable : les fenetres
+         * demandees font 151 et 64, jamais 382. Si c'est le cas, la SB est
+         * cadree comme un burst normal (marge 3) et le calage ne se fait pas
+         * par ce chemin. On compte les deux cas. */
+        static unsigned n_sb, n_sb_fenetre;
+        n_sb++;
+        if (one_shot && nwin >= 190) n_sb_fenetre++;
+        if (n_sb <= 20 || n_sb % 50 == 0) {
+            printf("  [sbwin] SB #%u : one_shot=%d nwin=%d marge=%d -> %s (dans une vraie fenetre SB : %u/%u)\n",
+                   n_sb, one_shot, nwin, marge,
+                   (one_shot && nwin >= 190) ? "FENETRE SB" : "cadree comme un burst normal",
+                   n_sb_fenetre, n_sb);
+        }
+    }
     if (sb && one_shot && nwin >= 190) {
         int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;
         if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
