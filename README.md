@@ -72,6 +72,64 @@ d'adaptation tient dans
 qui ne fait que remplir la structure. Si la couture avait été mal placée, il
 aurait fallu retoucher la L1 elle-même.
 
+La couture sait aussi se retirer : `calypso_l1_disable(why)`
+([`calypso_l1_ops.h:138`](include/hw/arm/calypso/calypso_l1_ops.h)) neutralise
+la L1 liée quand `CALYPSO_DSP_EXTERN` est posé. Le tap DCCH
+([`calypso_dcch_tap.c`](hw/arm/calypso/calypso_dcch_tap.c)), qui ne dépend
+d'aucune L1, remplace alors `calypso_l1ctl_tap.c` pour publier le canal dédié.
+
+## Le pont DSP externe
+
+C'est le chemin **réellement utilisé** sur le banc : la mask-ROM tourne dans
+`c54x_exe`, hors de QEMU, et `calypso_trx.c` lui parle par
+[`calypso_dsp_pont.h`](include/hw/arm/calypso/calypso_dsp_pont.h).
+
+- `CALYPSO_DSP_EXTERN=1` (ou un chemin de socket) désactive la L1 liée
+  (`calypso_l1_disable`) et branche QEMU sur `c54x_exe --arm`, **à lancer
+  d'abord** — sinon `shm_open(...) ... lancez d'abord c54x_exe --arm` et
+  `exit(1)`.
+- API RAM partagée par `/dev/shm/calypso_api_ram` (16 Ko), synchronisation
+  trame par trame sur `/tmp/calypso_dsp.sock` (`SOCK_SEQPACKET`).
+- Messages : `HELLO`/`HELLO_OK` (magic `'C54X'`), `RESET` (écriture de
+  `DL_STATUS`), `TICK` (a = fn, b = page), `DONE` (drapeaux IRQ/IDLE/INIT),
+  `GO`, `DCCH`.
+- `TICK.b` bit 16 : IRQ trame DSP armée par l'ARM — `TPU_CTRL_DSP_EN` est à
+  usage unique (`36efec9`, 2026-09-20) ; sans lui le DSP ne reçoit pas
+  d'interruption trame.
+- `TICK.b` bit 17 : TICK en deux phases (`255cdd6`, 2026-09-21) — ISR de la
+  ROM, `DONE|PONT_DONE_PHASE_A`, IRQ trame ARM et `l1_sync()`, puis `PONT_GO`
+  et seulement alors le burst. Avant, la page R du burst N écrasait le burst
+  N-2 sous l'ARM (`EMPTY` / `BURST ID n!=m`).
+- `PONT_DCCH` porte TN, genre et sous-voie du canal dédié — SDCCH/4 (0),
+  SDCCH/8 (1) ou libéré (`0xFF`) seulement. Il est appris par
+  `calypso_dcch_tap.c`, qui renifle les `L1CTL_DATA_CONF`/`DATA_IND` du flux
+  sercomm et publie `/dev/shm/calypso_dcch_cfg` ; ce fichier, lui, annonce
+  aussi le TCH (genre 2 = TCH/F, 3 = TCH/H, 2026-09-23), mais le TCH n'est pas
+  relayé par `PONT_DCCH` : la bascule du BSP sur le TCH suit la tâche du
+  firmware côté `c54x_exe`.
+
+Les sources de `l1-dsp/` se compilent aussi hors QEMU grâce à
+[`contrib/hors-qemu/cales-qemu.c`](contrib/hors-qemu/cales-qemu.c) :
+équivalents POSIX des quelques symboles QEMU dont le DSP dépend, plus les
+en-têtes de `contrib/hors-qemu/doublures/`. C'est ainsi que `c54x_exe` les
+construit, sans les recopier (`QOSMO ?= /opt/GSM/qosmo` dans son `Makefile`).
+
+### Variables d'environnement côté QEMU
+
+| variable (sur `qemu-system-arm`) | effet |
+|---|---|
+| `CALYPSO_DSP_EXTERN` | `1` ou chemin de socket : pont vers `c54x_exe` |
+| `CALYPSO_PONT_LOCKSTEP=1` | QEMU attend `DONE` à chaque trame — indispensable, le C54x émulé est plus lent que le temps réel |
+| `CALYPSO_PONT_ARM_FIRST=0` | ancien ordre, sans les deux phases |
+| `CALYPSO_PONT_RETRY_DIV` | réglage de mesure du pont (défaut 16, mesuré sans effet) |
+| `CALYPSO_CPU_KICK_NS` | période du kick CPU, réglage de mesure (défaut 5 ms, mesuré sans effet) |
+| `CALYPSO_PACER_RATTRAPAGE` | trames de retard rattrapées par le pacer TDMA (20 par défaut) ; `0` = ancienne grille stricte, qui sautait des trames |
+
+`CALYPSO_BSP_STREAM`, `CALYPSO_A5`, `CALYPSO_SONDES`, `CALYPSO_C54X_OVM`,
+`CALYPSO_MVKD_DMAD_AVANT`, `CALYPSO_HACK_SOFT_SCALE` sont lus par le code de
+`l1-dsp/` : avec le DSP externe, ils se posent sur **`c54x_exe`** (le
+processus du DSP), pas sur QEMU, où ils sont sans effet.
+
 ## Vérifier
 
 ```bash
@@ -106,24 +164,66 @@ ERROR: calypso: --enable-l1-grgsm et --enable-l1-dsp sont exclusives.
 
 | | |
 |---|---|
-| plateforme (SoC, TPU, TSP, SIM, ULPD, UART, timers, SPI/I²C, INTH, TRF6151) | ✅ construit et boote seule |
+| plateforme (SoC, TPU, TSP, SIM, ULPD, UART, timers, SPI/I²C, INTH, TRF6151, `calypso_l1_dispatch.c`, `calypso_dcch_tap.c`) | ✅ construit et boote seule ; l'INTH compte la fin de service (`IRQ_CTRL` bit 0 après `IRQ_NUM`=4) pour le TICK en deux phases |
 | couture `CalypsoL1Ops` | ✅ 9 points d'appel, vérifiée avec la L1 gr-gsm |
 | `--enable-l1-grgsm` | ✅ |
-| `--enable-l1-dsp` | 🔧 les 26 000 lignes du C54x compilent et se lient ; la couture n'est pas encore branchée |
+| `--enable-l1-dsp` (C54x dans QEMU) | 🔧 les ~28 600 lignes de `l1-dsp/` compilent et se lient ; la vtable reste vide (seul `.name = "c54x"`) |
+| DSP externe (`CALYPSO_DSP_EXTERN`) | ✅ mask-ROM dans `c54x_exe`, couplée à l'ARM par le pont ; SCH (BSIC/FN), BCCH SI1-4 et LU sur SDCCH atteints sur le banc ; appel TCH établi, SACCH en appel pas encore validée (LOS après ~20 s avant les correctifs du 2026-09-23) |
 | devices de la carte E88 | 🔧 présents, compilent, pas branchés — voir ci-dessous |
 
 Neuf devices (`calypso_iota.c`, `calypso_rf3166.c`, `calypso_asm4532.c`,
 `calypso_xio.c`, `calypso_debug.c`, `calypso_invariants.c`, `fw_console.c`,
 `sercomm_gate.c`, `l1ctl_sock.c`) sont construits **sous `--enable-l1-dsp`
 seulement**, parce que leur unique point d'entrée est
-`calypso_pcb_init()`, qui vit dans [`calypso_full_pcb.c`](https://github.com/bbaranoff/qosmo-dsp/blob/main/hw/arm/calypso/calypso_full_pcb.c)
-— resté dans `qosmo-dsp` — lequel prend un `C54xState*`. Les activer donnerait neuf fichiers de code mort — mesuré, aucun
+`calypso_pcb_init()`, qui vit dans
+[`l1-dsp/calypso_full_pcb.c`](hw/arm/calypso/l1-dsp/calypso_full_pcb.c) —
+désormais dans ce dépôt, avec `calypso_rif.c`, `calypso_rhea_dma.c`,
+`calypso_tint0.c` et `calypso_twl3025.c`, construit sous `--enable-l1-dsp` —
+lequel prend toujours un `C54xState*` (passé en `void *`) et n'est toujours appelé par personne
+(rien dans `calypso_soc_realize()`). Les activer donnerait neuf fichiers de code mort — mesuré, aucun
 appelant hors de l'îlot fermé que forment `calypso_asm4532.c` et
 `calypso_rf3166.c`, qui ne s'appellent que l'un l'autre.
 
 L'ordre pour les débloquer est dans
-[`hw/arm/calypso/meson.build`](hw/arm/calypso/meson.build).
+[`hw/arm/calypso/meson.build`](hw/arm/calypso/meson.build) — dont le bloc
+« RESTENT DANS qosmo-dsp » est périmé depuis que ces cinq fichiers sont dans
+`l1-dsp/`.
+
+### Cœur C54x : correctifs récents
+
+- **2026-09-18/19** — `calypso_c54x.c` découpé en `c54x_exec`, `c54x_decode`,
+  `c54x_mem`, `c54x_irq`, `c54x_probes`.
+- **2026-09-20** — ROL/ROR sur 32 bits (SPRU172C, c'était une rotation 40 bits),
+  tous les modes Lmem par `resolve_lmem`, CPL respecté en adressage direct :
+  le SCH décode (`15c0d45`). `getenv()` mémoïsé sur les chemins chauds
+  (6,7 → 3,7 ms/trame, `d68baaf`) ; chemin rapide `c54x_rapide` et file BSP de
+  8192 bursts (`54d8320`) ; modulation GMSK partagée `calypso_gmsk.c`
+  (`d8e5fef`).
+- **2026-09-21** — OVA/OVB et saturation OVM (`CALYPSO_C54X_OVM=0` pour
+  revenir), MPYR/MACR/MASR, `0xA1xx` = `ADD Xmem,Ymem` (pas `SQDST`),
+  `*+ARx(lk)%` circulaire, retenue SFTA au bit 40-SHIFT : le BCCH décode,
+  SI1-4 (`4771f91`).
+- **2026-09-23** — sondes coupées par défaut (`CALYPSO_SONDES=1` ou
+  `CALYPSO_DEBUG` pour les rallumer) ; `RPT *(lk)` avance de 1 + `lk_used`
+  (crash TCH `SP-CORRUPT`) ; `MVKD`/`MVDK` longs lisent `lk` avant `dmad`
+  (SACCH du TCH, pointeur `0x3d89` ; `CALYPSO_MVKD_DMAD_AVANT=1` = ancien
+  ordre) ; coprocesseur A5 sur les ports XIO `0x2800..0x2818`
+  ([`calypso_a5.c`](hw/arm/calypso/l1-dsp/calypso_a5.c), `osmo_a5()`).
+
+À valider sur le banc au 2026-09-23 : SACCH du TCH en appel (ordre
+`MVKD`/`MVDK`, coprocesseur A5, journal `[a5]`), rattrapage du pacer pour la
+parole (`CALYPSO_PACER_RATTRAPAGE`).
+
+## Documentation liée
+
+- [`hw/arm/calypso/doc/SONDES.md`](hw/arm/calypso/doc/SONDES.md) — les sondes
+  du cœur C54x (2026-09-18).
+- [`tools/rapport-run.sh`](tools/rapport-run.sh) — rapport des journaux
+  qemu/osmocon/mobile/bts/pont d'un run ; `LOG_DIR` est lu dans l'environ du
+  QEMU vivant.
 
 ## Licence
 
-GPL-2.0-or-later, comme QEMU 9.2.4 dont ce dépôt dérive.
+Code dérivé de QEMU 9.2.4 : GPL-2.0-or-later (en-têtes SPDX, `COPYING`).
+Le dépôt porte aussi, depuis le 2026-09-23, un `LICENSE` GPLv3 (« qosmo
+Copyright (C) 2026 Bastien Baranoff »).
