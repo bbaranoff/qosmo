@@ -5002,8 +5002,21 @@ int c54x_exec_one(C54xState *s)
             int mode = (op & 0x80) ? ((op >> 3) & 0x0F) : -1;
             uint16_t smem_addr;
             s->lk_used = false;
-            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+2 */
-                uint16_t lk = prog_fetch(s, s->pc + 2);
+            /* [2026-09-23] ORDRE DES MOTS EN ADRESSAGE LONG : lk D'ABORD (pc+1),
+             * dmad ENSUITE (pc+2), comme PORTW `75f8 4356 2800` et ST
+             * `76f8 4356 0000` dans ce meme coeur et comme le desassembleur
+             * binutils. L'ordre inverse faisait de `70f8 0012 0014` (0x76c0,
+             * mesure de puissance) AR4 <- AR2 au lieu de AR2 <- AR4 : la
+             * routine PM lisait un AR2 perime puis ecrivait ses resultats en
+             * 0x3d0b..0x3d89, sur les variables du TCH -- dont le pointeur du
+             * tampon SACCH 0x3d89, envoye dans l'API RAM : SACCH jamais
+             * decodee, LOS en appel, et d_debug_ptr ecrase (DSP perdu).
+             * CALYPSO_MVKD_DMAD_AVANT=1 retablit l'ancien ordre (A/B). */
+            static int dmad_avant = -1;
+            if (dmad_avant < 0) { const char *e = calypso_getenv("CALYPSO_MVKD_DMAD_AVANT"); dmad_avant = (e && *e == '1'); }
+            if (mode >= 0xC && !dmad_avant) dmad = prog_fetch(s, s->pc + 2);
+            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+1 (voir plus haut) */
+                uint16_t lk = prog_fetch(s, s->pc + (dmad_avant ? 2 : 1));
                 int nar = op & 0x07;
                 if (mode == 0xC) {                      /* *ARx(lk), no modify */
                     smem_addr = (uint16_t)(s->ar[nar] + lk);
@@ -5041,8 +5054,21 @@ int c54x_exec_one(C54xState *s)
             int mode = (op & 0x80) ? ((op >> 3) & 0x0F) : -1;
             uint16_t smem_addr;
             s->lk_used = false;
-            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+2 */
-                uint16_t lk = prog_fetch(s, s->pc + 2);
+            /* [2026-09-23] ORDRE DES MOTS EN ADRESSAGE LONG : lk D'ABORD (pc+1),
+             * dmad ENSUITE (pc+2), comme PORTW `75f8 4356 2800` et ST
+             * `76f8 4356 0000` dans ce meme coeur et comme le desassembleur
+             * binutils. L'ordre inverse faisait de `70f8 0012 0014` (0x76c0,
+             * mesure de puissance) AR4 <- AR2 au lieu de AR2 <- AR4 : la
+             * routine PM lisait un AR2 perime puis ecrivait ses resultats en
+             * 0x3d0b..0x3d89, sur les variables du TCH -- dont le pointeur du
+             * tampon SACCH 0x3d89, envoye dans l'API RAM : SACCH jamais
+             * decodee, LOS en appel, et d_debug_ptr ecrase (DSP perdu).
+             * CALYPSO_MVKD_DMAD_AVANT=1 retablit l'ancien ordre (A/B). */
+            static int dmad_avant = -1;
+            if (dmad_avant < 0) { const char *e = calypso_getenv("CALYPSO_MVKD_DMAD_AVANT"); dmad_avant = (e && *e == '1'); }
+            if (mode >= 0xC && !dmad_avant) dmad = prog_fetch(s, s->pc + 2);
+            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+1 (voir plus haut) */
+                uint16_t lk = prog_fetch(s, s->pc + (dmad_avant ? 2 : 1));
                 int nar = op & 0x07;
                 if (mode == 0xC) {                      /* *ARx(lk), no modify */
                     smem_addr = (uint16_t)(s->ar[nar] + lk);

@@ -1148,8 +1148,26 @@ static void tdma_pacer(CalypsoTRX *s)
         target = now;
     }
     target += GSM_TDMA_NS;
-    while (target <= now) {
-        target += GSM_TDMA_NS;
+    /* [2026-09-23] RATTRAPER AU LIEU DE SAUTER UNE CASE. L'ancienne boucle
+     * « while (target <= now) target += GSM_TDMA_NS » calait le TICK suivant
+     * sur la grille murale : une trame en retard de 0,1 ms en perdait une
+     * entiere. En TCH (DSP ~4,8 ms certaines trames) une trame sur quatre
+     * glissait : 5,86 ms en moyenne, 171 trames/s au lieu de 216,7, la parole a
+     * 40 trames/s pour un ALSA a 50 -- echo test qui « part en live ». On
+     * repart aussitot et on rattrape, dans la limite de
+     * CALYPSO_PACER_RATTRAPAGE trames de retard cumule (20 par defaut) ; au-dela
+     * on recale sur maintenant. 0 = l'ancienne grille stricte. */
+    static int rattrapage = -1;
+    if (rattrapage < 0) {
+        const char *e = getenv("CALYPSO_PACER_RATTRAPAGE");
+        rattrapage = (e && *e) ? atoi(e) : 20;
+    }
+    if (rattrapage == 0) {
+        while (target <= now) {
+            target += GSM_TDMA_NS;
+        }
+    } else if (target < now - (int64_t)rattrapage * GSM_TDMA_NS) {
+        target = now;
     }
     timer_mod_ns(s->tdma_timer, target);
 }

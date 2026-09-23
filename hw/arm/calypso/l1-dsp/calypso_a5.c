@@ -92,11 +92,26 @@ static void a5_calculer(C54xState *s, unsigned algo)
         empaqueter(ul, &a5.flux[8]);
     }
     a5.etat |= 0x0001;
-    if (a5.n_calculs++ < 8)
-        fprintf(stderr, "[a5] A5/%u fn=%u (T1=%u T2=%u T3=%u) Kc=%02x%02x%02x%02x%02x%02x%02x%02x "
-                "dl=%04x %04x ul=%04x %04x PC=0x%04x\n", algo, fn, t1, t2, t3,
-                key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-                a5.flux[0], a5.flux[1], a5.flux[8], a5.flux[9], s ? s->pc : 0);
+    /* [2026-09-23] Sur stdout (dsp.log) : le stderr de c54x_exe n'est pas lu.
+     * Les 8 premiers calculs, chaque changement de Kc, puis un releve toutes
+     * les 500 : fn du COUNT contre la derniere trame BTS deposee par le BSP
+     * (calypso_daram_last_fn). Le COUNT vise la trame de la tache, deposee au
+     * tick suivant : un ecart qui s'ecarte de +1 dit un COUNT faux. */
+    {
+        static uint8_t kc_prec[8]; static int kc_vu;
+        bool change = !kc_vu || memcmp(kc_prec, key, 8) != 0;
+        if (a5.n_calculs < 8 || change || (a5.n_calculs % 500) == 0) {
+            extern unsigned calypso_daram_last_fn;
+            printf("  [a5] #%lu A5/%u fn=%u (T1=%u T2=%u T3=%u) Kc=%02x%02x%02x%02x%02x%02x%02x%02x%s "
+                   "| dernier depot BSP fn=%u (ecart %+d)\n", a5.n_calculs, algo, fn, t1, t2, t3,
+                   key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+                   change ? " (NOUVEAU Kc)" : "", calypso_daram_last_fn,
+                   (int)(fn - calypso_daram_last_fn));
+            fflush(stdout);
+        }
+        memcpy(kc_prec, key, 8); kc_vu = 1;
+    }
+    a5.n_calculs++;
     /* Fin de calcul : l'ISR 0xb19d releve le flux. IFR seul -- le coeur
      * vectorise a l'instruction suivante (c54x_irq_level_check), jamais au
      * milieu du PORTW en cours. */
