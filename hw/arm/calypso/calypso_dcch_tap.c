@@ -53,11 +53,18 @@ static struct {
     uint32_t seq;
     uint32_t fn_dedie;       /* derniere trame vue sur le canal dedie */
     bool     fn_dedie_vue;
-} tap = { .dernier_chan_nr = 0xFF };
+    uint8_t  trx_chan_nr;    /* dernier SDCCH (ou 0xFF) dit a calypso_trx */
+} tap = { .dernier_chan_nr = 0xFF, .trx_chan_nr = 0xFF };
+
+/* [2026-09-23] Genres du TCH. Les lecteurs qui ne connaissaient que 0/1/0xFF
+ * (montant.c scruter_dcch, pont/dsp/dedicated.py) ont ete adaptes ; pont.py
+ * grgsm ne lit jamais ce tap (sa couche 1 ecrit le fichier elle-meme). */
+#define DCCH_TCH_F          2
+#define DCCH_TCH_H          3
 
 /* 16 octets, comme les attend pont/state.py:Dedicated.read() :
  * seq(4) kind(1) ss(1) tn(1) chan_nr(1). kind 0 = SDCCH/4, 1 = SDCCH/8,
- * 0xFF = canal libere. */
+ * 2 = TCH/F, 3 = TCH/H (ss = demi-debit), 0xFF = canal libere. */
 static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
 {
     uint8_t b[16] = {0};
@@ -76,7 +83,21 @@ static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
         return;
     }
     close(fd);
-    calypso_trx_dcch(kind, ss, chan_nr & 0x07);
+    /* [2026-09-23] calypso_trx (PONT_DCCH -> pont.c -> calypso_bsp_set_dedie)
+     * n'entend que ce qu'il entendait avant : un SDCCH nouveau ou la
+     * liberation. Le TCH ne lui est pas dit -- la bascule du BSP sur le TCH
+     * est l'affaire de montant.c (suivre_tache_tch), qu'un PONT_DCCH genre 2
+     * court-circuiterait -- et le retour sur le MEME SDCCH apres le TCH
+     * (ASSIGNMENT FAILURE) non plus, comme quand le tap ignorait le TCH. */
+    if (kind != DCCH_TCH_F && kind != DCCH_TCH_H && chan_nr != tap.trx_chan_nr) {
+        tap.trx_chan_nr = kind == DCCH_RELEASED ? 0xFF : chan_nr;
+        calypso_trx_dcch(kind, ss, chan_nr & 0x07);
+    }
+    if (kind == DCCH_TCH_F || kind == DCCH_TCH_H) {
+        fprintf(stderr, "[dcch] canal dedie arme : chan_nr=0x%02x TCH/%c SS=%d TN=%d\n",
+                chan_nr, kind == DCCH_TCH_F ? 'F' : 'H', ss, chan_nr & 7);
+        return;
+    }
     fprintf(stderr, "[dcch] canal dedie %s : chan_nr=0x%02x SDCCH/%d SS=%d TN=%d\n",
             kind == DCCH_RELEASED ? "libere" : "arme", chan_nr,
             kind == 1 ? 8 : 4, ss, chan_nr & 7);
@@ -98,7 +119,18 @@ static void trame_complete(void)
     if ((type != L1CTL_DATA_CONF && type != L1CTL_DATA_IND) || plen < 5) {
         return;
     }
-    /* chan_nr, 44.004 8.3 : 0b001SSTTT = SDCCH/4, 0b01SSSTTT = SDCCH/8. */
+    /* chan_nr, 44.004 8.3 : 0b001SSTTT = SDCCH/4, 0b01SSSTTT = SDCCH/8,
+     * 0b00001TTT = TCH/F, 0b0001STTT = TCH/H.
+     *
+     * [2026-09-23] LE TCH EST UN CANAL DEDIE COMME UN AUTRE. Le tap ne
+     * reconnaissait que le SDCCH : a l'assignation (DM_EST_REQ chan_nr=0x0a,
+     * TCH/F TS2), les DATA_IND/CONF de la FACCH et de la SACCH/T portent 0x0a,
+     * classe « ni dedie ni commun », ignore. calypso_dcch_cfg annoncait donc
+     * SDCCH/8 TS1 pendant tout l'appel. Il annonce maintenant le TCH (genre
+     * 2/3) ; le SDCCH quitte n'est pas « libere » (0xFF reste la fin de la
+     * connexion : pont/dsp/uplink.py _poll_release, montant.c) et les
+     * lecteurs le gardent en memoire pour l'ASSIGNMENT FAILURE, ou le
+     * firmware y revient et ou le tap le republie (chan_nr change). */
     uint8_t chan_nr = charge[4];
     int kind = -1, ss = 0;
     if ((chan_nr & 0xE0) == 0x20) {
@@ -107,6 +139,11 @@ static void trame_complete(void)
     } else if ((chan_nr & 0xC0) == 0x40) {
         kind = 1;
         ss = (chan_nr >> 3) & 0x07;
+    } else if ((chan_nr & 0xF8) == 0x08) {
+        kind = DCCH_TCH_F;
+    } else if ((chan_nr & 0xF0) == 0x10) {
+        kind = DCCH_TCH_H;
+        ss = (chan_nr >> 3) & 0x01;
     }
     uint32_t fn = (plen >= 12) ? ldl_be_p(charge + 8) : 0;
     if (kind >= 0) {

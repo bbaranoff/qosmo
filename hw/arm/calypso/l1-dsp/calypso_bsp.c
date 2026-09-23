@@ -105,7 +105,23 @@ static void bsp_iq_publish(const int16_t *iq, int n)
             acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
         }
         uint32_t mav = (uint32_t)(acc / (uint32_t)n);
-        bsp_last_mav = (mav > 0xffff) ? 0xffff : (uint16_t)mav;
+        /* [2026-09-23] UN BURST SILENCIEUX NE MESURE PAS LA CELLULE.
+         * Les effacements (bsp_ts0_service, trame sans burst) et les
+         * remplissages a zero des intervalles vides passent aussi par ici : le
+         * MAV tombait a ~0 et le a_pm suivant au plancher (-100 dBm, que le
+         * firmware rend « rxlev <=-110 (0) »), soit C1 = 0 et la cellule jugee
+         * inutilisable -- « Found signal rxlev <=-110 (0) », « Channel sync
+         * error », LOST_COVERAGE toutes les 5 a 7 s (run du 2026-09-23 15:36).
+         * On garde donc la derniere mesure d'un vrai burst.
+         * CALYPSO_BSP_MAV_MIN=0 retablit la mise a jour inconditionnelle. */
+        static int mav_min = -1;
+        if (mav_min < 0) {
+            const char *e = calypso_getenv("CALYPSO_BSP_MAV_MIN");
+            mav_min = e ? atoi(e) : 64;
+        }
+        if (mav >= (uint32_t)mav_min) {
+            bsp_last_mav = (mav > 0xffff) ? 0xffff : (uint16_t)mav;
+        }
     }
 
     /* FB-STREAM ring (header §1). */
@@ -925,6 +941,21 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         }
         trame_dediee = a_nous;
         const uint8_t *d = a_nous ? bsp_dedie_bits(g_ts0[i].fn) : NULL;
+        /* [2026-09-23] SONDE SACCH/TF : sur TCH/F la parole et la FACCH suivent
+         * la 26-multitrame, la SACCH la 104 (TS pair : fn%26 == 12, bloc de TS2
+         * aux fn%104 = 38, 64, 90, 12). Appel de 15:42 : a_dd et a_fd bons,
+         * a_cd FIRE KO a chaque bloc avec deux contenus constants, LOS au bout
+         * de 32 blocs. On journalise ce que le BSP joue sur ces trames-la. */
+        if (g_dedie_genre == BSP_DEDIE_TCH && a_nous && (g_ts0[i].fn % 26u) == 12u) {
+            static unsigned long n_sacch;
+            if (n_sacch++ < 24) {
+                int uns = -1;
+                if (d) { uns = 0; for (int k = 0; k < 148; k++) uns += (d[k] & 1); }
+                printf("  [sacch_tf] tick=%u fn=%u fn%%104=%u TS%d burst=%s uns=%d\n",
+                       tick_fn, g_ts0[i].fn, g_ts0[i].fn % 104u, g_dedie_tn,
+                       d ? "oui" : "NON", uns);
+            }
+        }
         if (d) {
             bits = d;
             burst_dedie = true;
