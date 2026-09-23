@@ -51,13 +51,17 @@ enum CalypsoPontType {
     PONT_TICK     = 4,  /* QEMU -> DSP : une trame TDMA, a = fn, b = d_dsp_page */
     PONT_DONE     = 5,  /* DSP -> QEMU : trame jouee, a = drapeaux, b = insns    */
     PONT_GO       = 6,  /* QEMU -> DSP : l1_sync de l'ARM finie, livrer le burst (2 phases) */
-    PONT_BYE      = 6,  /* l'un ou l'autre : fin propre                          */
     /* [2026-09-21] Canal dedie : a = TN, b = genre (0 SDCCH/4, 1 SDCCH/8,
      * 0xFF libere), c = sous-voie. QEMU l'apprend du flux L1CTL du firmware
      * (calypso_dcch_tap.c) et le DSP en a besoin pour savoir QUEL intervalle
      * de temps livrer : le pont lui envoie les huit, mais il n'en joue qu'un
      * par tick. Emis juste avant un TICK, jamais pendant l'attente d'un GO. */
     PONT_DCCH     = 7,
+    /* [2026-09-23] BYE valait 6, comme GO (depuis 255cdd6, 21/09). Personne ne
+     * l'envoie ; mais un GO arrive apres le delai de 2 s de pont.c (« PONT_GO
+     * attendu ») retombait dans la boucle principale de c54x_exe, qui le lisait
+     * comme BYE et s'arretait. */
+    PONT_BYE      = 8,  /* l'un ou l'autre : fin propre                          */
 };
 
 /* Drapeaux de PONT_DONE.a */

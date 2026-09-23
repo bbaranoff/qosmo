@@ -52,6 +52,7 @@ static struct {
     uint16_t ctrl, kc[4], cnt[2], etat;
     uint16_t flux[A5_N_FLUX];
     unsigned long n_calculs;
+    unsigned long n_recales;   /* COUNT recales sur dernier depot + 1 */
 } a5;
 
 bool calypso_a5_on(void)
@@ -83,6 +84,40 @@ static void a5_calculer(C54xState *s, unsigned algo)
     unsigned t2 = a5.cnt[0] & 0x1f, t3 = (a5.cnt[0] >> 5) & 0x3f, t1 = a5.cnt[1] & 0x7ff;
     /* gsm_gsmtime2fn : T1, T2, T3 -> fn */
     uint32_t fn = 51u * 26u * t1 + 51u * (((int)t3 - (int)t2 + 26 * 3) % 26) + t3;
+    /* [2026-09-23] COUNT D'UNE TRAME EN RETARD : RECALE SUR LE DEPOT SUIVANT.
+     * Le firmware ecrit a_a5fn depuis l1s.next_time (calypso/dsp.c:553) : la
+     * trame que le BSP deposera au tick SUIVANT, soit dernier depot + 1 --
+     * l'ecart releve sur tout l'appel reussi de 20:22. Aux runs de 20:32, 21:08
+     * et 21:24, l'ecart tombe a 0 sur 100 % du TCH (et sur une partie du
+     * SDCCH) : la ROM a programme le coprocesseur avec l'a_a5fn de la tache
+     * PRECEDENTE, lu dans sa phase A avant que le l1_sync de l'ARM ait ecrit la
+     * page W suivante -- une course du pas-a-pas en deux phases, qui varie d'un
+     * run a l'autre. Le flux servait alors au burst d'apres : SACCH/TF ratee a
+     * chaque bloc (LOS ~15 s apres le decroche), parole a 15-90 erreurs par
+     * trame, SACCH/8 perdue un bloc sur deux. Hors DSP, les memes bursts se
+     * dechiffrent avec le COUNT de leur propre fn (34/52 blocs SACCH/TF, run de
+     * 21:08, contre 0 a +-1). CALYPSO_A5_RECALE=0 rend le COUNT brut. */
+    {
+        static int recale = -1;
+        if (recale < 0) { const char *e = getenv("CALYPSO_A5_RECALE"); recale = !(e && *e == '0'); }
+        extern unsigned calypso_daram_last_fn;
+        /* [2026-09-23, 21:40] SUR LA SACCH SEULEMENT. Mesure par
+         * tools/comparer_parole.py (bursts du BSP dechiffres et decodes hors
+         * DSP, contre les trames rendues par la ROM) : au regime +1, parole
+         * exacte au bit pres (240/241) et FACCH identiques (15/15) ; au regime
+         * 0 recale partout, la parole devient du bruit (~95 bits faux sur 260,
+         * 537/734) et les FACCH echouent -- le son hache et le raccroche perdu
+         * de 21:29. Sans recalage au regime 0 (21:24), c'est la SACCH/TF qui
+         * echoue. Le trafic a donc le bon COUNT a l'ecart 0, la SACCH non : on
+         * ne recale que la trame SACCH/TF (fn%26 == 12 sur un TN pair, 25 sur
+         * un TN impair). */
+        unsigned p26 = fn % 26u;
+        if (recale && fn == calypso_daram_last_fn && (p26 == 12u || p26 == 25u)) {
+            fn = (fn + 1u) % (2715648u);
+            a5.n_recales++;
+            t1 = fn / 1326u; t2 = fn % 26u; t3 = fn % 51u;
+        }
+    }
 
     ubit_t dl[114], ul[114];
     if (osmo_a5((int)algo, key, fn, dl, ul) < 0) {
@@ -110,6 +145,29 @@ static void a5_calculer(C54xState *s, unsigned algo)
             fflush(stdout);
         }
         memcpy(kc_prec, key, 8); kc_vu = 1;
+    }
+    /* [2026-09-23] HISTOGRAMME DE L'ECART PAR POSITION DANS LA 26-MULTITRAME.
+     * Sur le TCH, la SACCH/TF (fn%26 == 12) echoue dans le DSP a chaque bloc,
+     * alors que les memes bursts, dechiffres hors DSP avec le COUNT de leur
+     * propre fn, se decodent (34/52, run de 21:08). Et l'ecart releve toutes
+     * les 500 passe de +1 (attendu) a +0 pendant les appels ratés, jamais sur
+     * l'appel reussi de 20:22. Pour savoir QUELLES trames sont visees a cote :
+     * compte de l'ecart (-1, 0, +1, +2, autre) par fn%26, une ligne toutes les
+     * 2000 operations. */
+    {
+        extern unsigned calypso_daram_last_fn;
+        static unsigned long hist[26][5];
+        int e = (int)(fn - calypso_daram_last_fn);
+        hist[fn % 26u][e >= -1 && e <= 2 ? e + 1 : 4]++;
+        if (a5.n_calculs && (a5.n_calculs % 2000) == 0) {
+            printf("  [a5-hist] #%lu recales=%lu ecart(-1/0/+1/+2/autre) par fn%%26 :", a5.n_calculs, a5.n_recales);
+            for (int p = 0; p < 26; p++)
+                if (hist[p][0] + hist[p][1] + hist[p][2] + hist[p][3] + hist[p][4])
+                    printf(" %d:%lu/%lu/%lu/%lu/%lu", p, hist[p][0], hist[p][1], hist[p][2], hist[p][3], hist[p][4]);
+            printf("\n");
+            fflush(stdout);
+            memset(hist, 0, sizeof hist);
+        }
     }
     a5.n_calculs++;
     /* Fin de calcul : l'ISR 0xb19d releve le flux. IFR seul -- le coeur

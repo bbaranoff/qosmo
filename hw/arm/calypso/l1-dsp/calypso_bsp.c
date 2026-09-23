@@ -928,8 +928,12 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             if (g_dedie_tn > 0 && selon_tpu != a_nous) {
                 static unsigned long n;
                 if (++n <= 40 || (n % 200) == 0) {
-                    BSP_LOG("dedie : DESACCORD fn=%u p51=%u p102=%u : table=%d "
-                            "tpu=%d (offset=%d ref=%d, tn_fenetre=%d) [%lu fois]",
+                    /* [2026-09-23] printf et non BSP_LOG : CALYPSO_DEBUG=BSP
+                     * allume toutes les traces du BSP et fait perdre le temps
+                     * reel au banc ; celle-ci est deja plafonnee (40, puis 1
+                     * sur 200) et sert a juger la SACCH du SDCCH/8. */
+                    printf("  [BSP] dedie : DESACCORD fn=%u p51=%u p102=%u : table=%d "
+                            "tpu=%d (offset=%d ref=%d, tn_fenetre=%d) [%lu fois]\n",
                             g_ts0[i].fn, g_ts0[i].fn % 51u, g_ts0[i].fn % 102u,
                             (int)a_nous, (int)selon_tpu, g_bsp_tpu_offset,
                             g_tpu_ref, bsp_fenetre_tn(), n);
@@ -972,6 +976,33 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 fwrite(d, 1, 148, f_sacch);
                 fflush(f_sacch);
                 if (++n_sacch_bits == 256) { fclose(f_sacch); f_sacch = NULL; }
+            }
+        }
+        /* [2026-09-23] TOUS LES BURSTS DU TCH, POUR LES DECODER HORS DSP.
+         * La SACCH/TF seule (calypso_sacch_tf.bin) ne dit rien de la parole
+         * ni de la FACCH. Run de 21:29 : au raccroche, le pont decode les
+         * FACCH de la BTS (facch 42 -> 69) quand la ROM les rate toutes
+         * (a_fd FIRE=1 sur chaque bloc) ; et la parole livree a toujours
+         * B_BFI. Meme format que calypso_sacch_tf.bin (tick BE32, fn BE32,
+         * 148 bits 0/1), fichier remis a zero a chaque TCH, 20000 bursts au
+         * plus (~92 s). tools/comparer_parole.py les decode (A5 + FR/FACCH)
+         * et les met en regard de /dev/shm/calypso_add_dl.bin. */
+        if (g_dedie_genre == BSP_DEDIE_TCH && a_nous && d) {
+            static FILE *f_tch;
+            static unsigned n_tch;
+            static uint32_t tick_prec;
+            if (!f_tch || (uint32_t)(tick_fn - tick_prec) > 500u) {   /* nouvel appel */
+                if (f_tch) fclose(f_tch);
+                f_tch = fopen("/dev/shm/calypso_tch_dl.bin", "wb");
+                n_tch = 0;
+            }
+            tick_prec = tick_fn;
+            if (f_tch && n_tch < 20000) {
+                uint8_t h[8] = { tick_fn >> 24, tick_fn >> 16, tick_fn >> 8, tick_fn,
+                                 g_ts0[i].fn >> 24, g_ts0[i].fn >> 16, g_ts0[i].fn >> 8, g_ts0[i].fn };
+                fwrite(h, 1, 8, f_tch);
+                fwrite(d, 1, 148, f_tch);
+                if ((++n_tch % 64) == 0) fflush(f_tch);
             }
         }
         if (d) {
