@@ -121,7 +121,7 @@ construit, sans les recopier (`QOSMO ?= /opt/GSM/qosmo` dans son `Makefile`).
 | `CALYPSO_DSP_EXTERN` | `1` ou chemin de socket : pont vers `c54x_exe` |
 | `CALYPSO_PONT_LOCKSTEP=1` | QEMU attend `DONE` à chaque trame — indispensable, le C54x émulé est plus lent que le temps réel |
 | `CALYPSO_PONT_ARM_FIRST=0` | ancien ordre, sans les deux phases |
-| `CALYPSO_PONT_RETRY_DIV` | réglage de mesure du pont (défaut 16, mesuré sans effet) |
+| `CALYPSO_PONT_RETRY_DIV` | relance vers le DSP toutes les trame/N (défaut 16, jugé sans effet dans `calypso_trx.c`) ; `c54x_exe/run.sh` pose 64 depuis le 2026-09-23 (latence de la phase A et du GO, mesurée par `[chrono]` en TCH) |
 | `CALYPSO_CPU_KICK_NS` | période du kick CPU, réglage de mesure (défaut 5 ms, mesuré sans effet) |
 | `CALYPSO_PACER_RATTRAPAGE` | trames de retard rattrapées par le pacer TDMA (20 par défaut) ; `0` = ancienne grille stricte, qui sautait des trames |
 
