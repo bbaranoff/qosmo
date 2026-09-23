@@ -11,6 +11,7 @@
 #ifndef HW_ARM_CALYPSO_BSP_H
 #define HW_ARM_CALYPSO_BSP_H
 
+#include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -46,6 +47,7 @@ int  calypso_bsp_service(uint32_t current_fn);  /* drains UDP 6702 and delivers 
  *   iq       - interleaved int16 I,Q,I,Q,... in DSP-native (host) endianness
  *   n_int16  - number of int16 elements in iq[]  (= 2 * n_complex_samples)
  */
+FILE *calypso_bsp_enreg_fichier(void);   /* enregistreur du TCH, voir calypso_bsp.c */
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16);
 

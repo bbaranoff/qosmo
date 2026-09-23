@@ -951,9 +951,27 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             if (n_sacch++ < 24) {
                 int uns = -1;
                 if (d) { uns = 0; for (int k = 0; k < 148; k++) uns += (d[k] & 1); }
-                printf("  [sacch_tf] tick=%u fn=%u fn%%104=%u TS%d burst=%s uns=%d\n",
+                printf("  [sacch_tf] tick=%u fn=%u fn%%104=%u TS%d burst=%s uns=%d one_shot=%d nwin=%d\n",
                        tick_fn, g_ts0[i].fn, g_ts0[i].fn % 104u, g_dedie_tn,
-                       d ? "oui" : "NON", uns);
+                       d ? "oui" : "NON", uns, (int)calypso_rhea_dma_one_shot(),
+                       calypso_rhea_dma_one_shot() ? calypso_rhea_dma_get_len_words() / 2 : 0);
+            }
+            /* [2026-09-23] Les bits eux-memes, pour decoder la SACCH hors DSP
+             * (A5 + gsm0503_xcch_decode) : si elle decode la, le defaut est
+             * dans le chemin BSP/ROM, sinon dans ce que le BSP recoit.
+             * Enregistrements de 156 octets : tick BE32, fn BE32, 148 bits 0/1.
+             * 256 bursts au plus (64 blocs), fichier remis a zero au lancement. */
+            static FILE *f_sacch;
+            static unsigned n_sacch_bits;
+            if (!f_sacch && n_sacch_bits == 0)
+                f_sacch = fopen("/dev/shm/calypso_sacch_tf.bin", "wb");
+            if (f_sacch && d && n_sacch_bits < 256) {
+                uint8_t h[8] = { tick_fn >> 24, tick_fn >> 16, tick_fn >> 8, tick_fn,
+                                 g_ts0[i].fn >> 24, g_ts0[i].fn >> 16, g_ts0[i].fn >> 8, g_ts0[i].fn };
+                fwrite(h, 1, 8, f_sacch);
+                fwrite(d, 1, 148, f_sacch);
+                fflush(f_sacch);
+                if (++n_sacch_bits == 256) { fclose(f_sacch); f_sacch = NULL; }
             }
         }
         if (d) {
@@ -2323,10 +2341,47 @@ void calypso_bsp_set_remplissage(const int16_t *iq, int n_int16)
     for (int i = 0; i < n_int16; i++) g_remplissage[i] = (uint16_t)iq[i];
 }
 
+/* [2026-09-23] ENREGISTREUR DU TCH, pour rejouer hors banc EXACTEMENT ce que
+ * le DSP a recu (tools/rejeu_banc.c de c54x_exe). Chaque livraison d I/Q
+ * pendant un TCH : 'B', tick BE32, tn, fn BE32, one_shot, nwin BE16,
+ * n_int16 BE16, puis n_int16 echantillons int16 natifs. Les ecritures de
+ * l ARM dans l API RAM sont enregistrees a cote par pont.c ('A').
+ * 60000 livraisons au plus, des l'armement du canal dedie (SDCCH compris) ;
+ * CALYPSO_REJEU_ENREG=0 coupe. */
+uint32_t calypso_trx_get_fn(void);
+static FILE *g_enreg_f;
+static unsigned long g_enreg_n;
+FILE *calypso_bsp_enreg_fichier(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_REJEU_ENREG"); on = !(e && *e == '0'); }
+    /* tout canal dedie (SDCCH compris) : ce qui corrompt l'etat du DSP peut preceder le TCH */
+    if (!on || g_dedie_tn <= 0 || g_enreg_n >= 60000)
+        return NULL;
+    if (!g_enreg_f)
+        g_enreg_f = fopen("/dev/shm/calypso_rejeu_tch.bin", "wb");
+    return g_enreg_f;
+}
+static void bsp_enreg_burst(uint8_t tn, uint32_t fn, const int16_t *iq, int n)
+{
+    FILE *f = calypso_bsp_enreg_fichier();
+    if (!f) return;
+    uint32_t t = calypso_trx_get_fn();
+    int nwin = calypso_rhea_dma_one_shot() ? calypso_rhea_dma_get_len_words() : 0;
+    uint8_t h[15] = { 'B', t >> 24, t >> 16, t >> 8, t, tn, fn >> 24, fn >> 16, fn >> 8, fn,
+                      (uint8_t)calypso_rhea_dma_one_shot(), (uint8_t)(nwin >> 8), (uint8_t)nwin,
+                      (uint8_t)(n >> 8), (uint8_t)n };
+    fwrite(h, 1, sizeof h, f);
+    fwrite(iq, sizeof(int16_t), (size_t)n, f);
+    fflush(f);
+    g_enreg_n++;
+}
+
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16)
 {
     bsp.bursts_seen++;
+    bsp_enreg_burst(tn, fn, iq, n_int16);
     /* [2026-09-19] Publish the frame of the burst being handed over. The global
      * existed (c54x_internal.h) but nothing ever wrote it, so every consumer
      * read 0 — including the rhea-dma transfer trace, which could not be lined

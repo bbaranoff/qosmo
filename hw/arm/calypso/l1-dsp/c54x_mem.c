@@ -1058,6 +1058,21 @@ unsigned g_toa_seq = 0;
 
 void data_write(C54xState *s, uint16_t addr, uint16_t val)
 {
+    /* [2026-09-23] GARDE 0x3d89 : pointeur d'ecriture du tampon circulaire de
+     * 232 mots en 0x4d00 (init 0x90c0, avance en 0x9173, copie 28 mots du
+     * tampon DMA 0x0cce a chaque trame TCH). Sur le banc il est retrouve en
+     * 0x08xx : le tampon recouvre alors les pages W/R et le NDB de l'API RAM
+     * (d_debug_ptr 0x08dc ecrase -> STL dans SP depuis 0xb522, DSP perdu). Le
+     * reproducteur, lui, reste en 0x4dxx. On journalise les premieres
+     * ecritures hors de 0x4d00..0x4dff, avec de quoi remonter a la cause. */
+    if (addr == 0x3d89 && (val & 0xff00) != 0x4d00) {
+        static unsigned n;
+        if (n++ < 12)
+            printf("  [garde-3d89] data[0x3d89] <- 0x%04x (etait 0x%04x) PC=0x%04x DP=0x%03x ST0=0x%04x "
+                    "ST1=0x%04x SP=0x%04x IMR=0x%04x IFR=0x%04x AR2=0x%04x BK=0x%04x insn=%u\n",
+                    val, s->data[0x3d89], s->pc & 0xffff, s->st0 & 0x1ff, s->st0, s->st1, s->sp,
+                    s->imr, s->ifr, s->ar[2], s->bk, s->insn_count), fflush(stdout);
+    }
     if (c54x_rapide) {                     /* see calypso_c54x.h */
         /* the one functional substitution of the slow path: a_pm from the
          * measured downlink magnitude (CALYPSO_PM_RSSI, default 1) */

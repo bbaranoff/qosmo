@@ -6,6 +6,7 @@
  * File map in c54x_internal.h.
  */
 #include "c54x_internal.h"
+#include "calypso_a5.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
 /* 0xF4xx source/destination selectors: bit 9 = src, bit 8 = dst (TI SPRU172C). */
@@ -4892,6 +4893,11 @@ int c54x_exec_one(C54xState *s)
             /* RIF (calypso_rif.c): SPCR/SPCX/DXR are really written. SPCR is how
              * the firmware opens RINT_MASK or RDMA_MASK, i.e. how it chooses the
              * transfer mode of CAL207 §3.7.1. */
+            /* Coprocesseur A5 (0x2800..0x2818), voir calypso_a5.c. */
+            if (calypso_a5_portw(s, pa, data_read(s, addr))) {
+                consumed = 2;
+                return consumed + s->lk_used;
+            }
             if (calypso_rif_portw(s, pa, data_read(s, addr))) {
                 consumed = 2;
                 return consumed + s->lk_used;
@@ -4928,6 +4934,11 @@ int c54x_exec_one(C54xState *s)
              * i.e. SPCR. */
             {
                 uint16_t rv;
+                if (calypso_a5_portr(s, pa, &rv)) {
+                    data_write(s, addr, rv);
+                    consumed = 2;
+                    return consumed + s->lk_used;
+                }
                 if (calypso_rif_portr(s, pa, &rv)) {
                     data_write(s, addr, rv);
                     consumed = 2;
