@@ -53,7 +53,7 @@ if [ "$L" = "$LIVE_DIR" ]; then
     P="$(pgrep -x qemu-system-arm 2>/dev/null | head -1)"
     [ -n "$P" ] && info "qemu vivant" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
                 || info "qemu vivant" "ARRETE"
-    P="$(pgrep -f 'pont/pont.py' 2>/dev/null | head -1)"
+    P="$(pgrep -f 'pont/pont(_dsp)?\.py' 2>/dev/null | head -1)"
     [ -n "$P" ] && info "pont vivant" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
                 || info "pont vivant" "ARRETE"
 fi
