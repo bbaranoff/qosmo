@@ -935,59 +935,71 @@ static int16_t  g_sb_attente_iq[2 * 512];
 static int      g_sb_attente_n;        /* mots int16 en attente, 0 = rien */
 static uint32_t g_sb_attente_fn;
 static unsigned g_sb_attente_tick;
-static unsigned long g_sb_relivres, g_sb_perdus;
+static unsigned long g_sb_relivres, g_sb_perdus, g_sb_expires;
+static uint32_t g_tick_courant;        /* tick en cours (bsp_ts0_service), pour dater la relivraison */
 static int sb_fenetre_on(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_FENETRE"); on = (e && *e == '0') ? 0 : 1;
-                  if (on) BSP_LOG("SB_FENETRE on : le SCH hors ONE_SHOT est cadre comme une fenetre SB (marge, deux pages, sans bourrage)"); }
+                  if (on) BSP_LOG("SB_FENETRE on : un SCH depose alors que la DMA n'est pas armee est garde un tick et livre dans la fenetre SB one-shot qui suit"); }
     return on;
 }
-static int sb_marge_cible(void)
-{
-    static int m = -1;
-    if (m < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_MARGE"); m = (e && *e) ? atoi(e) : 21; if (m < 0) m = 0; if (m > 96) m = 96; }
-    return m;
-}
-/* Cadre le burst SB dans `iq` pour la DMA telle qu'elle est programmee a cet
- * instant ; rend le nombre d'echantillons du bloc (0 si la DMA n'a pas de page
- * de tache). `marge_out` recoit la marge appliquee. */
+/* Cadre le burst SB dans `iq` pour la fenetre one-shot telle qu'elle est
+ * programmee a cet instant (191 echantillons, burst a 21 : TOA 23) ; rend le
+ * nombre d'echantillons du bloc, 0 si ce n'est pas une fenetre SB. */
 static int sb_cadrer(const uint8_t *bits, int16_t *iq, int cap_ech, int *marge_out)
 {
-    const bool one_shot = calypso_rhea_dma_one_shot();
-    int page = calypso_rhea_dma_get_len_words() / 2;          /* echantillons par page programmee */
-    if (page < 150) return 0;
-    int total = one_shot ? page : 2 * page;                    /* one-shot : la page ; sinon les deux pages */
+    if (!calypso_rhea_dma_one_shot()) return 0;
+    int total = calypso_rhea_dma_get_len_words() / 2;           /* echantillons de la page one-shot */
+    if (total < 190) return 0;                                  /* 151 = fenetre NB : pas pour un SCH */
     if (total > cap_ech) total = cap_ech;
-    int marge = sb_marge_cible();
-    if (marge > total - 148) marge = total - 148;              /* jamais tronquer le burst */
-    if (marge < 0) marge = 0;
+    int marge = 21;
+    if (marge > total - 148) marge = total - 148;
     memset(iq, 0, (size_t)(2 * total) * sizeof *iq);
     gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
     *marge_out = marge;
     return total;
 }
-/* Relivre le bloc SB en attente si la ROM a arme sa DMA entre-temps. Rend 1 si
- * livre. Appelee par pont.c dans la boucle de pompe (meme tick) et par
- * bsp_ts0_service() au tick suivant. */
+/* [2026-09-29 23:40] MESURE DU PREMIER JET (run de 23:33) : la ROM arme bien une
+ * fenetre SB one-shot de 191 echantillons (SB #7 : one_shot=1 page_prog=191,
+ * TOA=24 CRC_OK) -- contrairement a ce que le MAILBOX du 22/09 concluait. Le
+ * defaut est un defaut d'ORDRE : la fenetre est souvent armee APRES le depot
+ * du SCH dans le tick, et calypso_rif_rx_burst() jette alors le burst
+ * (fenetre vide sur la page 0 : TOA=0 SNR=12, resultat constant) ; la page 1
+ * recoit le burst de la trame SUIVANTE a TOA 24, d'ou un CRC faux.
+ * Le premier jet relivrait le bloc garde a N'IMPORTE QUEL armement, y compris
+ * les fenetres NB de la lecture BCCH (one_shot=0 page=151) : le SCH y
+ * remplacait le burst BCCH, plus aucune SI ne passait, le mobile tombait en
+ * « C6 any cell selection ». Desormais : relivraison UNIQUEMENT dans une
+ * fenetre SB one-shot (>= 190), au plus un tick apres le depot, et l'offset
+ * ARM-tick est recale sur le tick de la livraison effective, comme le fait la
+ * livraison native d'un SCH en fenetre SB. Un bloc non reclame expire. */
 int calypso_bsp_sb_retenter(void)
 {
     if (!g_sb_attente_n) return 0;
-    if (!calypso_rhea_dma_rx_armed()) return 0;
-    /* la DMA est armee : recadrer pour la page telle qu'elle est programmee MAINTENANT */
+    if ((int32_t)(g_tick_courant - g_sb_attente_tick) > 1) {   /* trop vieux : la ROM ne l'attend plus */
+        g_sb_attente_n = 0; g_sb_expires++;
+        return 0;
+    }
+    if (!calypso_rhea_dma_rx_armed() || !calypso_rhea_dma_one_shot()) return 0;
     unsigned i = g_sb_attente_fn % BSP_TS0_RING;
-    int marge = 0, total = 0;
-    if (g_ts0 && g_ts0[i].fn == g_sb_attente_fn)
-        total = sb_cadrer(g_ts0[i].bits, g_sb_attente_iq, 512, &marge);
-    if (!total) { total = g_sb_attente_n / 2; marge = -1; }   /* page inconnue : le bloc tel que cadre au depot */
+    if (!g_ts0 || g_ts0[i].fn != g_sb_attente_fn) { g_sb_attente_n = 0; return 0; }
+    int marge = 0;
+    int total = sb_cadrer(g_ts0[i].bits, g_sb_attente_iq, 512, &marge);
+    if (!total) return 0;                                       /* armee, mais pas une fenetre SB : on attend */
     calypso_rif_flush();
     calypso_bsp_rx_burst(0, g_sb_attente_fn, g_sb_attente_iq, 2 * total);
     bsp.bursts_written++;
     g_sb_relivres++;
-    if (g_sb_relivres <= 40 || g_sb_relivres % 100 == 0)
-        printf("  [sbwin] SB fn=%u RELIVRE (tick %u, DMA armee apres le depot) : one_shot=%d page=%d marge=%d bloc=%d ech. [%lu relivres, %lu perdus]\n",
-               g_sb_attente_fn, g_sb_attente_tick, (int)calypso_rhea_dma_one_shot(),
-               calypso_rhea_dma_get_len_words() / 2, marge, total, g_sb_relivres, g_sb_perdus);
+    /* Le SCH est livre a ce tick-ci : c'est lui qui fixe l'offset ARM-tick,
+     * exactement comme la livraison native en fenetre SB (bsp_ts0_livrer). */
+    int64_t off = (int64_t)g_sb_attente_fn - (int64_t)g_tick_courant;
+    int recale = (off != g_ts0_offset);
+    g_ts0_offset = off;
+    if (g_sb_relivres <= 60 || g_sb_relivres % 100 == 0)
+        printf("  [sbwin] SB fn=%u RELIVRE au tick %u (depose au tick %u, fenetre SB armee apres) : page=%d marge=%d%s [%lu relivres, %lu expires, %lu remplaces]\n",
+               g_sb_attente_fn, g_tick_courant, g_sb_attente_tick, total, marge,
+               recale ? ", offset ARM-tick recale" : "", g_sb_relivres, g_sb_expires, g_sb_perdus);
     g_sb_attente_n = 0;
     return 1;
 }
@@ -1141,23 +1153,18 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     /* [2026-09-29] Le SCH hors ONE_SHOT, page de tache programmee : voir le
      * commentaire au-dessus de sb_cadrer(). sb_fenetre=1 court-circuite le
      * cadrage « flux continu » (marge 0, 1250 echantillons, bourrage). */
-    int sb_fenetre = 0, sb_total = 0;
+    int sb_fenetre = 0;
     const char *sb_action = "cadree comme un burst normal";
-    if (sb && sb_fenetre_on() && !one_shot && page_prog >= 150) {
-        if (!armee) {
-            /* la ROM n'a pas encore arme sa DMA : le RIF jetterait le burst.
-             * On le garde, calypso_bsp_sb_retenter() le livrera des l'armement. */
-            if (g_sb_attente_n) g_sb_perdus++;
-            int m2 = 0; int t2 = sb_cadrer(bits, g_sb_attente_iq, 512, &m2);
-            g_sb_attente_n = 2 * t2; g_sb_attente_fn = g_ts0[i].fn; g_sb_attente_tick = tick_fn;
-            sb_action = "DMA NON ARMEE : bloc garde, relivre a l'armement";
-            sb_fenetre = -1;
-        } else {
-            sb_total = sb_cadrer(bits, iq, 512, &marge);
-            if (sb_total) { sb_fenetre = 1; nwin = page_prog; sb_action = "FENETRE SB (deux pages, residu RIF vide)"; }
-        }
+    if (sb && sb_fenetre_on() && !armee) {
+        /* la ROM n'a pas (encore) arme de fenetre : le RIF jetterait le burst.
+         * On le garde un tick ; calypso_bsp_sb_retenter() le livrera dans la
+         * fenetre SB one-shot si elle s'ouvre (voir son commentaire). */
+        if (g_sb_attente_n) g_sb_perdus++;
+        g_sb_attente_n = 2 * 148; g_sb_attente_fn = g_ts0[i].fn; g_sb_attente_tick = tick_fn;
+        sb_action = "DMA NON ARMEE : SCH garde un tick pour la fenetre SB";
+        sb_fenetre = -1;
     }
-    if (sb_fenetre <= 0) gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
     if (!sb && !fcch) {
         static double sym = -2;
         if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
@@ -1165,7 +1172,6 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
     if (total > 256) total = 256;
-    if (sb_fenetre > 0) total = sb_total;
     if (sb) {
         /* [2026-09-22] SONDE : la SB arrive-t-elle dans une VRAIE fenetre SB ?
          * Le calage de g_ts0_offset et la marge de 21 echantillons exigent
@@ -1175,7 +1181,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
          * par ce chemin. On compte les deux cas. */
         static unsigned n_sb, n_sb_fenetre;
         n_sb++;
-        if ((one_shot && nwin >= 190) || sb_fenetre > 0) n_sb_fenetre++;
+        if (one_shot && nwin >= 190) n_sb_fenetre++;
         if (one_shot && nwin >= 190) sb_action = "FENETRE SB (one-shot)";
         /* [2026-09-29] Toutes les SCH des 200 premieres, puis 1 sur 10 : c'est la
          * mesure du correctif, il faut la voir sur chaque resynchro. */
@@ -1185,11 +1191,10 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                    sb_action, n_sb_fenetre, n_sb);
         }
     }
-    if (sb_fenetre < 0) {                       /* bloc garde : rien n'entre dans le RIF a ce tick */
+    if (sb_fenetre < 0) {                       /* SCH garde : rien n'entre dans le RIF a ce tick */
         g_ts0[i].joue = 1;
         return;
     }
-    if (sb_fenetre > 0) calypso_rif_flush();    /* le residu de la recherche FB decalerait le burst */
     if (sb && one_shot && nwin >= 190) {
         int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;
         if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
@@ -1225,7 +1230,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
      * by calypso_bsp_rx_burst) then seven filler timeslots. With TS0 alone
      * (156 samples per tick) the SB window was armed eight ticks too late
      * and no SB ever decoded. One-shot windows take TS0 only. */
-    if (!one_shot && sb_fenetre <= 0) {
+    if (!one_shot) {
         extern uint16_t g_remplissage_ts0[];   /* forward: defined below (filler, zeros by default) */
         static int16_t iq_autre[2 * 148];
         for (int tn = 1; tn < 8; tn++) {
@@ -1308,7 +1313,11 @@ static void bsp_horloge_publier(uint32_t fn_bts, uint32_t tick_fn, int cale)
 static void bsp_ts0_service(uint32_t tick_fn)
 {
     if (!g_ts0 || !g_ts0_any) return;
-    calypso_bsp_sb_retenter();   /* [2026-09-29] un SCH garde au tick precedent passe avant la trame de ce tick */
+    g_tick_courant = tick_fn;
+    /* [2026-09-29] Un SCH garde au tick precedent est livre dans la fenetre SB
+     * qui vient de s'armer ; il recale l'offset ARM-tick, donc la trame que ce
+     * tick aurait jouee le sera au tick suivant : le flux reste contigu. */
+    if (calypso_bsp_sb_retenter()) return;
     static unsigned manques, manques_log;
     if (g_ts0_offset != INT64_MIN) {
         int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
