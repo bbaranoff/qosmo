@@ -955,6 +955,45 @@ static int sb_fenetre_on(void)
 /* Cadre le burst SB dans `iq` pour la fenetre one-shot telle qu'elle est
  * programmee a cet instant (191 echantillons, burst a 21 : TOA 23) ; rend le
  * nombre d'echantillons du bloc, 0 si ce n'est pas une fenetre SB. */
+/* [2026-09-30] LA MODULATION DU SCH, MESUREE EN REJEU (c54x_exe --rejouer,
+ * REJEU_CONTINUER=1, 8000 trames, deterministe) : la ROM ne decodait que 34 %
+ * des SCH poses au bon TOA (121 sur 352 a 12000 trames), et sur le banc 48 %
+ * des fenetres SB natives (run du 29/09 23:50). Sur les echecs, seuls les bits
+ * 0-2 du mot SB sont faux le plus souvent : le profil « fil du rasoir » des NB
+ * avant gmsk_elargir. Balayage (SCH decodes / SCH presentes, 8000 trames) :
+ *   elargissement a : 0 -> 34 %, 0.15 -> 50 %, 0.3 -> 60 %, 0.5-1.5 -> 63-66 %
+ *   + instant d'echantillonnage 0.35 (au lieu de 0.5)          -> 76 %
+ *   + bruit gaussien sigma 3000 (10 % de l'amplitude)           -> 82 %
+ *   phase porteuse, marge de tete : sans effet ; amplitude < 22000 : plus de FB.
+ * Ces trois reglages sont les defauts ici (CALYPSO_BSP_SB_SYM, _SB_DEC,
+ * _SB_NOISE ; 0 / 0.5 / 0 = comportement d'avant). Le bruit est seme par le fn
+ * de la trame : deterministe, rejouable. */
+static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn)
+{
+    static double sym = -2, dec = -2, sigma = -2;
+    if (sym == -2) {
+        const char *e;
+        e = calypso_getenv("CALYPSO_BSP_SB_SYM");   sym   = (e && *e) ? atof(e) : 1.0;
+        e = calypso_getenv("CALYPSO_BSP_SB_DEC");   dec   = (e && *e) ? atof(e) : 0.35;
+        e = calypso_getenv("CALYPSO_BSP_SB_NOISE"); sigma = (e && *e) ? atof(e) : 3000.0;
+        if (dec < 0 || dec >= 1.0) dec = 0.5;
+        BSP_LOG("SCH : elargissement %.2f, instant %.2f symbole, bruit sigma %.0f (mesure rejeu du 2026-09-30 : 82 %% de SCH decodes)", sym, dec, sigma);
+    }
+    gmsk_moduler(bits, 148, 30000, 0.0, dec, dst);
+    if (sym != 0.0) gmsk_elargir(dst, 148, sym);
+    if (sigma > 0) {
+        uint32_t seed = fn * 2654435761u + 777u;
+        for (int k = 0; k < 296; k++) {
+            seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
+            seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
+            double g = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+            double v = dst[k] + sigma * g;
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            dst[k] = (int16_t)lrint(v);
+        }
+    }
+}
 static int sb_cadrer(const uint8_t *bits, int16_t *iq, int cap_ech, int *marge_out)
 {
     if (!calypso_rhea_dma_one_shot()) return 0;
@@ -964,7 +1003,7 @@ static int sb_cadrer(const uint8_t *bits, int16_t *iq, int cap_ech, int *marge_o
     int marge = 21;
     if (marge > total - 148) marge = total - 148;
     memset(iq, 0, (size_t)(2 * total) * sizeof *iq);
-    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    sb_moduler(bits, iq + 2 * marge, g_dernier_sch.fn);
     *marge_out = marge;
     return total;
 }
@@ -1174,7 +1213,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         if (!armee) sb_action = "DMA NON ARMEE (le RIF jette) : SCH memorise pour la fenetre SB";
         else if (!(one_shot && nwin >= 190)) sb_action = "autre fenetre (PM/NB/continue) : SCH memorise pour la fenetre SB";
     }
-    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    if (sb) sb_moduler(bits, iq + 2 * marge, g_ts0[i].fn);   /* [2026-09-30] voir sb_moduler() */
+    else    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
     if (!sb && !fcch) {
         static double sym = -2;
         if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
@@ -1837,21 +1877,24 @@ static void bsp_trxd_readable(void *opaque)
          * c54x_exe bench with that modulation, 1 CRC OK on 81 SB attempts
          * against 27 on 76 with GMSK, and the FB frequency estimate wandered to
          * +1050 Hz. Amplitude 30000 as the synthetic cell. */
-        gmsk_moduler(bits, nbits, 30000, 0.0, 0.5, iq + iq_count);
-        /* [2026-09-21] Same widening as the synthetic cell (gmsk_elargir,
-         * CALYPSO_BSP_NB_SYM, default 0.3) on the normal bursts: the ROM zeroes
-         * the +-1 channel taps of a plain 1-sps GMSK on about 60 percent of the
-         * bursts and the block fails. FCCH (all zeros) and SB (training
-         * sequence at bits 42..105) are left as they are: FB/SB lock natively
-         * on them. */
+        /* [2026-09-30] le SCH passe par sb_moduler() (instant, elargissement,
+         * bruit mesures en rejeu) ; FCCH tel quel ; NB elargi (CALYPSO_BSP_NB_SYM). */
+        int est_sb = 0;
         if (nbits == 148) {
             static const uint8_t train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
-            static double sym = -2;
-            if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
-            int zeros = 1, sb = 1;
-            for (int k = 0; k < 148 && zeros; k++) if (bits[k]) zeros = 0;
-            for (int k = 0; k < 64 && sb; k++) if ((bits[42 + k] & 1) != train_sb[k]) sb = 0;
-            if (!zeros && !sb) gmsk_elargir(iq + iq_count, nbits, sym);
+            est_sb = 1;
+            for (int k = 0; k < 64 && est_sb; k++) if ((bits[42 + k] & 1) != train_sb[k]) est_sb = 0;
+        }
+        if (est_sb) sb_moduler(bits, iq + iq_count, fn);
+        else {
+            gmsk_moduler(bits, nbits, 30000, 0.0, 0.5, iq + iq_count);
+            if (nbits == 148) {
+                static double sym = -2;
+                if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
+                int zeros = 1;
+                for (int k = 0; k < 148 && zeros; k++) if (bits[k]) zeros = 0;
+                if (!zeros) gmsk_elargir(iq + iq_count, nbits, sym);
+            }
         }
         iq_count += 2 * nbits;
 
