@@ -37,7 +37,8 @@ void calypso_bsp_set_tpu_offset(int qbits);
  * TS0 dans la fenetre livree au DSP. */
 void calypso_bsp_set_dedie(int tn, int genre, int ss);
 void calypso_bsp_toa_feedback(int toa);
-int  calypso_bsp_service(uint32_t current_fn);  /* drains UDP 6702 and delivers the current frame (standalone host) */
+int  calypso_bsp_service(uint32_t current_fn);
+int  calypso_bsp_sb_retenter(void);     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
 
 /*
  * Receive a downlink burst.
