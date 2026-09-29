@@ -917,20 +917,19 @@ static const uint8_t *bsp_dedie_bits(uint32_t fn)
  * armee, calypso_rif_rx_burst() jetait le burst (« n_muets ») et la page ne
  * contenait que du perime -- le resultat constant de la page 0.
  *
- * Correctif, en trois points, tous derriere CALYPSO_BSP_SB_FENETRE (1 par
- * defaut, 0 = comportement d'avant) :
- *   1. un SCH livre alors que la ROM a programme une page de tache (>= 150
- *      echantillons) sans ONE_SHOT est cadre comme dans une vraie fenetre SB :
- *      residu du RIF vide, CALYPSO_BSP_SB_MARGE (21) echantillons de silence en
- *      tete, bloc de DEUX pages exactement (la pompe ne transfere qu'a deux
- *      pages pleines), et pas d'intervalles de bourrage derriere ;
- *   2. si la DMA n'est pas armee a l'instant du depot, le bloc est garde et
- *      relivre des que la ROM l'arme (calypso_bsp_sb_retenter(), appelee par la
- *      boucle de pompe de pont.c et au tick suivant) ;
- *   3. la trace [sbwin] dit ce qui a ete fait, et pont.c ajoute le TOA de la
- *      ROM aux traces [a_sch] : un SB bien cadre doit lire TOA=23.
- * On ne touche ni a la recherche FB (page de 48 echantillons : rien ne change),
- * ni aux fenetres ONE_SHOT deja gerees. */
+ * Correctif (v2, apres mesure du premier jet -- voir calypso_bsp_sb_retenter()),
+ * derriere CALYPSO_BSP_SB_FENETRE (1 par defaut, 0 = comportement d'avant) :
+ *   1. un SCH depose alors que la DMA n'est pas armee n'est plus jete : il est
+ *      garde UN tick et livre, cadre a 21 (TOA 23), dans la fenetre SB one-shot
+ *      (>= 190 echantillons) que la ROM arme juste apres ; l'offset ARM-tick
+ *      est recale sur le tick de la livraison effective ;
+ *   2. il n'est JAMAIS livre dans une autre fenetre (NB 151, continue) : un
+ *      bloc non reclame expire ;
+ *   3. la trace [sbwin] dit armee/one_shot/page programmee/residu RIF et
+ *      l'action, et pont.c ajoute TOA/PM/SNR aux traces [a_sch] : un SB bien
+ *      cadre lit TOA=23 ou 24.
+ * La recherche FB (page de 48 echantillons, DMA armee en continu) et les
+ * fenetres one-shot armees avant le depot ne changent pas. */
 static int16_t  g_sb_attente_iq[2 * 512];
 static int      g_sb_attente_n;        /* mots int16 en attente, 0 = rien */
 static uint32_t g_sb_attente_fn;
