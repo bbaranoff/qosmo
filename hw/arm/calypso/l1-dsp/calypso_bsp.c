@@ -1390,7 +1390,16 @@ static struct { int actif; uint32_t fn_sch; uint32_t tick; uint16_t a0[2]; unsig
 static int sb_double_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_DOUBLE"); on = (e && *e == '0') ? 0 : 1;
+    /* [2026-09-30 12:00] DESACTIVEE PAR DEFAUT. Run de 11:37 : plus aucun LOS pendant
+     * le RACH (le but), mais les deux appels de plus de 30 s tombent en « LOS
+     * during dedicated mode » avec un TCH descendant qui se degrade
+     * progressivement (a_dd err 19 -> 91, FIRE), alors que tous les appels des
+     * runs sans seconde chance tenaient 40 s et plus. Chaque decode en tentative
+     * 1 avance d'UNE trame l'index que le DSP reclame a la BTS (35 fois sur ce
+     * run, offset -673 -> -638) ; la marge DL du pont ne peut pas se refaire (la
+     * BTS ne va pas plus vite que le temps reel), min mesure 11 trames. Piste a
+     * confirmer par A/B (CALYPSO_BSP_SB_DOUBLE=1) avant de la remettre. */
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_DOUBLE"); on = (e && *e == '1') ? 1 : 0;
                   if (on) BSP_LOG("SB_DOUBLE on : le SCH suivant est aussi livre (forme D) dans la fenetre de la tentative 1"); }
     return on;
 }
@@ -1444,7 +1453,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
         int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
         unsigned i = (unsigned)w % BSP_TS0_RING;
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);
-        if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w && sb_double_on() &&
+        if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w && sb_double_on() && g_dedie_tn <= 0 &&
             bsp_ts0_est_fcch(g_ts0[i].bits) && calypso_rhea_dma_rx_armed() && calypso_rhea_dma_one_shot() &&
             calypso_rhea_dma_get_len_words() / 2 >= 190) {
             unsigned j = (unsigned)((w + 1) % BSP_FN_MAX) % BSP_TS0_RING;
