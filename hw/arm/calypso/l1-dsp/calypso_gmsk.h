@@ -15,4 +15,6 @@ void gmsk_moduler(const uint8_t *bits, int n, int amp, double phase0, double dec
  * channel filter does the same on silicon. Measured: SI1-4 decode with it,
  * ~40 % of the bursts without. */
 void gmsk_elargir(int16_t *iq, int n, double a);
+/* [2026-09-30] GMSK sur-echantillonnee + passe-bas Butterworth ordre 3 (fc en kHz) + decimation a `decalage` */
+void gmsk_moduler_filtre(const uint8_t *bits, int n, int amp, double phase0, double decalage, double fc_khz, int16_t *iq);
 #endif
