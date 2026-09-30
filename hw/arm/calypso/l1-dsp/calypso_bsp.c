@@ -2681,9 +2681,16 @@ static unsigned long g_enreg_n;
 FILE *calypso_bsp_enreg_fichier(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = calypso_getenv("CALYPSO_REJEU_ENREG"); on = !(e && *e == '0'); }
+    /* [2026-09-30] CALYPSO_REJEU_ENREG=tch : n'enregistrer que le TCH (le
+     * plafond etait atteint par les SDCCH du debut de run, l'appel n'y etait
+     * jamais) ; CALYPSO_REJEU_ENREG_MAX=<n> : plafond de livraisons (60000). */
+    static int tch_seul = 0; static unsigned long plafond = 60000;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_REJEU_ENREG"); on = !(e && *e == '0');
+                  tch_seul = (e && !strcmp(e, "tch")) ? 1 : 0;
+                  const char *m = calypso_getenv("CALYPSO_REJEU_ENREG_MAX"); if (m && *m) plafond = strtoul(m, NULL, 0); }
+    if (tch_seul && g_dedie_genre != BSP_DEDIE_TCH) return NULL;
     /* tout canal dedie (SDCCH compris) : ce qui corrompt l'etat du DSP peut preceder le TCH */
-    if (!on || g_dedie_tn <= 0 || g_enreg_n >= 60000)
+    if (!on || g_dedie_tn <= 0 || g_enreg_n >= plafond)
         return NULL;
     if (!g_enreg_f)
         g_enreg_f = fopen("/dev/shm/calypso_rejeu_tch.bin", "wb");

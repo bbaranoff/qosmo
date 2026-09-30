@@ -165,6 +165,7 @@ typedef struct CalypsoTRX {
     bool     go_inutile;        /* single-phase DSP answered a final DONE already */
     uint64_t eoi_cible;         /* frame_eoi to reach before the TICK goes out */
     unsigned eoi_attentes, eoi_timeouts;
+    unsigned eoi_longues;       /* [2026-09-30] attentes de l1_sync au-dela de 256 essais */
     uint8_t burst_ring[8];
     unsigned burst_w, burst_r;
     uint16_t burst_cur;
@@ -979,6 +980,39 @@ static void tdma_tick(void *opaque)
         bool fini = s->phase_a_recue &&
                     (calypso_inth_frame_eoi() >= s->eoi_cible ||
                      calypso_inth_irq_masked(CALYPSO_IRQ_TPU_FRAME));
+        /* [2026-09-30] NE PAS FORCER LE GO TANT QUE L'ARM N'A PAS SERVI L'IT
+         * TRAME. Au bout de 256 attentes (74 ms) on envoyait le GO « quand
+         * meme » et on recalait la cible d'EOI : la ROM lisait alors une page W
+         * perimee (a_a5fn de la trame precedente) et, l'IT trame ayant ete
+         * perdue (impulsion de 1 ms, ARM occupe par l'UART), le compteur de
+         * trames du firmware glissait d'une unite pour le reste du canal.
+         * L'IT est desormais memorisee dans l'INTH (calypso_inth.c) ; on
+         * l'attend jusqu'a PONT_ATTENTES_LONG (~2,4 s) et on trace les attentes
+         * longues. Le temps mural perdu se paye en trames BTS arrivees trop
+         * tard chez le BSP (pertes radio), pas en glissement TDMA. */
+        if (!fini && s->eoi_attentes + 1 >= (unsigned)PONT_ATTENTES_MAX &&
+            s->eoi_attentes + 1 < (unsigned)PONT_ATTENTES_MAX * 32 && s->phase_a_recue) {
+            if (s->eoi_attentes + 1 == (unsigned)PONT_ATTENTES_MAX && ++s->eoi_longues <= 20) {
+                fprintf(stderr, "[trx] pont DSP : l1_sync de l'ARM toujours pas finie apres 256 attentes "
+                        "(fn=%u, IT trame %s, EOI %" PRIu64 "/%" PRIu64 ") : on attend au lieu de forcer le GO\n",
+                        s->fn, calypso_inth_irq_pending(CALYPSO_IRQ_TPU_FRAME) ? "EN ATTENTE" : "servie",
+                        calypso_inth_frame_eoi(), s->eoi_cible);
+            }
+            s->eoi_attentes++;
+            if (g_uart_modem) {          /* l'ARM peut attendre la ligne serie : on la sert */
+                calypso_uart_poll_backend(g_uart_modem);
+                calypso_uart_kick_rx(g_uart_modem);
+            }
+            if (g_uart_irda) {
+                calypso_uart_poll_backend(g_uart_irda);
+                calypso_uart_kick_rx(g_uart_irda);
+            }
+            timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
+            return;
+        }
+        if (fini && s->eoi_attentes >= (unsigned)PONT_ATTENTES_MAX && s->eoi_longues <= 20) {
+            fprintf(stderr, "[trx] pont DSP : l1_sync finie apres %u attentes (fn=%u)\n", s->eoi_attentes, s->fn);
+        }
         if (!fini && ++s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX) {
             if (g_uart_modem) {
                 calypso_uart_poll_backend(g_uart_modem);
@@ -1000,8 +1034,8 @@ static void tdma_tick(void *opaque)
                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + FRAME_IRQ_PULSE_NS);
             }
             s->eoi_cible = calypso_inth_frame_eoi();   /* resync after a lost frame IRQ */
-            if (++s->eoi_timeouts == 1 || (s->eoi_timeouts % 2170) == 0) {
-                fprintf(stderr, "[trx] pont DSP : phase A %s, l1_sync de l'ARM %s apres 256 attentes "
+            if (++s->eoi_timeouts <= 20 || (s->eoi_timeouts % 2170) == 0) {
+                fprintf(stderr, "[trx] pont DSP : phase A %s, l1_sync de l'ARM %s apres 8192 attentes "
                         "(fn=%u, %u fois), GO envoye quand meme\n",
                         s->phase_a_recue ? "recue" : "PAS recue",
                         calypso_inth_frame_eoi() >= s->eoi_cible ? "finie" : "PAS finie",

@@ -42,5 +42,6 @@ void calypso_inth_arm_ack(void);
  * so the ARM reads the R page before the DSP overwrites it, as on silicon. */
 uint64_t calypso_inth_frame_eoi(void);
 bool calypso_inth_irq_masked(int irq);
+bool calypso_inth_irq_pending(int irq);   /* [2026-09-30] IT levee, pas encore servie */
 
 #endif

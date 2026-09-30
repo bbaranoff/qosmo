@@ -45,6 +45,19 @@ static void calypso_inth_set_irq(void *opaque, int irq, int level)
 
     if (level) {
         s->levels |= (1u << irq);
+    } else if ((s->ilr[irq] & 0x2) && (irq == 4 || irq == 5 || irq == 15)) {
+        /* [2026-09-30] SOURCE CONFIGUREE SUR FRONT (ILR bit 1, irq_config(...,
+         * edge=1)) : le front est MEMORISE dans IT_REG jusqu'a la lecture de
+         * IRQ_NUM (ci-dessous, pour 4/5/15) ou l'effacement logiciel. Avant,
+         * la retombee de la ligne effacait le bit : l'IT trame TPU (IRQ 4) est
+         * une impulsion de 1 ms (calypso_trx.c FRAME_IRQ_PULSE_NS) et, si
+         * l'ARM etait encore dans un traitement long (UART/L1CTL en pleine
+         * parole), l'IT etait PERDUE. Le firmware ne detecte pas une trame
+         * TDMA perdue : son compteur de trames glissait d'une unite pour le
+         * reste du canal (a_a5fn = fn-1 : [a5] ecart +1 -> 0, parole
+         * dechiffree avec le mauvais flux, FACCH a faux, SACCH perdue, LOS
+         * ~15 s plus tard). Mesure : appels de 12:09 et 12:26, bascule a
+         * l'injection du ton (rafales de TRAFFIC_REQ sur l'UART). */
     } else {
         s->levels &= ~(1u << irq);
     }
@@ -205,6 +218,12 @@ uint64_t calypso_inth_frame_eoi(void)
 bool calypso_inth_irq_masked(int irq)
 {
     return !g_inth || (g_inth->mask & (1u << irq));
+}
+
+/* [2026-09-30] IT encore en attente dans IT_REG (levee, pas encore servie). */
+bool calypso_inth_irq_pending(int irq)
+{
+    return g_inth && (g_inth->levels & (1u << irq));
 }
 
 static void calypso_inth_realize(DeviceState *dev, Error **errp)
