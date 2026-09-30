@@ -968,6 +968,12 @@ static int sb_fenetre_on(void)
  * Ces trois reglages sont les defauts ici (CALYPSO_BSP_SB_SYM, _SB_DEC,
  * _SB_NOISE ; 0 / 0.5 / 0 = comportement d'avant). Le bruit est seme par le fn
  * de la trame : deterministe, rejouable. */
+/* [2026-09-30] DEUX FORMES D'ONDE POUR LE SCH. Mesure en rejeu (8000 trames,
+ * 209 SCH) : la forme A (ci-dessous) rate 20 % des SCH ; la forme D (A + traine
+ * causale 0.8, 0.4 et autre graine de bruit) en rate 17 % ; les deux ensemble
+ * n'en ratent que 7 % en commun (A+D = 15/209). g_sb_variante = 1 selectionne D,
+ * utilisee par la seconde chance (voir bsp_ts0_service). */
+static int g_sb_variante = 0;
 static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn)
 {
     static double sym = -2, dec = -2, sigma = -2;
@@ -981,8 +987,18 @@ static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn)
     }
     gmsk_moduler(bits, 148, 30000, 0.0, dec, dst);
     if (sym != 0.0) gmsk_elargir(dst, 148, sym);
+    if (g_sb_variante == 1) {                       /* forme D : traine causale 0.8, 0.4, normalisee */
+        double xi[148], xq[148];
+        for (int k = 0; k < 148; k++) { xi[k] = dst[2*k]; xq[k] = dst[2*k+1]; }
+        for (int k = 0; k < 148; k++) {
+            double yi = xi[k], yq = xq[k];
+            if (k >= 1) { yi += 0.8 * xi[k-1]; yq += 0.8 * xq[k-1]; }
+            if (k >= 2) { yi += 0.4 * xi[k-2]; yq += 0.4 * xq[k-2]; }
+            dst[2*k] = (int16_t)lrint(yi / 2.2); dst[2*k+1] = (int16_t)lrint(yq / 2.2);
+        }
+    }
     if (sigma > 0) {
-        uint32_t seed = fn * 2654435761u + 777u;
+        uint32_t seed = fn * 2654435761u + 777u + (g_sb_variante ? 7919u : 0u);
         for (int k = 0; k < 296; k++) {
             seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
             seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
@@ -1356,10 +1372,69 @@ static void bsp_horloge_publier(uint32_t fn_bts, uint32_t tick_fn, int cale)
     }
 }
 
+/* [2026-09-30] LA SECONDE CHANCE. Le firmware poste deux taches SB sur deux
+ * trames consecutives ; la premiere tombe sur la trame FCCH (burst nul), fenetre
+ * vide, chance perdue ; la seconde sur le SCH. Or le BSP a deja le SCH de la
+ * trame suivante dans son anneau (la BTS est en avance). On le livre donc dans la
+ * fenetre de la tentative 1, en forme D, puis on lit le resultat de la ROM dans
+ * l'API RAM au tick suivant (a_sch page R : B_BLUD sans B_SCH_CRC, T2 <= 25,
+ * T3' <= 4) :
+ *   - decode : le firmware a pose son horloge sur fn=SCH a ce tick-la ; on recale
+ *     l'offset ARM-tick d'une trame (fn_sch - tick), la trame du tick suivant est
+ *     fn_sch+1, le flux reste contigu (le SCH lui-meme n'est pas rejoue : pas
+ *     besoin) ;
+ *   - rate : rien ne change, le SCH natif part en tentative 2 (forme A) comme
+ *     avant.
+ * Rejeu : A seule rate 20 %, A+D en commun 7 %. CALYPSO_BSP_SB_DOUBLE=0 coupe. */
+static struct { int actif; uint32_t fn_sch; uint32_t tick; uint16_t a0[2]; unsigned n, ok, ko; } g_sc;
+static int sb_double_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_DOUBLE"); on = (e && *e == '0') ? 0 : 1;
+                  if (on) BSP_LOG("SB_DOUBLE on : le SCH suivant est aussi livre (forme D) dans la fenetre de la tentative 1"); }
+    return on;
+}
+/* a_sch[0..4] de la page R pg : mots (0x50|0x78 + 0x1E)/2 de l'API RAM (calypso_api.h) */
+static const uint16_t *sc_a_sch(int pg)
+{
+    if (!bsp.dsp || !bsp.dsp->api_ram) return NULL;
+    return &bsp.dsp->api_ram[((pg ? 0x78u : 0x50u) + 0x1Eu) / 2];
+}
+static int sc_rom_a_decode(void)
+{
+    for (int pg = 0; pg < 2; pg++) {
+        const uint16_t *a = sc_a_sch(pg);
+        if (!a || a[0] == g_sc.a0[pg]) continue;
+        if ((a[0] & 0x8100) != 0x8000) continue;               /* B_BLUD sans B_SCH_CRC */
+        uint32_t sb = (uint32_t)a[3] | ((uint32_t)a[4] << 16);
+        unsigned t2 = (sb >> 18) & 0x1f, t3p = ((sb >> 24) & 1) | ((sb >> 15) & 6);
+        if (t2 <= 25 && t3p <= 4) return 1;
+    }
+    return 0;
+}
 static void bsp_ts0_service(uint32_t tick_fn)
 {
     if (!g_ts0 || !g_ts0_any) return;
     g_tick_courant = tick_fn;
+    /* seconde chance : au tick suivant, le verdict de la ROM decide de l'horloge */
+    if (g_sc.actif) {
+        if (tick_fn == g_sc.tick + 1) {
+            if (sc_rom_a_decode()) {
+                int64_t off = (int64_t)g_sc.fn_sch - (int64_t)g_sc.tick;
+                if (off < 0) off += BSP_FN_MAX;
+                g_sc.ok++; g_ts0_offset = off;
+                if (g_sc.ok <= 40 || g_sc.ok % 50 == 0)
+                    printf("  [sbwin] SECONDE CHANCE : SB fn=%u DECODE a la tentative 1 (tick %u), offset ARM-tick recale [%u/%u]\n",
+                           g_sc.fn_sch, g_sc.tick, g_sc.ok, g_sc.n);
+            } else {
+                g_sc.ko++;
+                if (g_sc.ko <= 40 || g_sc.ko % 50 == 0)
+                    printf("  [sbwin] SECONDE CHANCE : SB fn=%u rate a la tentative 1, SCH natif en tentative 2 [%u/%u]\n",
+                           g_sc.fn_sch, g_sc.ok, g_sc.n);
+            }
+        }
+        g_sc.actif = 0;
+    }
     /* [2026-09-29] Un SCH garde au tick precedent est livre dans la fenetre SB
      * qui vient de s'armer ; il recale l'offset ARM-tick, donc la trame que ce
      * tick aurait jouee le sera au tick suivant : le flux reste contigu. */
@@ -1369,6 +1444,23 @@ static void bsp_ts0_service(uint32_t tick_fn)
         int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
         unsigned i = (unsigned)w % BSP_TS0_RING;
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);
+        if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w && sb_double_on() &&
+            bsp_ts0_est_fcch(g_ts0[i].bits) && calypso_rhea_dma_rx_armed() && calypso_rhea_dma_one_shot() &&
+            calypso_rhea_dma_get_len_words() / 2 >= 190) {
+            unsigned j = (unsigned)((w + 1) % BSP_FN_MAX) % BSP_TS0_RING;
+            if (g_ts0[j].valid && g_ts0[j].fn == (uint32_t)((w + 1) % BSP_FN_MAX) && bsp_ts0_est_sb(g_ts0[j].bits)) {
+                for (int pg = 0; pg < 2; pg++) { const uint16_t *a = sc_a_sch(pg); g_sc.a0[pg] = a ? a[0] : 0; }
+                g_sb_variante = 1;
+                bsp_ts0_livrer(tick_fn, j);           /* le SCH suivant, forme D, dans la fenetre de la tentative 1 */
+                g_sb_variante = 0;
+                g_ts0[i].joue = 1;                    /* la trame FCCH n'est pas jouee : la fenetre etait pour le SB */
+                g_sc.actif = 1; g_sc.fn_sch = g_ts0[j].fn; g_sc.tick = tick_fn; g_sc.n++;
+                if (g_sc.n <= 40 || g_sc.n % 50 == 0)
+                    printf("  [sbwin] SECONDE CHANCE : trame FCCH fn=%u au tick %u, fenetre SB armee -> SCH fn=%u livre (forme D)\n",
+                           (uint32_t)w, tick_fn, g_ts0[j].fn);
+                return;
+            }
+        }
         if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
         /* [2026-09-22] LE DSP COURT DEVANT LE BTS : RECULER, NE PAS TROUER.
          *
