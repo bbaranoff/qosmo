@@ -1423,12 +1423,12 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 int64_t off = (int64_t)g_sc.fn_sch - (int64_t)g_sc.tick;
                 if (off < 0) off += BSP_FN_MAX;
                 g_sc.ok++; g_ts0_offset = off;
-                if (g_sc.ok <= 40 || g_sc.ok % 50 == 0)
+                if (g_sc.ok <= 300 || g_sc.ok % 50 == 0)
                     printf("  [sbwin] SECONDE CHANCE : SB fn=%u DECODE a la tentative 1 (tick %u), offset ARM-tick recale [%u/%u]\n",
                            g_sc.fn_sch, g_sc.tick, g_sc.ok, g_sc.n);
             } else {
                 g_sc.ko++;
-                if (g_sc.ko <= 40 || g_sc.ko % 50 == 0)
+                if (g_sc.ko <= 300 || g_sc.ko % 50 == 0)
                     printf("  [sbwin] SECONDE CHANCE : SB fn=%u rate a la tentative 1, SCH natif en tentative 2 [%u/%u]\n",
                            g_sc.fn_sch, g_sc.ok, g_sc.n);
             }
@@ -1450,12 +1450,20 @@ static void bsp_ts0_service(uint32_t tick_fn)
             unsigned j = (unsigned)((w + 1) % BSP_FN_MAX) % BSP_TS0_RING;
             if (g_ts0[j].valid && g_ts0[j].fn == (uint32_t)((w + 1) % BSP_FN_MAX) && bsp_ts0_est_sb(g_ts0[j].bits)) {
                 for (int pg = 0; pg < 2; pg++) { const uint16_t *a = sc_a_sch(pg); g_sc.a0[pg] = a ? a[0] : 0; }
+                /* [2026-09-30 11:40] bsp_ts0_livrer() recale l'offset des qu'un SCH part
+                 * dans une fenetre SB ; ici il ne faut PAS : si la ROM rate, la tentative 2
+                 * doit voir le SCH natif au tick suivant (mesure du run de 11:34 : sans
+                 * cela, la trame suivante partait a sa place et D remplacait A au lieu
+                 * de s'y ajouter, 31 SB / 55 FBSB comme avant). Le recalage n'a lieu
+                 * qu'au tick suivant, sur CRC OK lu dans l'API RAM. */
+                int64_t off_avant = g_ts0_offset;
                 g_sb_variante = 1;
                 bsp_ts0_livrer(tick_fn, j);           /* le SCH suivant, forme D, dans la fenetre de la tentative 1 */
                 g_sb_variante = 0;
+                g_ts0_offset = off_avant;
                 g_ts0[i].joue = 1;                    /* la trame FCCH n'est pas jouee : la fenetre etait pour le SB */
                 g_sc.actif = 1; g_sc.fn_sch = g_ts0[j].fn; g_sc.tick = tick_fn; g_sc.n++;
-                if (g_sc.n <= 40 || g_sc.n % 50 == 0)
+                if (g_sc.n <= 300 || g_sc.n % 50 == 0)
                     printf("  [sbwin] SECONDE CHANCE : trame FCCH fn=%u au tick %u, fenetre SB armee -> SCH fn=%u livre (forme D)\n",
                            (uint32_t)w, tick_fn, g_ts0[j].fn);
                 return;
