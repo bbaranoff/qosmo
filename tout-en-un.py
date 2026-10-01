@@ -11,7 +11,7 @@ dossiers dans UN fichier Markdown, raccourci SANS PERTE :
     valeurs. On reconstruit chaque ligne en remettant les valeurs dans l'ordre.
   * codes couleur ANSI et retours chariot retires (seule perte, volontaire).
 
-    ./tout-en-un.py [dossier...]      defaut : /opt/GSM/tests et le dernier /root/banc-max-*
+    ./tout-en-un.py [dossier...]      defaut : /opt/GSM/qosmo et le dernier /root/banc-max-*
     SORTIE=/chemin.md  EXT="log sh md mmd py txt"  SEUIL=3 (taille mini d'un groupe)
 """
 import glob
