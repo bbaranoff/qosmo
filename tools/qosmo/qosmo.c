@@ -26,7 +26,9 @@
  * Any unknown argument starting with `-` (and its value, if that does not
  * start with `-`) is forwarded to QEMU. After `--`, everything goes to QEMU.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -97,6 +99,7 @@
 static const char *g_alias = QOSMO_ALIAS;
 
 /* ---------------------------------------------------------------- utils */
+static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -107,6 +110,7 @@ static void say(const char *fmt, ...)
     fputc('\n', stderr);
 }
 
+static void die(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 static void die(const char *fmt, ...)
 {
     va_list ap;
@@ -125,6 +129,7 @@ static char *xstrdup(const char *s)
     return d;
 }
 
+static char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static char *xasprintf(const char *fmt, ...)
 {
     char *p = NULL;
