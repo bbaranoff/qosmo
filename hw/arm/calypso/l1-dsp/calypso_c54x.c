@@ -6533,6 +6533,7 @@ int c54x_run(C54xState *s, int n_insns)
          * So decrement by the number of WORDS executed (consumed), and do NOT
          * count the arming iteration (ds_before == 0 is the branch itself; the
          * delay starts with the next instruction). */
+        const uint16_t pc_sequentiel = (uint16_t)s->pc;   /* PC after `s->pc += consumed`, before any delayed commit */
         if (s->delay_slots > 0) {
             if (ds_before == 0) {
                 /* The delayed branch's own iteration: decrement nothing;
@@ -6552,8 +6553,26 @@ int c54x_run(C54xState *s, int n_insns)
          * redirect to RSA is the final word on s->pc for this iteration.
          * Triggers when PC has overshot REA (= reached REA+1 or beyond,
          * accounting for 2-word instructions at the body's tail). Skip
-         * during RPT (single-instruction repeat has priority). */
-        if (s->rptb_active && !s->rpt_active && s->pc >= s->rea + 1) {
+         * during RPT (single-instruction repeat has priority).
+         *
+         * [2026-10-03] Only a SEQUENTIAL step that crosses REA loops back: the
+         * instruction just executed started at or before REA, the PC was
+         * advanced by its own words (no taken branch, no delayed commit), and
+         * now lies past REA. A call or branch to a target beyond REA does not
+         * end the block on the C54x. The old `pc >= rea + 1` did: in the CHED
+         * speech-quality loop (PROM0 `rptb 0x9b2a` at 0x9ad3), `calad b` to
+         * the 0x9b2c table (`retd ; stl b,@0x62`) restarted the block at RSA
+         * instead of calling, skipping the rest of the body (0x9ae6..0x9b2a)
+         * on every iteration: the SD values tested against d_sd_min_thr_tchfs
+         * were never computed, and B_BFI was set on 100 % of the speech
+         * frames. CALYPSO_RPTB_GE=1 restores the old test. */
+        static int rptb_ge = -1;
+        if (rptb_ge < 0) { const char *e = getenv("CALYPSO_RPTB_GE"); rptb_ge = (e && *e == '1') ? 1 : 0; }
+        const bool rptb_fin = rptb_ge
+            ? (s->pc >= s->rea + 1)
+            : (consumed > 0 && (uint16_t)s->pc == pc_sequentiel &&
+               exec_pc <= s->rea && (uint16_t)s->pc > s->rea);
+        if (s->rptb_active && !s->rpt_active && rptb_fin) {
             static int rptb_log = 0;
             if (rptb_log < 20) {
                 C54_LOG("RPTB redirect PC=0x%04x→RSA=0x%04x REA=0x%04x BRC=%d",
