@@ -272,6 +272,29 @@ le RTP ne coule pas (décodage du pont, indépendant du DSP) ; le `ko` de
 Reste à valider : rattrapage du pacer pour la parole
 (`CALYPSO_PACER_RATTRAPAGE`), rien dans les journaux de ces runs.
 
+## Injecteur de bruit (sens descendant)
+
+Inactif par défaut. [`tools/injecteur_bruit.py`](tools/injecteur_bruit.py) est un proxy UDP
+transparent entre le pont et la couche 1 qui dégrade le descendant ; le montant est relayé tel
+quel. Le module [`run_modules/38-bruit.sh`](run_modules/38-bruit.sh) le lance (avant `40-qemu`)
+quand `BRUIT_MODE` est posé ; `c54x_exe/run.sh` fait de même pour le DSP externe (étape b).
+
+| variable | effet |
+|---|---|
+| `BRUIT_MODE` | `ber` (bits inversés), `souple` (AWGN + décision dure), `iq` (I/Q GMSK + AWGN, **expérimental**, DSP seulement, refusé sous `CALYPSO_BSP_STREAM=1`), `relais` (rien) |
+| `BRUIT_BER`, `BRUIT_RAFALES` | taux d'inversion 0..1 ; longueur moyenne des rafales en bits (Gilbert-Elliott) |
+| `BRUIT_SNR_DB` | SNR en dB, P/(2σ²) par échantillon complexe ; **sans** `BRUIT_MODE` : exporte `CALYPSO_BSP_SNR_DB`, l'AWGN du cœur C54x (`l1-dsp/calypso_c54x.c`, `c54x_bsp_load`), sans effet sur la L1 gr-gsm |
+| `BRUIT_PERTE`, `BRUIT_TN`, `BRUIT_GRAINE` | effacements (dsp : bits aléatoires ; gr-gsm : bloc non transmis), intervalles visés, graine (sans mode : `CALYPSO_BSP_BRUIT_GRAINE`) |
+| `BRUIT_STATS`, `BRUIT_OPTS`, `BRUIT_PY` | période des statistiques (10 s), options en plus, chemin de l'injecteur |
+| `BRUIT_CIBLE`, `BRUIT_PORT_DSP`, `BRUIT_PORT_GRGSM` | L1 du QEMU (`auto` : `build/meson-info`) ; ports déplacés (16702, 14730) |
+
+Avec la L1 gr-gsm, QEMU écoute GSMTAP sur 4730 **en dur** : c'est le pont qui vise
+`PONT_GSMTAP_PORT` (osmo-operator `pont/config.py`), que `pont/pont.py` met lui-même à 14730 quand
+`BRUIT_MODE` vaut `ber` ou `relais` ; le flux est fait de blocs L2 déjà décodés, d'où ces deux modes
+seulement. Avec la L1 DSP, le module exporte `CALYPSO_BSP_PORT=16702` pour QEMU et l'injecteur prend
+6702. En montage DSP de `start-direct.sh` (`qemu` retiré du plan), le module se saute.
+Journal : `$LOG_DIR/bruit.log`. Détail : `osmo-operator/wiki/Injecteur-bruit.md`.
+
 ## Documentation liée
 
 - [`hw/arm/calypso/doc/SONDES.md`](hw/arm/calypso/doc/SONDES.md) — les sondes

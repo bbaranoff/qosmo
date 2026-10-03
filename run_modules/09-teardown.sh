@@ -12,6 +12,7 @@ x:mobile
 x:trxcon
 f:pont/pont.py
 f:pont/pont_dsp.py
+f:tools/injecteur_bruit.py
 EOF
 }
 
