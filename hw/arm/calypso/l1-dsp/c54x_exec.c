@@ -305,6 +305,46 @@ static void c54x_sftl_exec(C54xState *s, uint16_t op)
     if (dst) s->b = (int64_t)r; else s->a = (int64_t)r;
 }
 
+/* AND/OR/XOR src,SHIFT,dst (F0xx..F3xx, mask FCE0, 1 word): the shift is LOGICAL over the whole 40-bit
+ * accumulator (guard bits included, ZERO fill on a right shift). [2026-10-03] The three copies shifted the
+ * sign-extended int64 with C's arithmetic >>, so a right shift of an accumulator whose bit 39 is set
+ * (the uplink convolutional encoder keeps its data in the guard byte : PROM0 0x8ece `sfta a,8`, then
+ * 0x8ec7..0x8eca `xor b,-6,a` `xor b,-8,a` `xor a,-1,a` `xor b,-3,a`) filled the vacated bits with ones.
+ * Measured with injected one-bit L2 blocks: 77 of the 413 varying bits of the 0x4280 output buffer were
+ * not the GSM 05.03 coded bits (a code tap missing at every word-boundary lane) ; with the zero fill the
+ * second coded word of a block with data bit 28 set is 0xC000, as the standard encoder gives, instead
+ * of 0x4000. A first attempt that also dropped the guard bits (32-bit shift) broke FB detection : the
+ * guard byte takes part. CALYPSO_LOGIC40=1 restores the old arithmetic behaviour. */
+static inline int c54x_logic40(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("CALYPSO_LOGIC40"); v = (e && *e == '1') ? 1 : 0; }
+    return v;
+}
+static inline int64_t c54x_logic_shifted(int64_t acc, int shift)
+{
+    if (c54x_logic40()) return (shift >= 0) ? (acc << shift) : (acc >> (-shift));
+    const uint64_t M = 0xFFFFFFFFFFULL;
+    uint64_t v = (uint64_t)acc & M;
+    uint64_t r = (shift >= 0) ? ((shift >= 40) ? 0 : (v << shift) & M) : ((-shift >= 40) ? 0 : v >> (-shift));
+    return (int64_t)r;
+}
+static inline int64_t c54x_logic_result(int64_t r) { return r; }
+
+/* LD/SUB Smem,16,dst (0x40-0x45): SPRU172C — the 16-bit operand is sign-extended into the guard bits only when
+ * SXM=1 ; with SXM=0 it is zero-extended. [2026-10-03] Both handlers always sign-extended. Measured on the
+ * uplink convolutional encoder (PROM0 0x8ec2 `ld *ar4+,16,a`, SXM=0, word 0x8000) : A came out 0xFF80000000
+ * instead of 0x0080000000, and the guard ones fed by the XOR-with-shift ladder that follows put wrong bits in
+ * the first coded word of every 16-bit chunk (one input bit of the L2 block -> 4 of the expected 7 coded bits).
+ * CALYPSO_LD16_SEXT=1 restores the old behaviour. */
+static inline int64_t c54x_smem16_shifted(C54xState *s, uint16_t w)
+{
+    static int old = -1;
+    if (old < 0) { const char *e = getenv("CALYPSO_LD16_SEXT"); old = (e && *e == '1') ? 1 : 0; }
+    int64_t v = (old || (s->st1 & ST1_SXM)) ? (int64_t)(int16_t)w : (int64_t)(uint16_t)w;
+    return v << 16;
+}
+
 bool calypso_fix_enabled(const char *name)
 {
     static char buf[1024];
@@ -717,7 +757,7 @@ int c54x_exec_one(C54xState *s)
             uint16_t v = data_read(s, a);
             int srcb = (op >> 9) & 1, dstb = (op >> 8) & 1;
             int64_t sv = srcb ? s->b : s->a;
-            int64_t r  = sv - (((int64_t)(int16_t)v) << 16);
+            int64_t r  = sv - c54x_smem16_shifted(s, v);
             if (dstb) s->b = sext40(r); else s->a = sext40(r);
             return 1 + s->lk_used;
         }
@@ -3030,8 +3070,8 @@ int c54x_exec_one(C54xState *s)
                     if (shift > 15) shift -= 32;
                     uint8_t aop = (op >> 5) & 0x7;
                     int64_t shifted;
-                    if (shift >= 0) shifted = sv << shift;
-                    else            shifted = sv >> (-shift);
+                    if (aop == 7) { if (shift >= 0) shifted = sv << shift; else shifted = sv >> (-shift); }
+                    else          shifted = c54x_logic_shifted(sv, shift);
                     /* First operand of AND/OR/XOR is the DESTINATION
                      * (TI SPRU172C); see the block comment below. */
                     int64_t first = *dst;
@@ -3067,9 +3107,9 @@ int c54x_exec_one(C54xState *s)
                      * 0xFCF0 subops 0..5, the 2-word long-immediate forms. Here the
                      * subop is 0xA, a 1-word form.
                      * ═══════════════════════════════════════════════════════ */
-                    case 4: *dst = sext40(first) & sext40(shifted); break;
-                    case 5: *dst = sext40(first) | sext40(shifted); break;
-                    case 6: *dst = sext40(first) ^ sext40(shifted); break;
+                    case 4: *dst = c54x_logic_result(sext40(first) & sext40(shifted)); break;
+                    case 5: *dst = c54x_logic_result(sext40(first) | sext40(shifted)); break;
+                    case 6: *dst = c54x_logic_result(sext40(first) ^ sext40(shifted)); break;
                     case 7: c54x_sftl_exec(s, op); break;   /* SFTL: 32-bit, sets C */
                     default: break;
                     }
@@ -3219,17 +3259,14 @@ int c54x_exec_one(C54xState *s)
                 int64_t result = src;
                 switch (sub) {
                 case 0x4: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (src << shift)
-                                                      : (src >> (-shift));
-                            result = dst_in & sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
+                            int64_t sh = c54x_logic_shifted(src, shift);
+                            result = c54x_logic_result(dst_in & sh);   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x5: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (src << shift)
-                                                      : (src >> (-shift));
-                            result = dst_in | sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
+                            int64_t sh = c54x_logic_shifted(src, shift);
+                            result = c54x_logic_result(dst_in | sh);   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x6: { int64_t dst_in = dst_b ? s->b : s->a;
-                            int64_t sh = (shift >= 0) ? (src << shift)
-                                                      : (src >> (-shift));
-                            result = dst_in ^ sh;   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
+                            int64_t sh = c54x_logic_shifted(src, shift);
+                            result = c54x_logic_result(dst_in ^ sh);   /* dst = dst OP (src << SHIFT), SPRU172C */ break; }
                 case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
                     c54x_sftl_exec(s, op);
                     return consumed + s->lk_used;
@@ -3532,20 +3569,20 @@ int c54x_exec_one(C54xState *s)
                 switch (sub) {
                 case 0x4: { /* AND src,SHIFT,DST: DST = SRC & (DST_in << shift) */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
-                    result = dst_in & sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
+                    int64_t sh = c54x_logic_shifted(src, shift);
+                    result = c54x_logic_result(dst_in & sh);   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x5: { /* OR */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
-                    result = dst_in | sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
+                    int64_t sh = c54x_logic_shifted(src, shift);
+                    result = c54x_logic_result(dst_in | sh);   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x6: { /* XOR */
                     int64_t dst_in = dst_b ? s->b : s->a;
-                    int64_t sh = (shift >= 0) ? (src << shift) : (src >> (-shift));
-                    result = dst_in ^ sh;   /* dst = dst OP (src << SHIFT), SPRU172C */
+                    int64_t sh = c54x_logic_shifted(src, shift);
+                    result = c54x_logic_result(dst_in ^ sh);   /* dst = dst OP (src << SHIFT), SPRU172C */
                     break;
                 }
                 case 0x7:   /* SFTL src,SHIFT,DST: 32-bit logical shift, sets C */
@@ -5682,7 +5719,7 @@ int c54x_exec_one(C54xState *s)
              * equalizer 0x847f/0x849b/0x837a/0x8390 `3f89 add *AR1-,16,B`. */
             if ((op & 0xFC00) == 0x3C00) {
                 int64_t srcv = ((op >> 9) & 1) ? s->b : s->a;
-                int64_t r = sext40(srcv + ((int64_t)(int16_t)val << 16));
+                int64_t r = sext40(srcv + c54x_smem16_shifted(s, val));
                 if ((op >> 8) & 1) s->b = r; else s->a = r;
                 return consumed + s->lk_used;
             }
@@ -5823,7 +5860,7 @@ int c54x_exec_one(C54xState *s)
                  * `4191 sub *AR1+,16,A,B` at 0x9a7f computed B - s1 instead of
                  * A - s1, so the second branch metric (s0-s1) was garbage. */
                 addr = resolve_smem(s, op, &ind);
-                int64_t val = (int64_t)(int16_t)data_read(s, addr) << 16;
+                int64_t val = c54x_smem16_shifted(s, data_read(s, addr));
                 int64_t srcv = ((op >> 9) & 1) ? s->b : s->a;
                 *acc_dst = sext40(srcv - val);
                 return consumed + s->lk_used;
@@ -5831,7 +5868,7 @@ int c54x_exec_one(C54xState *s)
             if (op8 == 0x44 || op8 == 0x45) {
                 /* LD Smem << 16, dst */
                 addr = resolve_smem(s, op, &ind);
-                int64_t val = (int64_t)(int16_t)data_read(s, addr) << 16;
+                int64_t val = c54x_smem16_shifted(s, data_read(s, addr));
                 *acc_dst = sext40(val);
                 return consumed + s->lk_used;
             }
@@ -5874,7 +5911,8 @@ int c54x_exec_one(C54xState *s)
                 /* LDM MMR, dst — load accumulator from a memory-mapped reg */
                 int mmr = op & 0x7F;
                 uint16_t val = data_read(s, mmr);
-                *acc_dst = sext40((int16_t)val);
+                /* SPRU172C LDM : (MMR) -> dst(15-0), 0 -> dst(39-16) : zero-extended, whatever SXM says. */
+                *acc_dst = c54x_logic40() ? sext40((int16_t)val) : (int64_t)(uint16_t)val;
                 return consumed + s->lk_used;
             }
             if (op8 == 0x4A) {

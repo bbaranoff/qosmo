@@ -13,7 +13,7 @@ _audio_sink_present() {
     pactl list short sinks 2>/dev/null | grep -q "$AUDIO_SINK"
 }
 _audio_gapk_vivant() {
-    pgrep -f "gapk-start.sh" >/dev/null 2>&1 \
+    pgrep --ns $$ --nslist mnt -f "[g]apk-start\.sh auto" >/dev/null 2>&1 \
         || tmux has-session -t "${AUDIO_TMUX:-gapk}" 2>/dev/null
 }
 
