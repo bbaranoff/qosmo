@@ -7415,6 +7415,54 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
      * early). */
     calypso_twl3025_apply_phase((int16_t *)s->bsp_buf, n / 2,
                                 calypso_trx_get_fn(), 0);
+    /* [2026-10-03] INJECTEUR DE BRUIT (AWGN) sur TOUS les bursts descendants, au point ou les
+     * alimentations convergent (BSP synthese, passthrough, rejeu). Les bursts synthetiques sont parfaits :
+     * la ROM met ses valeurs souples a l'echelle d'une estimation du bruit (SB : PROM0 0x7e40
+     * `squrs @0x22,a` = E - c^2 ; NB : 0x8168 -> 0x82d0) et un bruit nul la fausse.
+     *   CALYPSO_BSP_BRUIT=<sigma>   ecart-type par composante I et Q, en unites d'echantillon int16
+     *   CALYPSO_BSP_SNR_DB=<dB>     ou sigma calcule par burst : P_signal / (2 sigma^2) = 10^(dB/10)
+     * Tirage deterministe (graine = fn, rang du burst dans la trame, CALYPSO_BSP_BRUIT_GRAINE) : le
+     * rejeu reste reproductible. Defaut : aucun bruit. */
+    {
+        static double sigma_fixe = -2, snr_db = -999;
+        static uint32_t graine0;
+        if (sigma_fixe == -2) {
+            const char *e = getenv("CALYPSO_BSP_BRUIT"), *r = getenv("CALYPSO_BSP_SNR_DB"), *g = getenv("CALYPSO_BSP_BRUIT_GRAINE");
+            sigma_fixe = (e && *e) ? atof(e) : 0.0;
+            if (r && *r) snr_db = atof(r);
+            graine0 = (g && *g) ? (uint32_t)strtoul(g, NULL, 0) : 0x9e3779b9u;
+            if (sigma_fixe > 0 || snr_db > -999)
+                fprintf(stderr, "[c54x] INJECTEUR DE BRUIT : %s %g\n", sigma_fixe > 0 ? "sigma" : "SNR dB",
+                        sigma_fixe > 0 ? sigma_fixe : snr_db);
+        }
+        if ((sigma_fixe > 0 || snr_db > -999) && n >= 2) {
+            static uint32_t fn_prec = 0xffffffffu, rang;
+            uint32_t fn = calypso_trx_get_fn();
+            rang = (fn == fn_prec) ? rang + 1 : 0;
+            fn_prec = fn;
+            double sigma = sigma_fixe;
+            if (sigma <= 0) {
+                double p = 0;
+                for (int k = 0; k < n; k++) { double v = (int16_t)s->bsp_buf[k]; p += v * v; }
+                p /= (n / 2);                                  /* puissance complexe moyenne */
+                sigma = sqrt(p / (2.0 * pow(10.0, snr_db / 10.0)));
+            }
+            uint32_t x = graine0 ^ (fn * 2654435761u) ^ (rang * 40503u + 1u);
+            if (!x) x = 1;
+            for (int k = 0; k + 1 < n; k += 2) {
+                double u1, u2;
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5; u1 = ((x >> 8) + 1.0) / 16777217.0;
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5; u2 = (x >> 8) / 16777216.0;
+                double r = sigma * sqrt(-2.0 * log(u1));
+                double vi = (int16_t)s->bsp_buf[k]     + r * cos(2 * M_PI * u2);
+                double vq = (int16_t)s->bsp_buf[k + 1] + r * sin(2 * M_PI * u2);
+                if (vi > 32767) vi = 32767; if (vi < -32768) vi = -32768;
+                if (vq > 32767) vq = 32767; if (vq < -32768) vq = -32768;
+                s->bsp_buf[k] = (uint16_t)(int16_t)lrint(vi);
+                s->bsp_buf[k + 1] = (uint16_t)(int16_t)lrint(vq);
+            }
+        }
+    }
 
     /* The same burst feeds the RIF receive FIFO, which is the route the DSP
      * firmware actually reads it through (PORTR DRR after seeing SPCR).

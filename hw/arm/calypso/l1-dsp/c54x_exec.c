@@ -40,6 +40,26 @@ static inline void c54x_f4_srcdst(uint16_t op, int *src, int *dst)
  *
  * Returns -1 when the opcode is not handled, else the words consumed.
  * ═══════════════════════════════════════════════════════════════════════════ */
+static int c54x_mac_ancien(void)
+{   /* [2026-10-03] MACR/MASR/MACA[R]/MASA/MPYA conformes a SPRU172C (arrondi du RESULTAT, A(32-16) sur
+     * 17 bits, produit sur 40 bits, masque MAC 0xFE00 qui rend MACR a son handler) : isa_test 147 -> 152.
+     * OPT-IN (CALYPSO_MAC=1) : le banc A/B du 2026-10-03 21:08/21:13 (meme binaire) donne la voix a
+     * +9.4 dB (bruit 3456 en silence) avec, +59.6 dB (silence 11) sans, alors que la parole descendante
+     * decodee par la ROM est identique bit a bit au rejeu : un defaut aval, hors du canal rejoue, a
+     * trouver avant de les activer. CALYPSO_MAC_ANCIEN=1 force l'ancien (defaut). */
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("CALYPSO_MAC_ANCIEN"), *n = getenv("CALYPSO_MAC");
+        v = (e && *e == '1') ? 1 : (n && *n == '1') ? 0 : 1;
+    }
+    return v;
+}
+/* SPRU172C MACA/MASA/MPYA : « A(32-16) is used as a 17-bit operand for the multiplier ». */
+static inline int64_t c54x_ahi17(const C54xState *s)
+{
+    int64_t h = (s->a >> 16) & 0x1FFFF;
+    return (h & 0x10000) ? h - 0x20000 : h;
+}
 static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
 {
             /* MAC/MAS family Smem,SRC (0x28xx..0x2Fxx, mask FE00, 1 word).
@@ -52,7 +72,11 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
              * left by one (Q15*Q15 -> Q31).
              * Smem forms only; the dual-MAC Xmem/Ymem variants
              * (0xA000..0xBFFF) are not covered. */
-            if ((op & 0xFC00) == 0x2800) {
+            /* [2026-10-03] binutils : mac 0x2800/0xFE00, macr 0x2A00/0xFE00 (mas 0x2C00, masr 0x2E00).
+             * The old mask 0xFC00 took 0x2A (MACR) here with bit 9 read as "subtract": MACR ran as
+             * an unrounded MAS (isa_test 104). Only MAC itself belongs here now ; CALYPSO_MAC_ANCIEN=1
+             * restores the old mask. */
+            if ((op & (c54x_mac_ancien() ? 0xFC00 : 0xFE00)) == 0x2800) {
                 int mac_sub = (op >> 9) & 1;       /* 0=add, 1=subtract */
                 int mac_rnd = (op >> 8) & 0; /* not used here, separate below */
                 (void)mac_rnd;
@@ -78,15 +102,17 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 bool macr_ind;
                 uint16_t macr_addr = resolve_smem(s, op, &macr_ind);
                 int16_t macr_mem = (int16_t)data_read(s, macr_addr);
-                int32_t macr_prod = (int32_t)(int16_t)s->t * (int32_t)macr_mem;
+                int64_t macr_prod = (int64_t)(int16_t)s->t * (int64_t)macr_mem;
                 if (s->st1 & ST1_FRCT) macr_prod <<= 1;
-                macr_prod += 0x8000; /* round */
-                macr_prod &= ~0xFFFF; /* zero low half after round */
                 int macr_dst = (op >> 8) & 1;
                 int64_t *macr_acc = macr_dst ? &s->b : &s->a;
-                int64_t macr_term = (int64_t)(int32_t)macr_prod;
-                if (macr_sub) macr_term = -macr_term;
-                *macr_acc = sext40((*macr_acc + macr_term) & 0xFFFFFFFFFFULL);
+                if (c54x_mac_ancien()) {
+                    macr_prod = (int64_t)(int32_t)((macr_prod + 0x8000) & ~0xFFFFLL);
+                    *macr_acc = sext40((*macr_acc + (macr_sub ? -macr_prod : macr_prod)) & 0xFFFFFFFFFFULL);
+                } else {   /* SPRU172C MACR/MASR : dst = rnd(src +/- T*Smem) -- the RESULT is rounded */
+                    int64_t r = *macr_acc + (macr_sub ? -macr_prod : macr_prod);
+                    *macr_acc = sext40((r + 0x8000) & ~0xFFFFLL);
+                }
                 return (int)(consumed + s->lk_used);
             }
 
@@ -96,10 +122,11 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 bool maca_ind;
                 uint16_t maca_addr = resolve_smem(s, op, &maca_ind);
                 int16_t maca_mem = (int16_t)data_read(s, maca_addr);
-                int16_t maca_ahi = (int16_t)((s->a >> 16) & 0xFFFF);
-                int32_t maca_prod = (int32_t)maca_ahi * (int32_t)maca_mem;
+                int64_t maca_ahi = c54x_mac_ancien() ? (int16_t)((s->a >> 16) & 0xFFFF) : c54x_ahi17(s);
+                int64_t maca_prod = maca_ahi * (int64_t)maca_mem;
                 if (s->st1 & ST1_FRCT) maca_prod <<= 1;
-                s->b = sext40((s->b + (int64_t)(int32_t)maca_prod) & 0xFFFFFFFFFFULL);
+                if (c54x_mac_ancien()) maca_prod = (int32_t)maca_prod;
+                s->b = sext40((s->b + maca_prod) & 0xFFFFFFFFFFULL);
                 s->t = (uint16_t)maca_mem;      /* SPRU172C: MACA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
@@ -109,10 +136,11 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 bool masa_ind;
                 uint16_t masa_addr = resolve_smem(s, op, &masa_ind);
                 int16_t masa_mem = (int16_t)data_read(s, masa_addr);
-                int16_t masa_ahi = (int16_t)((s->a >> 16) & 0xFFFF);
-                int32_t masa_prod = (int32_t)masa_ahi * (int32_t)masa_mem;
+                int64_t masa_ahi = c54x_mac_ancien() ? (int16_t)((s->a >> 16) & 0xFFFF) : c54x_ahi17(s);
+                int64_t masa_prod = masa_ahi * (int64_t)masa_mem;
                 if (s->st1 & ST1_FRCT) masa_prod <<= 1;
-                s->b = sext40((s->b - (int64_t)(int32_t)masa_prod) & 0xFFFFFFFFFFULL);
+                if (c54x_mac_ancien()) masa_prod = (int32_t)masa_prod;
+                s->b = sext40((s->b - masa_prod) & 0xFFFFFFFFFFULL);
                 s->t = (uint16_t)masa_mem;      /* SPRU172C: MASA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
@@ -122,12 +150,18 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 bool macar_ind;
                 uint16_t macar_addr = resolve_smem(s, op, &macar_ind);
                 int16_t macar_mem = (int16_t)data_read(s, macar_addr);
-                int16_t macar_ahi = (int16_t)((s->a >> 16) & 0xFFFF);
-                int32_t macar_prod = (int32_t)macar_ahi * (int32_t)macar_mem;
-                if (s->st1 & ST1_FRCT) macar_prod <<= 1;
-                macar_prod += 0x8000;
-                macar_prod &= ~0xFFFF;
-                s->b = sext40((s->b + (int64_t)(int32_t)macar_prod) & 0xFFFFFFFFFFULL);
+                if (c54x_mac_ancien()) {
+                    int16_t macar_ahi = (int16_t)((s->a >> 16) & 0xFFFF);
+                    int32_t macar_prod = (int32_t)macar_ahi * (int32_t)macar_mem;
+                    if (s->st1 & ST1_FRCT) macar_prod <<= 1;
+                    macar_prod += 0x8000;
+                    macar_prod &= ~0xFFFF;
+                    s->b = sext40((s->b + (int64_t)(int32_t)macar_prod) & 0xFFFFFFFFFFULL);
+                } else {   /* SPRU172C MACAR : B = rnd(B + Smem * A(32-16)) -- the RESULT is rounded */
+                    int64_t macar_prod = c54x_ahi17(s) * (int64_t)macar_mem;
+                    if (s->st1 & ST1_FRCT) macar_prod <<= 1;
+                    s->b = sext40((s->b + macar_prod + 0x8000) & ~0xFFFFLL);
+                }
                 s->t = (uint16_t)macar_mem;     /* SPRU172C: MACAR Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
@@ -137,10 +171,11 @@ static int c54x_mac_bit_family(C54xState *s, uint16_t op, int consumed)
                 bool mpya_ind;
                 uint16_t mpya_addr = resolve_smem(s, op, &mpya_ind);
                 int16_t mpya_mem = (int16_t)data_read(s, mpya_addr);
-                int16_t mpya_ahi = (int16_t)((s->a >> 16) & 0xFFFF);
-                int32_t mpya_prod = (int32_t)mpya_ahi * (int32_t)mpya_mem;
+                int64_t mpya_ahi = c54x_mac_ancien() ? (int16_t)((s->a >> 16) & 0xFFFF) : c54x_ahi17(s);
+                int64_t mpya_prod = mpya_ahi * (int64_t)mpya_mem;
                 if (s->st1 & ST1_FRCT) mpya_prod <<= 1;
-                s->b = sext40((int64_t)(int32_t)mpya_prod);
+                if (c54x_mac_ancien()) mpya_prod = (int32_t)mpya_prod;
+                s->b = sext40(mpya_prod);
                 s->t = (uint16_t)mpya_mem;      /* SPRU172C: MPYA Smem also loads T */
                 return (int)(consumed + s->lk_used);
             }
@@ -5570,6 +5605,9 @@ int c54x_exec_one(C54xState *s)
             int64_t src = dst ? sext40((int64_t)s->b) : sext40((int64_t)s->a);
             int64_t d = src - ((int64_t)(uint16_t)val << 15);
             int64_t r = (d >= 0) ? ((d << 1) + 1) : (src << 1);
+            /* [2026-10-03] SPRU172C : SUBC « Affects C » -- C = 1 quand la soustraction est positive ou nulle
+             * (exemples du manuel : 4 - 1<<15 -> C=0 ; RPT #15 SUBC 41h/7 -> C=1). */
+            if (d >= 0) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
             if (dst) s->b = sext40(r); else s->a = sext40(r);
             return consumed + s->lk_used;
         }
@@ -5749,6 +5787,41 @@ int c54x_exec_one(C54xState *s)
                  * ⚠️ Without the T write, every later instruction that uses T (MAC,
                  * LD Smem,TS, ...) works on a stale value. */
                 s->t = val;
+                return consumed + s->lk_used;
+            }
+            /* [2026-10-03] SQURS (0x3A00/0xFE00) and POLY (0x3600/0xFF00) had no handler and fell into
+             * the blind MAC below (`acc += T*Smem`). SPRU172C:
+             *   SQURS Smem,src : T = Smem ; src = src - Smem*Smem
+             *   POLY  Smem     : B = Smem << 16 ; A = rnd(A(32-16) * T + B)   (B = the OLD B)
+             * The speech-frame code runs SQURS once per TCH/F frame (opcode histogram of the replay).
+             * CALYPSO_SQURS_MAC=1 restores the old decoding. */
+            /* SQURS correct = OPT-IN (CALYPSO_SQURS=1) : il est conforme au manuel et aux tests ISA, mais il
+             * fait tomber la SB (rejeu --rejouer : 84/466 SB -> 0/522). Le seul site sur ce chemin, PROM0
+             * 0x7e40 `squrs @0x22,a`, calcule le bruit residuel E - c^2 de la correlation SCH ; l'ancien calcul
+             * (E + T*c) masque un defaut en aval, encore a localiser. CALYPSO_SQURS_MAC=1 force l'ancien. */
+            static int squrs_mac = -1;
+            if (squrs_mac < 0) {
+                const char *e = getenv("CALYPSO_SQURS_MAC"), *f = getenv("CALYPSO_SQURS");
+                squrs_mac = (e && *e == '1') ? 1 : (f && *f == '1') ? 0 : 1;
+            }
+            if (!squrs_mac && (op & 0xFE00) == 0x3A00) {
+                int64_t sq = (int64_t)(int16_t)val * (int64_t)(int16_t)val;
+                if (s->st1 & ST1_FRCT) sq <<= 1;
+                if ((op >> 8) & 1) s->b = sext40(s->b - sq);
+                else               s->a = sext40(s->a - sq);
+                s->t = val;
+                return consumed + s->lk_used;
+            }
+            static int poly_mac = -1;   /* CALYPSO_POLY_MAC=1 : ancien decodage de POLY seul */
+            if (poly_mac < 0) { const char *e = getenv("CALYPSO_POLY_MAC"); poly_mac = (e && *e == '1') ? 1 : 0; }
+            if (!poly_mac && (op & 0xFF00) == 0x3600) {
+                int64_t ahi = (sext40(s->a) >> 16) & 0x1FFFF;          /* A(32-16), 17-bit operand */
+                if (ahi & 0x10000) ahi -= 0x20000;
+                int64_t prod = ahi * (int64_t)(int16_t)s->t;
+                if (s->st1 & ST1_FRCT) prod <<= 1;
+                int64_t old_b = s->b;
+                s->a = sext40(((prod + old_b) + 0x8000) & ~0xFFFFLL);
+                s->b = sext40(c54x_smem16_shifted(s, val));
                 return consumed + s->lk_used;
             }
             int dst = (op >> 8) & 1;
