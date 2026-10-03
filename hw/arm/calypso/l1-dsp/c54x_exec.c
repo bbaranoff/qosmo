@@ -5113,6 +5113,18 @@ int c54x_exec_one(C54xState *s)
             } else {                           /* direct or non-absolute indirect */
                 smem_addr = resolve_smem(s, op, &ind);  /* plus the AR post-modify */
             }
+            /* [2026-10-03] SPRU172C MVKD : dmad -> DAR ; sous RPT, DAR + 1 apres chaque transfert (« move
+             * consecutive words »). Le coeur relisait dmad a chaque repetition : `rpt #15 ; mvkd 0x2c00,*ar7+`
+             * (PROM0 0x9aaa, historique des metriques du Viterbi TCH lu par le CHED 0x9ad3) copiait 16 fois
+             * data[0x2c00]. Meme mecanique que READA/MVPD/MACP (rpt_fresh, mvpd_src).
+             * CALYPSO_MVK_RPT_ANCIEN=1 = ancien comportement (MVKD et MVDK). */
+            {   static int mvk_ancien = -1;
+                if (mvk_ancien < 0) { const char *e = getenv("CALYPSO_MVK_RPT_ANCIEN"); mvk_ancien = (e && *e == '1') ? 1 : 0; }
+                if (!mvk_ancien && s->rpt_active) {
+                    if (s->rpt_fresh) s->rpt_fresh = false; else dmad = s->mvpd_src;
+                    s->mvpd_src = (uint16_t)(dmad + 1);
+                }
+            }
             data_write(s, smem_addr, data_read(s, dmad));
             consumed = 2;
             return consumed + (s->lk_used ? 1 : 0);
@@ -5164,6 +5176,14 @@ int c54x_exec_one(C54xState *s)
                 s->lk_used = true;
             } else {                           /* direct ou indirect non-abs */
                 smem_addr = resolve_smem(s, op, &ind);  /* +post-modify AR */
+            }
+            /* [2026-10-03] SPRU172C MVDK : meme DAR qui s'incremente sous RPT (voir MVKD). */
+            {   static int mvk_ancien = -1;
+                if (mvk_ancien < 0) { const char *e = getenv("CALYPSO_MVK_RPT_ANCIEN"); mvk_ancien = (e && *e == '1') ? 1 : 0; }
+                if (!mvk_ancien && s->rpt_active) {
+                    if (s->rpt_fresh) s->rpt_fresh = false; else dmad = s->mvpd_src;
+                    s->mvpd_src = (uint16_t)(dmad + 1);
+                }
             }
             data_write(s, dmad, data_read(s, smem_addr));   /* MVDK : dmad <- Smem */
             consumed = 2;
@@ -5796,15 +5816,13 @@ int c54x_exec_one(C54xState *s)
              *   POLY  Smem     : B = Smem << 16 ; A = rnd(A(32-16) * T + B)   (B = the OLD B)
              * The speech-frame code runs SQURS once per TCH/F frame (opcode histogram of the replay).
              * CALYPSO_SQURS_MAC=1 restores the old decoding. */
-            /* SQURS correct = OPT-IN (CALYPSO_SQURS=1) : il est conforme au manuel et aux tests ISA, mais il
-             * fait tomber la SB (rejeu --rejouer : 84/466 SB -> 0/522). Le seul site sur ce chemin, PROM0
-             * 0x7e40 `squrs @0x22,a`, calcule le bruit residuel E - c^2 de la correlation SCH ; l'ancien calcul
-             * (E + T*c) masque un defaut en aval, encore a localiser. CALYPSO_SQURS_MAC=1 force l'ancien. */
+            /* SQURS correct = DEFAUT depuis le 2026-10-03 22:40. Il faisait tomber la SB (0x7e40 `squrs @0x22,a`,
+             * bruit residuel E - c^2 de la correlation SCH) a cause de la saturation negative non sign-etendue
+             * (corrigee dans calypso_c54x.c) : SB 57 % avec ou sans lui. Avec MVKD/MVDK sous RPT, il rend le
+             * BFI de la parole juste (rejeu : 147/2875 au lieu de 2875/2875 ; banc : 200/3000, tous sur des
+             * trames vraiment mauvaises ou volees par la FACCH). CALYPSO_SQURS_MAC=1 force l'ancien decodage. */
             static int squrs_mac = -1;
-            if (squrs_mac < 0) {
-                const char *e = getenv("CALYPSO_SQURS_MAC"), *f = getenv("CALYPSO_SQURS");
-                squrs_mac = (e && *e == '1') ? 1 : (f && *f == '1') ? 0 : 1;
-            }
+            if (squrs_mac < 0) { const char *e = getenv("CALYPSO_SQURS_MAC"); squrs_mac = (e && *e == '1') ? 1 : 0; }
             if (!squrs_mac && (op & 0xFE00) == 0x3A00) {
                 int64_t sq = (int64_t)(int16_t)val * (int64_t)(int16_t)val;
                 if (s->st1 & ST1_FRCT) sq <<= 1;
