@@ -2982,8 +2982,17 @@ int c54x_exec_one(C54xState *s)
                 /* F075-F07F: undefined, treat as 1-word NOP */
                 return consumed + s->lk_used;
             }
-            /* F0Bx/F1Bx: RSBX/SSBX */
-            if ((op & 0x00F0) == 0x00B0) {
+            /* F0Bx/F1Bx are NOT RSBX/SSBX: per binutils tic54x-opc.c those are 0xF4B0/0xF5B0 mask 0xFDF0.
+             * F0B0-F1BF is `OR A,SHIFT,dst` with SHIFT=-16..-1 (mask FCE0, base F0A0), handled by the
+             * alu_op >= 8 block below. [2026-10-03] This catch-all skipped the OR and flipped an ST1 bit
+             * instead. Measured on the uplink FIRE parity store (PROM0 0x8bc4 `ld *+ar3(11),16,b`,
+             * 0x8bc6 `f1b0` = `or a,-16,b`, then sth/stl b, stl a): the routine 0x9013 returns
+             * A = 0x673a2f3ae7, the correct 40-bit parity, but B stayed 0 so the 24 high parity bits
+             * were stored as 0 -> 56 coded bits of every SDCCH block wrong. CALYPSO_F0BX_SBIT=1
+             * restores the old behaviour. */
+            static int f0bx_sbit = -1;
+            if (f0bx_sbit < 0) { const char *e = getenv("CALYPSO_F0BX_SBIT"); f0bx_sbit = (e && *e == '1') ? 1 : 0; }
+            if (f0bx_sbit && (op & 0x00F0) == 0x00B0) {
                 int bit = op & 0x0F;
                 int set = (op >> 8) & 1;
                 int st = (op >> 5) & 1;
