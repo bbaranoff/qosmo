@@ -3947,7 +3947,15 @@ int c54x_run(C54xState *s, int n_insns)
                     int64_t v = sext40(*acc);
                     if (v > 0x7FFFFFFFLL || v < -0x80000000LL) {
                         s->st0 |= k ? ST0_OVB : ST0_OVA;
-                        if (s->st1 & ST1_OVM) *acc = (v < 0) ? (int64_t)0xFF80000000LL : 0x7FFFFFFFLL;
+                        /* [2026-10-03] La valeur negative saturee doit etre -2^31 SIGN-ETENDUE, comme
+                         * tout accumulateur du coeur (sext40) : (int64_t)0xFF80000000LL est un int64
+                         * POSITIF, et un decalage arithmetique qui suit (STH src,ASM,Smem...) en tirait
+                         * +0x7fc0 au lieu de -64. Mesure : mise a l'echelle des souples SCH (PROM0 0x7e6f
+                         * mpyr / 0x7e70 sfta a,3 / 0x7e71 sth a,asm) -> SB fausse des que les souples
+                         * saturent (SQURS correct, SNR eleve). CALYPSO_SAT_NEG_ANCIEN=1 = ancien. */
+                        static int sat_neg_ancien = -1;
+                        if (sat_neg_ancien < 0) { const char *e = getenv("CALYPSO_SAT_NEG_ANCIEN"); sat_neg_ancien = (e && *e == '1') ? 1 : 0; }
+                        if (s->st1 & ST1_OVM) *acc = (v < 0) ? (sat_neg_ancien ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL;
                     }
                 }
             }

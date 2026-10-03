@@ -4699,8 +4699,9 @@ int c54x_exec_one(C54xState *s)
             case 0xE1: s->b = ~s->b; s->b = sext40(s->b); break;  /* CMPL B */
             case 0xE2: s->a = -s->a; s->a = sext40(s->a); break;  /* NEG A */
             case 0xE3: s->b = -s->b; s->b = sext40(s->b); break;  /* NEG B */
-            case 0xE4: /* SAT A */ if (s->st0 & ST0_OVA) s->a = (s->a < 0) ? (int64_t)0xFF80000000LL : 0x7FFFFFFFLL; break;
-            case 0xE5: /* SAT B */ if (s->st0 & ST0_OVB) s->b = (s->b < 0) ? (int64_t)0xFF80000000LL : 0x7FFFFFFFLL; break;
+            /* [2026-10-03] SAT : -2^31 sign-etendu (voir calypso_c54x.c, post-saturation OVM). */
+            case 0xE4: /* SAT A */ if (s->st0 & ST0_OVA) s->a = (s->a < 0) ? (getenv("CALYPSO_SAT_NEG_ANCIEN") && *getenv("CALYPSO_SAT_NEG_ANCIEN") == '1' ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL; break;
+            case 0xE5: /* SAT B */ if (s->st0 & ST0_OVB) s->b = (s->b < 0) ? (getenv("CALYPSO_SAT_NEG_ANCIEN") && *getenv("CALYPSO_SAT_NEG_ANCIEN") == '1' ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL; break;
             case 0xE8: /* ABS A */ s->a = (s->a < 0) ? -s->a : s->a; s->a = sext40(s->a); break;
             case 0xE9: /* ABS B */ s->b = (s->b < 0) ? -s->b : s->b; s->b = sext40(s->b); break;
             case 0xEA: /* ROR A */ { uint16_t c = s->st0 & ST0_C ? 1 : 0; if (s->a & 1) s->st0 |= ST0_C; else s->st0 &= ~ST0_C; s->a = (s->a >> 1) | ((int64_t)c << 39); s->a = sext40(s->a); } break;
