@@ -2426,12 +2426,39 @@ int c54x_exec_one(C54xState *s)
                 return consumed + s->lk_used;
             }
 
-            /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word) */
+            /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word).
+             * [2026-10-04] Le decalage ASM (ST1[4:0], complement a deux, -16..15 ; SPRU172C « LD src, ASM
+             * [, dst] : dst = src << ASM ») etait ignore : dst recevait src tel quel. L'emetteur de bursts
+             * montants de la ROM (PROM0 0x8613/0x8625 `ld b,asm` apres `ld DP+0x48,asm`) accumule ses bits
+             * par ce decalage ; sans lui, les 16 mots BULDATA du burst sortaient tous a 0xff06.
+             * CALYPSO_LDASM_ANCIEN=1 : ancien comportement. */
             if ((op & 0xFCFF) == 0xF482) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
+                static int ldasm_ancien = -1;
+                if (ldasm_ancien < 0) { const char *e = getenv("CALYPSO_LDASM_ANCIEN"); ldasm_ancien = (e && *e == '1') ? 1 : 0; }
+                if (!ldasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; }
                 if (dst) s->b = sext40(sv); else s->a = sext40(sv);
                 return consumed + s->lk_used;
+            }
+
+            /* [2026-10-04] CMPR CC, ARx -- binutils tic54x-opc.c {"cmpr", 0xF4A8, mask 0xFCF8, {OP_CC3, OP_ARX}} :
+             * compare ARx (bits 2-0) with AR0, 16 bits non signes, et pose TC ; CC = bits 9-8 : 0 EQ, 1 LT,
+             * 2 GT, 3 NEQ (SPRU172C). Jusqu'ici F4A8-F4AF tombait dans `unimpl` (NOP, TC inchange) et
+             * F5A8/F6A8/F7A8 dans RPT #k / le NOP F6xx / le bloc F7xx. Effet mesure : l'emetteur de bursts
+             * montants de la ROM (PROM0 0x8608 `cmpr eq,ar2 ; rc tc`, AR0 = fin du tampon) rendait la main
+             * aussitot sur un TC perime et n'ecrivait jamais les 16 mots BULDATA du burst (RACH, NB, TCH).
+             * 78 sites CMPR dans PROM0. CALYPSO_CMPR_ANCIEN=1 : ancien comportement. */
+            if ((op & 0xFCF8) == 0xF4A8) {
+                static int cmpr_ancien = -1;
+                if (cmpr_ancien < 0) { const char *e = getenv("CALYPSO_CMPR_ANCIEN"); cmpr_ancien = (e && *e == '1') ? 1 : 0; }
+                if (!cmpr_ancien) {
+                    unsigned cc = (op >> 8) & 3, arx = op & 7;
+                    uint16_t x = s->ar[arx], r = s->ar[0];
+                    bool tc = cc == 0 ? (x == r) : cc == 1 ? (x < r) : cc == 2 ? (x > r) : (x != r);
+                    if (tc) s->st0 |= ST0_TC; else s->st0 &= ~ST0_TC;
+                    return consumed + s->lk_used;
+                }
             }
 
             /* F4xx accumulator shift/load (1-word, mask FCE0):
@@ -2722,10 +2749,14 @@ int c54x_exec_one(C54xState *s)
                     if (dst) s->b = sext40(s->b - sv); else s->a = sext40(s->a - sv);
                     return consumed + s->lk_used;
                 }
-                /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word) */
+                /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word) -- 2e copie, meme correctif du decalage ASM
+                 * que la 1re (voir plus haut, [2026-10-04]). */
                 if ((op & 0xFCFF) == 0xF482) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
+                    static int ldasm_ancien2 = -1;
+                    if (ldasm_ancien2 < 0) { const char *e = getenv("CALYPSO_LDASM_ANCIEN"); ldasm_ancien2 = (e && *e == '1') ? 1 : 0; }
+                    if (!ldasm_ancien2) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; }
                     if (dst) s->b = sext40(sv); else s->a = sext40(sv);
                     return consumed + s->lk_used;
                 }

@@ -1,3 +1,5 @@
+. "$(dirname "${BASH_SOURCE[0]}")/_lib/temps_reel.sh"
+
 MOD_REGISTER bts "Station de base BTS#0 (osmo-bts-trx, pont)"
 MOD_REQUIRED[bts]=0
 MOD_DEPS[bts]="bsc"
@@ -46,7 +48,7 @@ mod_bts_status() {
 mod_bts_start() {
     mkdir -p "${RUN_DIR:-/tmp/calypso}" "$(dirname "$BTS_LOG")" 2>/dev/null || true
     : > "$BTS_LOG" 2>/dev/null || true
-    setsid stdbuf -oL -eL "$OSMO_BTS_TRX" -c "$BTS_CFG" >>"$BTS_LOG" 2>&1 </dev/null &
+    setsid stdbuf -oL -eL $(rt_prefixe) "$OSMO_BTS_TRX" -c "$BTS_CFG" >>"$BTS_LOG" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/bts.pid"
     mod_ok
 }
@@ -75,6 +77,7 @@ mod_bts_wait() {
     else
         mod_say "aucune mention de RSL dans $BTS_LOG pour l'instant — surveillez l'OML côté BSC"
     fi
+    mod_say "ordonnancement : $(rt_etat "$pid")"
     mod_ok
 }
 

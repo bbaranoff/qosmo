@@ -1,4 +1,5 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_lib/radio.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/_lib/temps_reel.sh"
 
 MOD_REGISTER sidecar-bts "Station de base BTS#1 (side-car)"
 MOD_REQUIRED[sidecar-bts]=1
@@ -31,7 +32,7 @@ mod_sidecar_bts_start() {
     while :; do
         essai=$(( essai + 1 ))
         : > "$log"
-        setsid stdbuf -oL -eL "$SC_BTS_BIN" -c "$SC_BTS_CFG" >>"$log" 2>&1 </dev/null &
+        setsid stdbuf -oL -eL $(rt_prefixe) "$SC_BTS_BIN" -c "$SC_BTS_CFG" >>"$log" 2>&1 </dev/null &
         radio_save_pid sidecar-bts $!
         reste="$SC_BTS_STAB_SECS"
         while [ "$reste" -gt 0 ]; do
@@ -40,7 +41,7 @@ mod_sidecar_bts_start() {
             sleep 1; reste=$(( reste - 1 ))
         done
         if [ "$reste" -eq 0 ] && radio_alive sidecar-bts && ! _sc_bts_mort; then
-            mod_say "BTS#1 stable après ${SC_BTS_STAB_SECS}s (essai $essai)"
+            mod_say "BTS#1 stable après ${SC_BTS_STAB_SECS}s (essai $essai, $(rt_etat "$(radio_pid sidecar-bts)"))"
             mod_ok; return $MOD_RC_OK
         fi
         radio_kill sidecar-bts
