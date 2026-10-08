@@ -465,6 +465,14 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
                     "-> %u/%u/%u (last_rach fn=%u)\n",
                     d[7], at1, at2, at3, t1p, t2, t3, memo);
         }
+    } else {
+        /* [2026-10-04] Le RACH de la ROM part a son propre fn (c54x_exe tsp_tx, PONT_UL_RAW) : la
+         * reference de la BTS est deja celle que le firmware attend, rien a reecrire. Journalise
+         * pour la table de couverture (99-couverture.sh : chemin ROM). */
+        static unsigned n;
+        if (n++ < 20)
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference %u/%u/%u identique a last_rach (fn=%u), rien a reecrire\n",
+                    d[7], t1p, t2, t3, memo);
     }
     return true;
 }

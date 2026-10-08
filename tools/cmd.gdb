@@ -719,6 +719,8 @@ define help_osmo
   printf "                mon_dsp N     la vue dsp a chaque trame, N fois\n"
   printf "                every N CMD   CMD a chaque trame, N fois (ex : every 20 sync)\n"
   printf "                Ctrl-C coupe une boucle ; la cible reste ARRETEE : go pour reprendre.\n"
+  printf "DEMO            demo          la main sur le firmware : arret, etat, une trame, printf, reprise\n"
+  printf "                demo etat | trame | hello | go      les etapes une a une\n"
   printf "AIDE            help_osmo     ceci      help CMD   le detail d'une commande\n"
   printf "Regle : les lectures (fn, dsp...) exigent la cible ARRETEE (stop) ; go ensuite.\n\n"
 end
@@ -727,3 +729,4 @@ help_osmo — liste toutes les commandes du panneau osmocom, avec leur role et l
 end
 
 printf "[cmd.gdb] panneau osmocom charge : help_osmo\n"
+source /opt/GSM/qosmo/tools/demo-layer1.py
