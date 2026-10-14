@@ -56,4 +56,6 @@ mod_stp_wait() {
     mod_ok
 }
 
-mod_stp_stop() { core_svc_stop "$STP_UNIT" "osmo-stp -c"; }
+# Motif exact : "osmo-stp -c" seul tuait aussi le hub (osmo-stp-interop.cfg),
+# lance par start-direct.sh --wan sur le noeud 1.
+mod_stp_stop() { core_svc_stop "$STP_UNIT" "osmo-stp -c $(_stp_cfg)"; }

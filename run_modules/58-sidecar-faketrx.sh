@@ -1,4 +1,5 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_lib/radio.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/_lib/modem.sh"
 
 MOD_REGISTER sidecar-faketrx "Transceiver simulé du BTS#1"
 MOD_REQUIRED[sidecar-faketrx]=1
@@ -14,8 +15,9 @@ mod_sidecar_faketrx_check() {
     [ -r "$FAKETRX_PY" ] || {
         mod_hint "posez FAKETRX_PY (trx_toolkit/fake_trx.py d'osmocom-bb)"
         mod_fail "fake_trx.py illisible : $FAKETRX_PY"; return $MOD_RC_FAIL; }
-    local p
-    for p in "$SC_TRX_PORT" "$SC_BB_PORT"; do
+    local p ports="$SC_TRX_PORT $SC_BB_PORT"
+    modem_enabled && ports="$ports $MODEM_BB_PORT"
+    for p in $ports; do
         if radio_udp_bound "$p" && ! radio_alive sidecar-faketrx; then
             mod_hint "ss -uanp | grep :$p — arrêtez le tenant, ou décalez SC_TRX_PORT/SC_BB_PORT"
             mod_fail "port UDP $p déjà pris par un autre processus"; return $MOD_RC_FAIL
@@ -30,10 +32,17 @@ mod_sidecar_faketrx_start() {
     radio_dirs
     local log; log="$(radio_log sidecar-faketrx)"
     mod_say "fake_trx -P $SC_TRX_PORT (BTS#1) -p $SC_BB_PORT (bande de base)"
+    # Second MS sur le meme BTS#1 : le modem GPRS. fake_trx multiplexe lui-meme
+    # (--trx NOM@ADDR:PORT, transceiver independant) ; trxcon du modem sur ce port.
+    local -a extra=()
+    if modem_enabled; then
+        extra=(--trx "MODEM@${TRX_BB_IP}:${MODEM_BB_PORT}")
+        mod_say "second MS (modem GPRS) : --trx ${TRX_BB_IP}:${MODEM_BB_PORT}"
+    fi
     mod_say "journal  : $log"
     setsid stdbuf -oL -eL "$FAKETRX_PYTHON" "$FAKETRX_PY" \
         -b "$TRX_BIND_IP" -R "$TRX_BTS_IP" -r "$TRX_BB_IP" \
-        -P "$SC_TRX_PORT" -p "$SC_BB_PORT" >>"$log" 2>&1 </dev/null &
+        -P "$SC_TRX_PORT" -p "$SC_BB_PORT" "${extra[@]}" >>"$log" 2>&1 </dev/null &
     radio_save_pid sidecar-faketrx $!
     mod_ok
 }

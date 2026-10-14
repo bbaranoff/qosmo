@@ -729,4 +729,4 @@ help_osmo — liste toutes les commandes du panneau osmocom, avec leur role et l
 end
 
 printf "[cmd.gdb] panneau osmocom charge : help_osmo\n"
-source /opt/GSM/qosmo/tools/demo-layer1.py
+source /var/tmp/iso-build-127617/rootfs/opt/GSM/qosmo/tools/demo-layer1.py
