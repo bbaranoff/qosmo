@@ -424,7 +424,11 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
         const char *e = getenv("MONTANT_REQREF");
         actif = (e && *e == '0') ? 0 : 1;
     }
-    if (!actif || woff != API_NDB + NDB_A_CD + 14) {
+    /* [2026-10-15] MONTANT_REQREF=0 (profil ROM max) : on compare et on journalise
+     * toujours, mais on ne reecrit plus rien -- la reference de la BTS arrive au
+     * firmware telle quelle, comme sur un vrai telephone (s'il ne la reconnait
+     * pas, il refait un RACH). La couverture garde ainsi sa preuve ROM. */
+    if (woff != API_NDB + NDB_A_CD + 14) {
         return false;
     }
 
@@ -455,6 +459,13 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
     uint8_t o9 = (uint8_t)(((t3 & 7) << 5) | (t2 & 0x1f));
     *out = (uint16_t)(o8 | (o9 << 8));
 
+    if (*out != (uint16_t)(d[8] | (d[9] << 8)) && !actif) {
+        static unsigned n0;
+        if (n0++ < 20)
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference de la BTS != last_rach (fn=%u), "
+                    "laissee telle quelle (MONTANT_REQREF=0)\n", d[7], memo);
+        return false;
+    }
     if (*out != (uint16_t)(d[8] | (d[9] << 8))) {
         static unsigned n;
         if (n++ < 20) {

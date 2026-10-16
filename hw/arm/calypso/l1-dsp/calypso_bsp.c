@@ -725,6 +725,9 @@ static int g_dedie_tn = -1, g_dedie_ss;
  * a la connexion (multitrame de 26 : 24 trafic + 1 SACCH + 1 libre), pas
  * seulement les blocs d'un sous-canal. */
 #define BSP_DEDIE_TCH 2
+/* [2026-10-15] PDCH (GPRS) : comme le TCH, toutes les trames de l intervalle
+ * sont a la connexion (blocs B0..B11 de la 52-multitrame, PTCCH, idle). */
+#define BSP_DEDIE_PDCH 4
 static int g_dedie_genre = 1;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
 /* [2026-09-22] g_dedie_perdues : les trames dediees que bsp_ts0_service() saute
@@ -753,8 +756,8 @@ static unsigned long g_dedie_perdues;
  *                      i = 4..7   : memes trames, multitrame impaire. */
 static bool bsp_dedie_trame(uint32_t fn)
 {
-    if (g_dedie_genre == BSP_DEDIE_TCH) {
-        return true;    /* TCH : tout l'intervalle est a la connexion */
+    if (g_dedie_genre == BSP_DEDIE_TCH || g_dedie_genre == BSP_DEDIE_PDCH) {
+        return true;    /* TCH, PDCH : tout l'intervalle est a la connexion */
     }
     unsigned p51 = fn % 51u;
     unsigned ss = (unsigned)g_dedie_ss & 7u;
@@ -818,6 +821,11 @@ void calypso_bsp_set_dedie(int tn, int genre, int ss)
     g_dedie_ss = ss;
     g_dedie_genre = genre;
     bsp_dedie_etat("arme");
+    if (genre == BSP_DEDIE_PDCH) {
+        BSP_LOG("canal dedie arme : PDCH TS%d (GPRS) - TOUTES ses trames remplacent TS0", tn);
+        printf("  [ts0] canal dedie arme : PDCH TS%d (GPRS, toutes les trames)\n", tn);
+        return;
+    }
     if (genre == BSP_DEDIE_TCH) {
         BSP_LOG("canal dedie arme : TCH TS%d - TOUTES ses trames remplacent TS0", tn);
         printf("  [ts0] canal dedie arme : TCH TS%d (toutes les trames)\n", tn);

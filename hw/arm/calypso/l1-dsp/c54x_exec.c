@@ -10,10 +10,106 @@
 #include "hw/arm/calypso/calypso_debug.h"
 
 /* 0xF4xx source/destination selectors: bit 9 = src, bit 8 = dst (TI SPRU172C). */
+/* [2026-10-15] NORM ET TC. SPRU172C : NORM decale l'accumulateur de T et ne touche
+ * pas TC. L'ancien modele (« decaler d'un bit tant que bit39 != bit38 ») posait TC
+ * sur cette difference, et l'a garde en passant au decalage par T. Or la ROM fait
+ * `bitf *ar2,#8000h ; ld #1,a ; norm a ; bc ...,ntc` (PROM0 0x909c, marqueur de
+ * trame de parole montante, rejeu du 15/10) : TC efface par NORM -> le marqueur
+ * n'est jamais pose -> la porte 0xb711 ne batit aucun burst de parole.
+ * CALYPSO_NORM_TC=0 : NORM ne touche plus TC (silicium). Defaut : ancien
+ * comportement, le temps de valider FB/SB/Viterbi sur le banc. */
+/* [2026-10-15] Sonde BC heuristique (CALYPSO_BCTC_SONDE=1) : voir le BC F82x/F83x. */
+static struct { uint16_t pc, prev; unsigned long n, divergent; } bctc_sites[256];
+static int bctc_nsites;
+static void bctc_sonde_note(uint16_t pc, uint16_t prev, bool diverge)
+{
+    int i;
+    for (i = 0; i < bctc_nsites && bctc_sites[i].pc != pc; i++) { }
+    if (i == bctc_nsites) { if (bctc_nsites == 256) return; bctc_sites[bctc_nsites].pc = pc; bctc_sites[bctc_nsites].prev = prev; bctc_nsites++; }
+    bctc_sites[i].n++;
+    if (diverge) bctc_sites[i].divergent++;
+}
+static void bctc_sonde_resume(void)
+{
+    for (int i = 0; i < bctc_nsites; i++)
+        if (bctc_sites[i].divergent)
+            printf("BCTC-SONDE pc=%04x prev_op=%04x executions=%lu divergences=%lu\n", bctc_sites[i].pc,
+                   bctc_sites[i].prev, bctc_sites[i].n, bctc_sites[i].divergent);
+    fflush(stdout);
+}
+
+/* BANZ[D] test value (CALYPSO_BANZ_LKADDR, default 1): for MOD 12..15 the
+ * address generator output (ARx+lk, pre-modified ARx, or lk) ; otherwise the
+ * pre-modify ARx as before (identical to the generated address for MOD 0..11
+ * except *+ARx). =0 restores the old "always ARx" test. */
+static uint16_t c54x_banz_value(uint16_t op, uint16_t pre, uint16_t ea)
+{
+    static int g = -1;
+    if (g < 0) g = calypso_gate("CALYPSO_BANZ_LKADDR", 1);
+    if (g && (op & 0x80) && ((op >> 3) & 0x0F) >= 0xC) return ea;
+    return pre;
+}
+
+/* [2026-10-15] FAR call frame order (CALYPSO_FAR_STACK_SPRU, default 1).
+ * SPRU172C FCALL/FCALLD/FCALA/FCALAD: (SP)-1->SP, ret PC->TOS, (SP)-1->SP,
+ * XPC->TOS ; FRET/FRETD/FRETE/FRETED: TOS->XPC, SP+1, TOS->PC, SP+1. XPC is on
+ * TOP, as in the interrupt entry frame (calypso_c54x.c pushes PC then XPC) and
+ * as FRETD/FRETED (F6E4/F6E5) already popped. The legacy order (PC on top,
+ * popped first by FRET) was symmetric for FCALL/FRET pairs only; =0 restores it. */
+static int c54x_far_spru(void)
+{
+    static int g = -1;
+    if (g < 0) g = calypso_gate("CALYPSO_FAR_STACK_SPRU", 1);
+    return g;
+}
+static void c54x_far_push(C54xState *s, uint16_t ret_pc)
+{
+    if (c54x_far_spru()) {
+        s->sp = (s->sp - 1) & 0xFFFF; data_write(s, s->sp, ret_pc);
+        s->sp = (s->sp - 1) & 0xFFFF; data_write(s, s->sp, s->xpc);
+    } else {
+        s->sp = (s->sp - 1) & 0xFFFF; data_write(s, s->sp, s->xpc);
+        s->sp = (s->sp - 1) & 0xFFFF; data_write(s, s->sp, ret_pc);
+    }
+}
+
+static void norm_tc(C54xState *s, int bit39, int bit38)
+{
+    static int garder = -1;
+    if (garder < 0) {
+        const char *e = calypso_getenv("CALYPSO_NORM_TC");
+        garder = !(e && *e == '0');
+        if (!garder) fprintf(stderr, "[c54x] NORM ne touche plus TC (CALYPSO_NORM_TC=0)\n");
+    }
+    if (!garder) return;
+    if (bit39 != bit38) s->st0 |= ST0_TC;
+    else                s->st0 &= ~ST0_TC;
+}
+
 static inline void c54x_f4_srcdst(uint16_t op, int *src, int *dst)
 {
     *src = (op >> 9) & 1;
     *dst = (op >> 8) & 1;
+}
+
+/* [2026-10-15] NEG/ABS overflow, SPRU172C (NEG, ABS): "Affected by OVM,
+ * affects OVdst". The generic post-instruction OVM pass (calypso_c54x.c,
+ * CALYPSO_C54X_OVM) only looks at accumulators whose value CHANGED, so it
+ * misses the two fixed points of these instructions: NEG 80 0000 0000h
+ * (-(-2^39) wraps to itself: OVdst=1, and 00 7FFF FFFFh with OVM=1) and ABS
+ * of a positive value above 7FFF FFFFh (|src| = src: OVdst=1, saturated with
+ * OVM=1). isa_test 3, 149, 150. Same switch as the generic pass. */
+static inline void c54x_neg_abs_ovf(C54xState *s, int dst, int64_t r)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("CALYPSO_C54X_OVM"); on = (e && *e == '0') ? 0 : 1; }
+    int64_t *acc = dst ? &s->b : &s->a;
+    *acc = sext40(r);
+    if (!on || (s->st1 & ST1_C16)) return;
+    if (r > 0x7FFFFFFFLL || r < -0x80000000LL) {
+        s->st0 |= dst ? ST0_OVB : ST0_OVA;
+        if (s->st1 & ST1_OVM) *acc = (r < 0) ? -0x80000000LL : 0x7FFFFFFFLL;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -745,7 +841,7 @@ int c54x_exec_one(C54xState *s)
         /* [2026-09-20] Gate removed: SPRU172C example LDM AR4, A with AR4=FFFF
          * gives A = 00 0000 FFFF. Unconditional. */
         if ((op & 0xFE00) == 0x4800) {
-            int mmr = op & 0x7F;
+            int mmr = resolve_mmr(s, op);   /* direct or *ARx / *ARx- / *ARx+ */
             uint16_t v = data_read(s, mmr);
             if ((op >> 8) & 1) s->b = (int64_t)(uint16_t)v; else s->a = (int64_t)(uint16_t)v;
             return 1 + s->lk_used;
@@ -1913,13 +2009,8 @@ int c54x_exec_one(C54xState *s)
                         s->sp, s->xpc & 0x3);
             }
             if (is_call) {
-                /* FCALA pushes XPC first (deeper in the stack), then ret_pc on
-                 * top; FRET (F4E4) pops PC first, then XPC. */
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, s->xpc);
-                uint16_t ret_pc = (uint16_t)(s->pc + 1);
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, ret_pc);
+                /* FCALA: return PC+1 and XPC, frame order per c54x_far_push. */
+                c54x_far_push(s, (uint16_t)(s->pc + 1));
             }
             s->xpc = new_xpc;
             s->pc  = tgt;
@@ -1931,8 +2022,17 @@ int c54x_exec_one(C54xState *s)
          * ⚠️ Without the F4E1 exception, IDLE 1 is silently swallowed as a NOP,
          * the DSP never raises s->idle, the IRQ handler never dispatches and
          * INTM stays stuck at 1. */
+        /* FIX_RETF — F49B RETF (binutils 0xF49B exact; SPRU172C p.4-147):
+         * (RTN = TOS) -> PC, SP+1 -> SP, 0 -> INTM. It was not decoded at all
+         * and fell through as a 1-word NOP. No F49B word in PROM0..3/PDROM. */
+        if (op == 0xF49B) {
+            s->pc = data_read(s, s->sp);
+            s->sp = (s->sp + 1) & 0xFFFF;
+            s->st1 &= ~ST1_INTM;
+            return 0;
+        }
         if (op >= 0xF4E0 && op <= 0xF4FF &&
-            op != 0xF4E1 && op != 0xF4E4 && op != 0xF4EB) {
+            op != 0xF4E1 && op != 0xF4E4 && op != 0xF4E5 && op != 0xF4EB) {
             return consumed + s->lk_used;
         }
         /* F4EB = RETE (return from interrupt). Pop PC, pop XPC iff APTS=1.
@@ -2067,10 +2167,19 @@ int c54x_exec_one(C54xState *s)
          * (address visibility) per SPRU131G, not APTS, and has no stack
          * semantics. Gating on it made FRET skip the XPC pop when AVIS=0 and
          * unbalanced the stack against FCALL FAR, which always pushes 2. */
-        if (op == 0xF4E4) {
-            uint16_t ra = data_read(s, s->sp); s->sp++;
+        if (op == 0xF4E4 || op == 0xF4E5) {
+            /* F4E5 = FRETE: same pop, plus 0 -> INTM (SPRU172C). It used to fall
+             * into the F4E0-F4FF NOP catch-all; no PROM0..3 site uses it. */
+            uint16_t ra, nx;
             uint16_t prev_xpc = s->xpc;
-            uint16_t nx = data_read(s, s->sp); s->sp++;
+            if (c54x_far_spru()) {
+                nx = data_read(s, s->sp); s->sp++;   /* TOS -> XPC */
+                ra = data_read(s, s->sp); s->sp++;   /* TOS -> PC  */
+            } else {
+                ra = data_read(s, s->sp); s->sp++;
+                nx = data_read(s, s->sp); s->sp++;
+            }
+            if (op == 0xF4E5) s->st1 &= ~ST1_INTM;
                 if (g_vec28_tracing) {
                     g_vec28_trace_pops++;
                     fprintf(stderr, "[c54x] VEC28-STACK-TRACE #%u FRET(2w,symmetric) PC=0x%04x "
@@ -2138,7 +2247,7 @@ int c54x_exec_one(C54xState *s)
             if ((op & 0xFCFF) == 0xF484) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t val = sext40(src ? s->b : s->a);
-                if (dst) s->b = sext40(-val); else s->a = sext40(-val);
+                c54x_neg_abs_ovf(s, dst, -val);   /* exact: 2^39 for 80 0000 0000h */
                 return consumed + s->lk_used;
             }
 
@@ -2147,7 +2256,7 @@ int c54x_exec_one(C54xState *s)
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t val = sext40(src ? s->b : s->a);
                 if (val < 0) val = -val;
-                if (dst) s->b = sext40(val); else s->a = sext40(val);
+                c54x_neg_abs_ovf(s, dst, val);
                 return consumed + s->lk_used;
             }
 
@@ -2335,8 +2444,7 @@ int c54x_exec_one(C54xState *s)
                     if (dst) s->b = val; else s->a = val;
                     /* Do NOT write T: SPRU172C has NORM read T, never set it. */
                 }
-                if (bit39 != bit38) s->st0 |= ST0_TC;
-                else                s->st0 &= ~ST0_TC;
+                norm_tc(s, bit39, bit38);
                 return consumed + s->lk_used;
             }
 
@@ -2393,9 +2501,12 @@ int c54x_exec_one(C54xState *s)
              * "cmpl" 1,1,2, 0xF493, 0xFCFF, {OP_SRC,OPT|OP_DST}. The FCFF mask
              * (not FEFF) is what admits the SRC=B variant through bit 9. */
             if ((op & 0xFCFF) == 0xF493) {
-                int src = (op >> 8) & 1;
-                int64_t *acc = src ? &s->b : &s->a;
-                *acc = sext40(~(*acc) & 0xFFFFFFFFFFULL);
+                /* [2026-10-15] src = bit 9, dst = bit 8 (c54x_f4_srcdst, binutils
+                 * SRC/DST), as for NEG/ABS/RND: `CMPL A, B` (F593) complemented
+                 * B into B. isa_test 39. The ROM only uses F493 (src = dst = A). */
+                int src, dst; c54x_f4_srcdst(op, &src, &dst);
+                int64_t v = sext40(~(src ? s->b : s->a) & 0xFFFFFFFFFFULL);
+                if (dst) s->b = v; else s->a = v;
                 return consumed + s->lk_used;
             }
 
@@ -2414,6 +2525,13 @@ int c54x_exec_one(C54xState *s)
             if ((op & 0xFCFF) == 0xF480) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
+                /* [2026-10-16] ADD src,ASM,dst : dst = dst + (src << ASM) (SPRU172C). Le decalage ASM
+                 * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
+                 * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
+                 * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                static int addasm_ancien = -1;
+                if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
+                if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
                 if (dst) s->b = sext40(s->b + sv); else s->a = sext40(s->a + sv);
                 return consumed + s->lk_used;
             }
@@ -2422,6 +2540,13 @@ int c54x_exec_one(C54xState *s)
             if ((op & 0xFCFF) == 0xF481) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
+                /* [2026-10-16] SUB src,ASM,dst : dst = dst - (src << ASM) (SPRU172C). Le decalage ASM
+                 * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
+                 * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
+                 * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                static int addasm_ancien = -1;
+                if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
+                if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
                 if (dst) s->b = sext40(s->b - sv); else s->a = sext40(s->a - sv);
                 return consumed + s->lk_used;
             }
@@ -2671,7 +2796,7 @@ int c54x_exec_one(C54xState *s)
                   int16_t t = (int16_t)s->t;
                   nv = (t >= 0) ? sext40(nv << t) : sext40(nv >> (-t));
                   if (ndst) s->b = nv; else s->a = nv;
-                  if (b39 != b38) s->st0 |= ST0_TC; else s->st0 &= ~ST0_TC;
+                  norm_tc(s, b39, b38);
                   return consumed + s->lk_used;
               }
               if ((op & 0xFEFF) == 0xF48F) {
@@ -2687,8 +2812,7 @@ int c54x_exec_one(C54xState *s)
                         else        val = sext40(val >> (-t));
                         if (src) s->b = val; else s->a = val;
                     }
-                    if (bit39 != bit38) s->st0 |= ST0_TC;
-                    else                s->st0 &= ~ST0_TC;
+                    norm_tc(s, bit39, bit38);
                     return consumed + s->lk_used;
                 }
                 /* F49F: DELAY (pipeline flush, NOP) */
@@ -2739,6 +2863,13 @@ int c54x_exec_one(C54xState *s)
                 if ((op & 0xFCFF) == 0xF480) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
+                    /* [2026-10-16] ADD src,ASM,dst : dst = dst + (src << ASM) (SPRU172C). Le decalage ASM
+                     * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
+                     * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
+                     * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                    static int addasm_ancien = -1;
+                    if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
+                    if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
                     if (dst) s->b = sext40(s->b + sv); else s->a = sext40(s->a + sv);
                     return consumed + s->lk_used;
                 }
@@ -2746,6 +2877,13 @@ int c54x_exec_one(C54xState *s)
                 if ((op & 0xFCFF) == 0xF481) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
+                    /* [2026-10-16] SUB src,ASM,dst : dst = dst - (src << ASM) (SPRU172C). Le decalage ASM
+                     * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
+                     * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
+                     * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                    static int addasm_ancien = -1;
+                    if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
+                    if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
                     if (dst) s->b = sext40(s->b - sv); else s->a = sext40(s->a - sv);
                     return consumed + s->lk_used;
                 }
@@ -2937,8 +3075,8 @@ int c54x_exec_one(C54xState *s)
                                                : (lk_base >> (-shift));
                 int64_t result = src;
                 switch (subop) {
-                case 0x0: result = src + lk_val; break;   /* ADD */
-                case 0x1: result = src - lk_val; break;   /* SUB */
+                case 0x0: c54x_carry_add40(s, src, lk_val); result = src + lk_val; break;  /* [retenue] C */   /* ADD */
+                case 0x1: c54x_carry_sub40(s, src, lk_val); result = src - lk_val; break;  /* [retenue] C */   /* SUB */
                 case 0x2: result = lk_val;       break;   /* LD (src ignored) */
                 case 0x3: result = src & lk_val; break;   /* AND */
                 case 0x4: result = src | lk_val; break;   /* OR  */
@@ -3102,20 +3240,31 @@ int c54x_exec_one(C54xState *s)
                     uint8_t sub6 = op & 0xF;
                     op2 = prog_fetch(s, s->pc + 1);
                     consumed = 2;
-                    int src_sel = (op >> 8) & 1;
-                    int dst_sel = (op >> 9) & 1;
+                    /* [2026-10-15] binutils: add/sub/and/or/xor #lk,16,SRC,DST and mac #lk,SRC,DST
+                     * are 0xF06x mask FCFF with SRC = bit 9, DST = bit 8 (same as the F2/F3 branches);
+                     * ld #lk,16,DST (F062) and mpy #lk,DST (F066) are mask FEFF, DST = bit 8.
+                     * The swapped reading ran F16x (`sub #94,16,a,b`, `and #7,16,a,b`, ...: 33 ROM
+                     * sites in PROM1/PROM2) as src=B, dst=A. isa_test 101 (MAC #345h,A,B).
+                     * CALYPSO_F16X_ANCIEN=1 restores the swapped reading. */
+                    static int f16x_ancien = -1;
+                    if (f16x_ancien < 0) f16x_ancien = calypso_gate("CALYPSO_F16X_ANCIEN", 0);
+                    int src_sel = f16x_ancien ? ((op >> 8) & 1) : ((op >> 9) & 1);
+                    int dst_sel = f16x_ancien ? ((op >> 9) & 1) : ((op >> 8) & 1);
+                    int dst8    = (op >> 8) & 1;   /* LD #lk,16 / MPY #lk : DST = bit 8 */
                     int64_t src_val = src_sel ? s->b : s->a;
                     int64_t *dst = dst_sel ? &s->b : &s->a;
                     switch (sub6) {
-                    case 0: *dst = sext40(src_val + ((int64_t)(int16_t)op2 << 16)); break;
-                    case 1: *dst = sext40(src_val - ((int64_t)(int16_t)op2 << 16)); break;
-                    case 2: dst = src_sel ? &s->b : &s->a;
+                    case 0: c54x_carry_add40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthese] C, cf. retenue */
+                            *dst = sext40(src_val + ((int64_t)(int16_t)op2 << 16)); break;
+                    case 1: c54x_carry_sub40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthese] C, cf. retenue */
+                            *dst = sext40(src_val - ((int64_t)(int16_t)op2 << 16)); break;
+                    case 2: dst = dst8 ? &s->b : &s->a;
                             *dst = sext40((int64_t)(int16_t)op2 << 16); break;
                     case 3: *dst = src_val & ((int64_t)(uint16_t)op2 << 16); break;
                     case 4: *dst = src_val | ((int64_t)(uint16_t)op2 << 16); break;
                     case 5: *dst = src_val ^ ((int64_t)(uint16_t)op2 << 16); break;
                     case 6: /* MPY #lk, dst */
-                            dst = src_sel ? &s->b : &s->a;
+                            dst = dst8 ? &s->b : &s->a;
                             { int64_t p = (int64_t)(int16_t)s->t * (int64_t)(int16_t)op2;
                               if (s->st1 & ST1_FRCT) p <<= 1;
                               *dst = sext40(p); } break;
@@ -3274,8 +3423,8 @@ int c54x_exec_one(C54xState *s)
                 int64_t src = src_b ? s->b : s->a;
                 int64_t result = src;
                 switch (sub) {
-                case 0x0: result = src + ((int64_t)(int16_t)op2 << 16); break;
-                case 0x1: result = src - ((int64_t)(int16_t)op2 << 16); break;
+                case 0x0: c54x_carry_add40(s, src, (int64_t)(int16_t)op2 << 16); result = src + ((int64_t)(int16_t)op2 << 16); break;  /* [retenue] C */
+                case 0x1: c54x_carry_sub40(s, src, (int64_t)(int16_t)op2 << 16); result = src - ((int64_t)(int16_t)op2 << 16); break;  /* [retenue] C */
                 case 0x2: result = ((int64_t)(int16_t)op2 << 16); break;
                 case 0x3: result = src & (((int64_t)op2) << 16); break;
                 case 0x4: result = src | (((int64_t)op2) << 16); break;
@@ -3310,8 +3459,8 @@ int c54x_exec_one(C54xState *s)
                                               : (lk_signed >> (-shift));
                 int64_t result = src;
                 switch (subop) {
-                case 0x0: result = src + lk_val; break;
-                case 0x1: result = src - lk_val; break;
+                case 0x0: c54x_carry_add40(s, src, lk_val); result = src + lk_val; break;  /* [retenue] C */
+                case 0x1: c54x_carry_sub40(s, src, lk_val); result = src - lk_val; break;  /* [retenue] C */
                 case 0x2: result = lk_val; break;
                 case 0x3: result = src & lk_val; break;
                 case 0x4: result = src | lk_val; break;
@@ -3406,14 +3555,62 @@ int c54x_exec_one(C54xState *s)
                  * forever. */
                 static int bctc_sm = -1;
                 if (bctc_sm < 0) bctc_sm = calypso_gate("CALYPSO_C54X_BCTC_SM", 0);
+                /* [2026-10-15] CALYPSO_C54X_BCTC_NORM=1 : TC strict aussi apres un NORM. Deux sites
+                 * dans toute la ROM (PROM0 0x90a0, PROM3 0x38d60). A 0x90a0, `bitf *ar2,#8000h ;
+                 * ld #1,a ; norm a ; bc 0x90a8,ntc` pose le marqueur « trame de parole presente »
+                 * des bursts TCH montants (a_du_0 B_BLUD) : l'heuristique ACC (A != 0 -> saute)
+                 * l'effacait toujours, et la porte 0xb711 ne batissait aucun burst de parole
+                 * (rejeu du 15/10). A utiliser avec CALYPSO_NORM_TC=0 (NORM ne touche pas TC). */
+                static int bctc_norm = -1;
+                if (bctc_norm < 0) bctc_norm = calypso_gate("CALYPSO_C54X_BCTC_NORM", 0);
+                /* [2026-10-15] CALYPSO_C54X_BCTC_ETENDU=1 : TC strict aussi apres les autres
+                 * instructions qui POSENT TC sur le silicium -- CMPR (0xF4A8/0xFCF8, 234 sites
+                 * suivis d'un bc tc/ntc dans la ROM), BIT Xmem (0x96xx, 34), BITT (0x34xx). */
+                static int bctc_etendu = -1;
+                if (bctc_etendu < 0) bctc_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
                 bool tc_strict = ((g_prev_op & 0xFE00) == 0x6000) ||
-                                 (bctc_sm && s->pc >= 0xde0d && s->pc <= 0xde26);
+                                 (bctc_sm && s->pc >= 0xde0d && s->pc <= 0xde26) ||
+                                 (bctc_norm && (g_prev_op & 0xFCFF) == 0xF48F) ||
+                                 (bctc_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 ||
+                                                  (g_prev_op & 0xFF00) == 0x9600 ||
+                                                  (g_prev_op & 0xFF00) == 0x3400 ||
+                                                  /* cmpm/bitf puis un ST #k / STM #k (0x76xx/0x77xx),
+                                                   * qui ne touchent pas TC -- PROM0 0xb2c1..0xb2c7 :
+                                                   * moitie du double tampon I/Q 0x0cce/0x0d2e, 50 %
+                                                   * de mauvais choix sous l'heuristique ACC. */
+                                                  (((g_prev_op & 0xFE00) == 0x7600) &&
+                                                   (g_prev2_op & 0xFE00) == 0x6000)));
+                /* [2026-10-15] CALYPSO_C54X_BCTC_COMBO=1 : TC strict quand la
+                 * condition combine TC/NTC avec C/NC et/ou BIO/NBIO (low nibble
+                 * != 0, ex. f83b = BC pmad,TC,NC,BIO). L'heuristique ACC ne vise que
+                 * f820/f830 ; ROM : f824 x1, f825 x3, f82a x1. Les champs du groupe 2
+                 * sont ET-es (SPRU172C) ; BIO n'est pas modelise (vrai). */
+                static int bctc_combo = -1;
+                if (bctc_combo < 0) bctc_combo = calypso_gate("CALYPSO_C54X_BCTC_COMBO", 0);
+                if (bctc_combo && (op & 0x0F) != 0) {
+                    bool tc = (s->st0 & ST0_TC) != 0;
+                    bool c  = (s->st0 & ST0_C) != 0;
+                    take = (sub == 0x2) ? !tc : tc;
+                    if ((op & 0x0C) == 0x0C) take = take && c;
+                    else if ((op & 0x0C) == 0x08) take = take && !c;
+                    if (take) { s->pc = op2; return 0; }
+                    return consumed + s->lk_used;
+                }
                 if (tc_strict) {
                     bool tc = (s->st0 & ST0_TC) != 0;
                     take = (sub == 0x2) ? !tc : tc;     /* 0x2=NTC, 0x3=TC */
                 } else {
                     if (sub == 0x2)      take = (acc_signed != 0);
                     else /* sub==0x3 */  take = (acc_signed == 0);
+                    /* [2026-10-15] CALYPSO_BCTC_SONDE=1 : sites ou l'heuristique ACC diverge du
+                     * vrai TC -- par PC, avec l'instruction precedente (resume a la sortie). */
+                    static int sonde = -1;
+                    if (sonde < 0) { sonde = calypso_gate("CALYPSO_BCTC_SONDE", 0); if (sonde) atexit(bctc_sonde_resume); }
+                    if (sonde) {
+                        bool tc = (s->st0 & ST0_TC) != 0;
+                        bool vrai = (sub == 0x2) ? !tc : tc;
+                        bctc_sonde_note(s->pc, g_prev_op, vrai != take);
+                    }
                 }
                 if (take) { s->pc = op2; return 0; }
                 return consumed + s->lk_used;
@@ -3567,8 +3764,8 @@ int c54x_exec_one(C54xState *s)
                 int64_t src = src_b ? s->b : s->a;
                 int64_t result = src;
                 switch (sub) {
-                case 0x0: result = src + ((int64_t)(int16_t)op2 << 16); break;
-                case 0x1: result = src - ((int64_t)(int16_t)op2 << 16); break;
+                case 0x0: c54x_carry_add40(s, src, (int64_t)(int16_t)op2 << 16); result = src + ((int64_t)(int16_t)op2 << 16); break;  /* [retenue] C */
+                case 0x1: c54x_carry_sub40(s, src, (int64_t)(int16_t)op2 << 16); result = src - ((int64_t)(int16_t)op2 << 16); break;  /* [retenue] C */
                 case 0x3: result = src & (((int64_t)op2) << 16); break;
                 case 0x4: result = src | (((int64_t)op2) << 16); break;
                 case 0x5: result = src ^ (((int64_t)op2) << 16); break;
@@ -3617,8 +3814,8 @@ int c54x_exec_one(C54xState *s)
                 }
                 int64_t result = src;
                 switch (subop) {
-                case 0x0: result = src + lk_val; break;   /* ADD */
-                case 0x1: result = src - lk_val; break;   /* SUB */
+                case 0x0: c54x_carry_add40(s, src, lk_val); result = src + lk_val; break;  /* [retenue] C */   /* ADD */
+                case 0x1: c54x_carry_sub40(s, src, lk_val); result = src - lk_val; break;  /* [retenue] C */   /* SUB */
                 case 0x2: result = lk_val; break;         /* LD (src ignored) */
                 case 0x3: result = src & lk_val; break;   /* AND */
                 case 0x4: result = src | lk_val; break;   /* OR  */
@@ -3742,8 +3939,11 @@ int c54x_exec_one(C54xState *s)
                 return consumed + s->lk_used;
             }
             if (op == 0xF69B) {
-                /* RETFD — fast return, delayed (no INTM change). */
+                /* RETFD — fast return, delayed. SPRU172C p.4-147: RETF[D] also
+                 * does 0 -> INTM (it is "enable interrupts and fast return").
+                 * No F69B word in PROM0..3/PDROM. */
                 uint16_t ra = data_read(s, s->sp); s->sp++;
+                s->st1 &= ~ST1_INTM;
                 s->delayed_pc  = ra;
                 s->delay_slots = 2;
                 return consumed + s->lk_used;
@@ -3860,11 +4060,7 @@ int c54x_exec_one(C54xState *s)
                 if (is_call) {
                     /* FCALAD (F6E7): pushes XPC and the return PC unconditionally
                      * (FL_FAR). ⚠️ Not gated on PMST bit 4, which is AVIS. */
-                    s->sp = (s->sp - 1) & 0xFFFF;
-                    data_write(s, s->sp, s->xpc);
-                    uint16_t ret_pc = (uint16_t)(s->pc + 3);
-                    s->sp = (s->sp - 1) & 0xFFFF;
-                    data_write(s, s->sp, ret_pc);
+                    c54x_far_push(s, (uint16_t)(s->pc + 3));
                 }
                 s->xpc         = new_xpc;
                 s->delayed_pc  = tgt;
@@ -3966,16 +4162,43 @@ int c54x_exec_one(C54xState *s)
                 uint8_t  new_xpc = (uint8_t)((s->b >> 16) & 0xFF);
                 if (new_xpc > 3) new_xpc &= 3;
                 if (op == 0xF7E7) {
-                    s->sp = (s->sp - 1) & 0xFFFF;
-                    data_write(s, s->sp, s->xpc);
-                    uint16_t ret_pc = (uint16_t)(s->pc + 3);
-                    s->sp = (s->sp - 1) & 0xFFFF;
-                    data_write(s, s->sp, ret_pc);
+                    c54x_far_push(s, (uint16_t)(s->pc + 3));
                 }
                 s->xpc         = new_xpc;
                 s->delayed_pc  = tgt;
                 s->delay_slots = 2;
                 return consumed + s->lk_used;
+            }
+            /* FIX_INTR_RESET — INTR K (0xF7C0 mask 0xFFE0) and RESET (0xF7E0
+             * exact), binutils tic54x-opc.c, SPRU172C p.4-64 / p.4-140.
+             * No PROM0..3/PDROM word at an instruction slot is F7Cx or F7E0
+             * (the few F7Cx words in PROM1/PROM3/PDROM are CALL/BC/RPTBD
+             * operands), so the ROM path is unchanged. The former
+             * "F7Cx = LD #k8u, BK" case below is not a C54x encoding. */
+            if ((op & 0xFFE0) == 0xF7C0) {
+                /* INTR K: SP-1 -> SP, PC+1 -> TOS, vector(IPTR*128 + K*4) -> PC,
+                 * 1 -> INTM, IFR bit of a maskable vector (K >= 16) cleared. */
+                int kv = op & 0x1F;
+                uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
+                s->sp = (s->sp - 1) & 0xFFFF;
+                data_write(s, s->sp, (uint16_t)(s->pc + 1));
+                s->st1 |= ST1_INTM;
+                if (kv >= 16) s->ifr &= (uint16_t)~(1u << (kv - 16));
+                s->pc = (uint16_t)(iptr * 0x80 + kv * 4);
+                return 0;
+            }
+            if (op == 0xF7E0) {
+                /* RESET (software): (IPTR)<<7 -> PC; OVA=OVB=0, C=TC=1, ARP=0,
+                 * DP=0; SXM=XF=INTM=1, ASM=BRAF=HM=C16=FRCT=CMPT=CPL=OVM=0;
+                 * IFR=0. IPTR itself is not reloaded by the instruction. */
+                uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
+                s->st0 = ST0_C | ST0_TC;
+                s->st1 = ST1_INTM | ST1_SXM | ST1_XF;
+                s->ifr = 0;
+                s->rpt_active = false;
+                s->delay_slots = 0;
+                s->pc = (uint16_t)(iptr * 0x80);
+                return 0;
             }
             if (sub == 0xE || sub == 0xF) {
                 /* F7E0..F7FF : RESET (0xF7E0 exact) + reserved.
@@ -4042,10 +4265,7 @@ int c54x_exec_one(C54xState *s)
                 uint8_t new_xpc = (op & 0x7F) & 0x03;
                 static uint64_t fcall_total;
                 fcall_total++;
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, s->xpc);
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, (uint16_t)(s->pc + 2));
+                c54x_far_push(s, (uint16_t)(s->pc + 2));
                 if (fcall_total <= 30 || (fcall_total % 5000) == 0) {
                     C54_LOG("FCALL FAR #%llu PC=0x%04x → XPC=%u PC=0x%04x (was XPC=%u SP=0x%04x)",
                             (unsigned long long)fcall_total, s->pc,
@@ -4117,7 +4337,24 @@ int c54x_exec_one(C54xState *s)
             {
                 uint8_t fa_sub = (op >> 4) & 0xF;
                 if (fa_sub == 0x2 || fa_sub == 0x3) {
-                    bool fa_tc_strict = (g_prev_op & 0xFE00) == 0x6000;
+                    /* [2026-10-15] meme extension que le BC F82x/F83x (BCTC_NORM / BCTC_ETENDU) */
+                    static int fa_norm = -1, fa_etendu = -1;
+                    if (fa_norm < 0) fa_norm = calypso_gate("CALYPSO_C54X_BCTC_NORM", 0);
+                    if (fa_etendu < 0) fa_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
+                    bool fa_tc_strict = (g_prev_op & 0xFE00) == 0x6000 ||
+                        (fa_norm && (g_prev_op & 0xFCFF) == 0xF48F) ||
+                        (fa_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 || (g_prev_op & 0xFF00) == 0x9600 ||
+                                       (g_prev_op & 0xFF00) == 0x3400 ||
+                                       (((g_prev_op & 0xFE00) == 0x7600) && (g_prev2_op & 0xFE00) == 0x6000)));
+                    /* [2026-10-16] CALYPSO_C54X_BCD_TC=1 : vrai TC sur TOUS les BCD TC/NTC (12 sites dans
+                     * la ROM). Le codec FR teste le signe de P[1] par `bit *ar2,0` puis, neuf instructions
+                     * plus loin (apres rpt subc), `bcd ...,tc` choisit de negativer le coefficient de
+                     * reflexion (Schur, PDROM 0xe763 codeur et 0xedc5) : le repli « saute toujours »
+                     * le contredisait 47 % du temps (sonde BCTC, rejeu micro de test) -> LPC au signe
+                     * aleatoire, spectre de la parole montante retourne (1 kHz rendu a ~3 kHz). */
+                    static int fa_tc_tous = -1;
+                    if (fa_tc_tous < 0) fa_tc_tous = calypso_gate("CALYPSO_C54X_BCD_TC", 0);
+                    if (fa_tc_tous) fa_tc_strict = true;
                     if (fa_tc_strict) {
                         bool tc = (s->st0 & ST0_TC) != 0;
                         bool take = (fa_sub == 0x2) ? !tc : tc;  /* 2=NTC,3=TC */
@@ -4157,6 +4394,29 @@ int c54x_exec_one(C54xState *s)
                     return consumed + s->lk_used;   /* not taken: fall through */
                 }
             }
+            /* [2026-10-15] CALYPSO_C54X_BCD_CARRY=1 : BCD sur la retenue (C 0x0C / NC 0x08) evalue
+             * pour de bon, avec ses 2 creneaux retardes. Le repli ci-dessous sautait TOUJOURS et
+             * SANS creneaux : dans le codec FR de la ROM (PDROM 0xe458, depaquetage des 260 bits :
+             * `rol b ; bcd 0xe463,nc`) aucun bit a 1 n'etait jamais range -> parametres FR nuls ->
+             * decodeur de parole muet (vocodeur ROM sans son, rejeu du 15/10). */
+            {
+                static int bcd_c = -1;
+                if (bcd_c < 0) bcd_c = calypso_gate("CALYPSO_C54X_BCD_CARRY", 0);
+                uint8_t _cc = (uint8_t)(op & 0x7F);
+                if (bcd_c && (_cc & 0x0C) && !(_cc & 0x70)) {
+                    if (c54x_cond_true(s, _cc)) {
+                        s->delayed_pc  = op2;
+                        s->delay_slots = 2;
+                    }
+                    return consumed + s->lk_used;
+                }
+            }
+            /* [2026-10-15] CALYPSO_BCTC_SONDE=1 : ou le repli « saute toujours » sert (PC, condition). */
+            {
+                static int sonde = -1;
+                if (sonde < 0) { sonde = calypso_gate("CALYPSO_BCTC_SONDE", 0); if (sonde) atexit(bctc_sonde_resume); }
+                if (sonde) bctc_sonde_note(s->pc, (uint16_t)(0xFA00 | (op & 0x7F)), !c54x_cond_true(s, (uint8_t)(op & 0x7F)));
+            }
             /* NEAR FAxx fallback: simplified treat as branch (unchanged,
              * proven-safe default for every case not handled above). */
             s->pc = op2;
@@ -4175,10 +4435,7 @@ int c54x_exec_one(C54xState *s)
                 uint8_t new_xpc = (op & 0x7F) & 0x03;
                 static uint64_t fcalld_total;
                 fcalld_total++;
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, s->xpc);
-                s->sp = (s->sp - 1) & 0xFFFF;
-                data_write(s, s->sp, (uint16_t)(s->pc + 4));
+                c54x_far_push(s, (uint16_t)(s->pc + 4));
                 if (fcalld_total <= 30 || (fcalld_total % 5000) == 0) {
                     C54_LOG("FCALLD FAR #%llu PC=0x%04x → XPC=%u PC=0x%04x (was XPC=%u SP=0x%04x, delayed)",
                             (unsigned long long)fcalld_total, s->pc,
@@ -4574,6 +4831,51 @@ int c54x_exec_one(C54xState *s)
                     c54x_par_postmod(s, yar, ymod);
                     return consumed + s->lk_used;
                 }
+                if (hi8 == 0xE3) {
+                    /* [retenue] ABDST Xmem,Ymem (SPRU172C, 1 word, isa_test 1):
+                     *     B = B + |A(32-16)| ; A = (Xmem - Ymem) << 16
+                     * A(32-16) is the 17-bit field, sign bit = A(32). Both ARs
+                     * are post-modified like FIRS. C from the subtraction. */
+                    int xmod = (op >> 6) & 0x03, xar = ((op >> 4) & 0x03) + 2;
+                    int ymod = (op >> 2) & 0x03, yar = ( op       & 0x03) + 2;
+                    uint16_t xv = data_read(s, s->ar[xar]);
+                    uint16_t yv = data_read(s, s->ar[yar]);
+                    int64_t ah = (s->a >> 16) & 0x1FFFF;
+                    if (ah & 0x10000) ah -= 0x20000;
+                    s->b = sext40(s->b + (ah < 0 ? -ah : ah));
+                    int sxm = (s->st1 & ST1_SXM) != 0;
+                    int64_t x40 = (sxm ? (int64_t)(int16_t)xv : (int64_t)xv) << 16;
+                    int64_t y40 = (sxm ? (int64_t)(int16_t)yv : (int64_t)yv) << 16;
+                    c54x_carry_sub40(s, x40, y40);
+                    s->a = sext40(x40 - y40);
+                    c54x_par_postmod(s, xar, xmod);
+                    c54x_par_postmod(s, yar, ymod);
+                    return consumed + s->lk_used;
+                }
+                /* [2026-10-15] LMS Xmem,Ymem (binutils 0xE100/0xFF00, 1 word). SPRU172C:
+                 *     A = A + (Xmem)<<16 + 2^15      (no clearing of bits 15-0)
+                 *     B = B + (Xmem) x (Ymem)        (FRCT honoured)
+                 * Xmem sign-extended per SXM, OVA/OVB on 32-bit overflow, OVM saturates.
+                 * Was inert. isa_test 98. CALYPSO_LMS_ANCIEN=1 keeps it inert. */
+                static int lms_ancien = -1;
+                if (lms_ancien < 0) lms_ancien = calypso_gate("CALYPSO_LMS_ANCIEN", 0);
+                if (hi8 == 0xE1 && !lms_ancien) {
+                    int xmod = (op >> 6) & 0x03, xar = ((op >> 4) & 0x03) + 2;
+                    int ymod = (op >> 2) & 0x03, yar = ( op       & 0x03) + 2;
+                    uint16_t xv = data_read(s, s->ar[xar]);
+                    uint16_t yv = data_read(s, s->ar[yar]);
+                    int64_t xs = (s->st1 & ST1_SXM) ? (int64_t)(int16_t)xv : (int64_t)xv;
+                    int64_t ra = sext40(s->a + (xs << 16) + 0x8000);
+                    int64_t p  = (int64_t)(int16_t)xv * (int64_t)(int16_t)yv;
+                    if (s->st1 & ST1_FRCT) p <<= 1;
+                    int64_t rb = sext40(s->b + p);
+                    if (ra != sat32(ra)) { s->st0 |= ST0_OVA; if (s->st1 & ST1_OVM) ra = sat32(ra); }
+                    if (rb != sat32(rb)) { s->st0 |= ST0_OVB; if (s->st1 & ST1_OVM) rb = sat32(rb); }
+                    s->a = ra; s->b = rb;
+                    c54x_par_postmod(s, xar, xmod);
+                    c54x_par_postmod(s, yar, ymod);
+                    return consumed + s->lk_used;
+                }
                 if (_e0_n < 40) {
                     _e0_n++;
                     C54_LOG("E0-FAM non implemente op=0x%04x (%s) PC=0x%04x "
@@ -4943,7 +5245,7 @@ int c54x_exec_one(C54xState *s)
         }
         /* 77xx: STM #lk, MMR (2 words) */
         if (hi8 == 0x77) {
-            uint8_t mmr = op & 0x7F;
+            uint8_t mmr = resolve_mmr(s, op);   /* direct or *ARx / *ARx- / *ARx+ */
             op2 = prog_fetch(s, s->pc + 1);
             consumed = 2;
             /* WATCH-ST1-WRITE: MMR 0x07 is ST1. Logs every STM #lk,ST1, including
@@ -5248,6 +5550,33 @@ int c54x_exec_one(C54xState *s)
             return consumed;
         }
 
+        /* [2026-10-15] 0x7C MVPD pmad,Smem (Smem <- Pmem(pmad)) and 0x7D MVDP
+         * Smem,pmad (Pmem(pmad) <- Smem). binutils tic54x-opc.c
+         *   { "mvpd", 2,2,2, 0x7C00, 0xFF00, {OP_pmad,OP_Smem} }
+         *   { "mvdp", 2,2,2, 0x7D00, 0xFF00, {OP_Smem,OP_pmad} }
+         * 2 words (+1 when Smem is absolute/long: lk at pc+1, pmad after it, the
+         * same order as PORTW/ST #lk here). SPRU172C: under RPT, PAR = pmad is
+         * incremented after each transfer (rpt_fresh/mvpd_src, as READA/MACP).
+         * ⚠️ They fell into the 0x78-0x7F catch-all below as a 1-word STH src,
+         * Smem: the high half of A/B was stored instead of the program word, and
+         * the pmad word then executed as an opcode. PROM0 has 13 MVPD sites
+         * (0xa7a0, 0xa912, 0xad8d, 0xb8e3, 0xbc93, ... `7c90/7cd0/7c91 pmad`, table
+         * loads *AR0+ / *AR1+). CALYPSO_MVPD_ANCIEN=1 restores the old STH decode. */
+        static int mvpd_ancien = -1;
+        if (mvpd_ancien < 0) mvpd_ancien = calypso_gate("CALYPSO_MVPD_ANCIEN", 0);
+        if ((op & 0xFE00) == 0x7C00 && !mvpd_ancien) {
+            addr = resolve_smem(s, op, &ind);
+            uint16_t pmad = prog_fetch(s, s->pc + 1 + (s->lk_used ? 1 : 0));
+            uint16_t padr;
+            if (!s->rpt_active || s->rpt_fresh) { padr = pmad; s->rpt_fresh = false; }
+            else padr = s->mvpd_src;
+            if (hi8 == 0x7C) data_write(s, addr, prog_read(s, padr));   /* MVPD */
+            else             prog_write(s, padr, data_read(s, addr));   /* MVDP */
+            s->mvpd_src = (uint16_t)(padr + 1);
+            consumed = 2;
+            return consumed + s->lk_used;
+        }
+
         /* LD / ST operations */
         if ((op & 0xF800) == 0x7000) {
             /* 70xx: STL src, Smem */
@@ -5435,12 +5764,36 @@ int c54x_exec_one(C54xState *s)
             addr = resolve_smem(s, op, &ind);
             int16_t lk = (int16_t)prog_fetch(s, s->pc + 1 + (s->lk_used ? 1 : 0));
             uint16_t v = data_read(s, addr);
-            data_write(s, addr, (uint16_t)((int16_t)v + lk));
+            uint16_t res = (uint16_t)((int16_t)v + lk);
+            /* [2026-10-15] SPRU172C ADDM: "Affected by OVM and SXM". The ALU
+             * works on the operands aligned in bits 31-16 (sign-extended when
+             * SXM=1) and stores bits 31-16, so with OVM=1 a 16-bit overflow
+             * saturates to 7FFFh / 8000h. Manual example: ADDM 0FFF8h,*AR4+
+             * with OVM=SXM=1 on 8007h -> 8000h (isa_test 11). With OVM=0 the
+             * stored word is the plain wrap, i.e. unchanged behaviour.
+             * CALYPSO_ADDM_OVM=0 restores the unconditional wrap. */
+            static int addm_ovm = -1;
+            if (addm_ovm < 0) { const char *e = getenv("CALYPSO_ADDM_OVM"); addm_ovm = (e && *e == '0') ? 0 : 1; }
+            if (addm_ovm && (s->st1 & ST1_OVM)) {
+                int32_t a = (s->st1 & ST1_SXM) ? (int32_t)(int16_t)v  : (int32_t)v;
+                int32_t b = (s->st1 & ST1_SXM) ? (int32_t)lk : (int32_t)(uint16_t)lk;
+                int32_t r = a + b;
+                if (r > 0x7FFF) res = 0x7FFF;
+                else if (r < -0x8000) res = 0x8000;
+            }
+            data_write(s, addr, res);
             consumed = 2;
-            /* TODO: TC/OVM/SXM flag effects per SPRU172C (verify) */
+            /* TODO: C/OVA flag effects per SPRU172C (not verified, untouched) */
             return consumed + s->lk_used;
         }
         if ((op & 0xFF00) == 0x6C00) {
+            /* [2026-10-15] lk-indexed Sind (MOD 12..15, e.g. *AR3(-1)): the
+             * value tested is the generated address ARx+lk, not ARx -- SPRU172C
+             * BANZ example 3: `BANZ 2000h,*AR3(-1)` with AR3=1 falls through to
+             * PC+3. The ROM uses it as a compare idiom: PROM2 0x1801
+             * `stlm a,ar1 ; nop ; nop ; banz 0x980a,*ar1(0xfff0)` branches iff
+             * AR1 != 16 (also *ar1(0xffff) after cala, PROM0 0x565f/0x596a/0x59d5).
+             * See c54x_banz_value. */
             /* BANZ pmad, Sind — branch if ARx (selected by ARF in op[2:0])
              * is non-zero. Tests the PRE-modify value; resolve_smem applies the
              * post-mod whether or not the branch is taken.
@@ -5448,8 +5801,9 @@ int c54x_exec_one(C54xState *s)
              * tests the wrong AR; see the resolve_smem comment. */
             int nar = op & 0x07;
             uint16_t pre = s->ar[nar];
-            resolve_smem(s, op, &ind);
+            uint16_t ea = resolve_smem(s, op, &ind);
             uint16_t pmad = prog_fetch(s, s->pc + 1 + (s->lk_used ? 1 : 0));
+            pre = c54x_banz_value(op, pre, ea);
             consumed = 2;
             if (pre != 0) {
                 s->pc = pmad;
@@ -5462,8 +5816,9 @@ int c54x_exec_one(C54xState *s)
              * Same off-by-ARP fix as BANZ above. */
             int nar = op & 0x07;
             uint16_t pre = s->ar[nar];
-            resolve_smem(s, op, &ind);
+            uint16_t ea = resolve_smem(s, op, &ind);
             uint16_t pmad = prog_fetch(s, s->pc + 1 + (s->lk_used ? 1 : 0));
+            pre = c54x_banz_value(op, pre, ea);
             consumed = 2;
             if (pre != 0) {
                 s->delayed_pc  = pmad;
@@ -5623,7 +5978,13 @@ int c54x_exec_one(C54xState *s)
         case 0x3: { /* 0x1600: LDR Smem, DST — load with rounding (+0x8000) */
             v = (s->st1 & ST1_SXM) ? (int16_t)val : (uint16_t)val;
             v = (v << 16) + 0x8000;
-            v &= 0xFFFFFFFF0000LL;  /* clear low 16 after rounding */
+            /* [2026-10-15] SPRU172C LDR : (Smem)<<16 + 2^15 -> dst, example LDR *AR1,A gives
+             * A = 00 FEDC 8000 : the 2^15 stays in bit 15 (as for RND and LMS). Clearing it made
+             * LDR a plain LD Smem,16 and dropped the rounding constant that the MAC chains
+             * after it rely on. isa_test 96. CALYPSO_LDR_ANCIEN=1 restores the clearing. */
+            static int ldr_ancien = -1;
+            if (ldr_ancien < 0) ldr_ancien = calypso_gate("CALYPSO_LDR_ANCIEN", 0);
+            if (ldr_ancien) v &= 0xFFFFFFFF0000LL;  /* clear low 16 after rounding */
             if (dst) s->b = sext40(v); else s->a = sext40(v);
             return consumed + s->lk_used;
         }
@@ -5745,6 +6106,12 @@ int c54x_exec_one(C54xState *s)
              * -> B=..00). isa_test 229/230. ADDC adds C. */
             int64_t c = with_carry ? ((s->st0 & ST0_C) ? 1 : 0) : 0;
             if (is_sub && with_carry) c = 1 - c;
+            /* [retenue] SPRU172C ADD/ADDS/ADDC/SUB/SUBS/SUBB "Affects C": carry
+             * out of bit 39 (add) / no borrow (sub), carry-in included.
+             * isa_test 9, 12. */
+            {   int64_t acc0 = dst ? s->b : s->a;
+                if (is_sub) c54x_carry_sub40(s, acc0, v + c);
+                else        c54x_carry_add40(s, acc0, v + c); }
             if (is_sub) {
                 if (dst) s->b = sext40(s->b - v - c);
                 else     s->a = sext40(s->a - v - c);
@@ -6129,15 +6496,27 @@ int c54x_exec_one(C54xState *s)
                 int16_t  lhi16  = (int16_t)lhi, llo16 = (int16_t)llo;
                 uint32_t lmem32 = ((uint32_t)lhi << 16) | llo;
                 int64_t  lmem40 = sxm ? (int64_t)(int32_t)lmem32 : (int64_t)(uint32_t)lmem32;
+                /* [retenue] SPRU172C: the whole family except DLD "Affects C".
+                 * C16=0: 40-bit carry/borrow. C16=1: taken from the HIGH-part
+                 * operation (add: carry out of bit 15, sub: no borrow).
+                 * isa_test 51 (DRSUB, C16=1, both halves borrow -> C=0). */
+#define DL_C16_ADD(x, y) do { if ((((uint32_t)(uint16_t)(x) + (uint16_t)(y)) >> 16) & 1) \
+                                   s->st0 |= ST0_C; else s->st0 &= ~ST0_C; } while (0)
+#define DL_C16_SUB(x, y) do { if ((uint16_t)(x) >= (uint16_t)(y)) \
+                                   s->st0 |= ST0_C; else s->st0 &= ~ST0_C; } while (0)
                 if (dl_hi <= 0x53) {                 /* DADD Lmem,src[,dst] : dst = src + Lmem */
                     int64_t *src = ((op >> 9) & 1) ? &s->b : &s->a;
                     int64_t *dst = ((op >> 8) & 1) ? &s->b : &s->a;
+                    if (!c16) c54x_carry_add40(s, *src, lmem40);
+                    else      DL_C16_ADD(*src >> 16, lhi);
                     if (!c16) *dst = sext40(*src + lmem40);
                     else { int32_t hi = (int32_t)(int16_t)((*src >> 16) & 0xFFFF) + lhi16;
                            int32_t lo = (int32_t)(int16_t)(*src & 0xFFFF) + llo16;
                            *dst = sext40(((int64_t)hi << 16) | ((uint32_t)lo & 0xFFFF)); }
                 } else if (dl_hi <= 0x55) {          /* DSUB Lmem,src : src = src - Lmem */
                     int64_t *src = ((op >> 8) & 1) ? &s->b : &s->a;
+                    if (!c16) c54x_carry_sub40(s, *src, lmem40);
+                    else      DL_C16_SUB(*src >> 16, lhi);
                     if (!c16) *src = sext40(*src - lmem40);
                     else { int32_t hi = (int32_t)(int16_t)((*src >> 16) & 0xFFFF) - lhi16;
                            int32_t lo = (int32_t)(int16_t)(*src & 0xFFFF) - llo16;
@@ -6148,6 +6527,8 @@ int c54x_exec_one(C54xState *s)
                     else *dst = sext40(((int64_t)lhi16 << 16) | (uint16_t)llo);
                 } else if (dl_hi <= 0x59) {          /* DRSUB Lmem,src : src = Lmem - src */
                     int64_t *src = ((op >> 8) & 1) ? &s->b : &s->a;
+                    if (!c16) c54x_carry_sub40(s, lmem40, *src);
+                    else      DL_C16_SUB(lhi, *src >> 16);
                     if (!c16) *src = sext40(lmem40 - *src);
                     else { int32_t hi = lhi16 - (int32_t)(int16_t)((*src >> 16) & 0xFFFF);
                            int32_t lo = llo16 - (int32_t)(int16_t)(*src & 0xFFFF);
@@ -6162,13 +6543,18 @@ int c54x_exec_one(C54xState *s)
                         int32_t hi = (int32_t)lhi16 + sgn_hi * (int32_t)t16;
                         int32_t lo = (int32_t)llo16 + sgn_lo * (int32_t)t16;
                         r = ((int64_t)hi << 16) | ((uint32_t)lo & 0xFFFF);
+                        if (sgn_hi > 0) DL_C16_ADD(lhi, t16); else DL_C16_SUB(lhi, t16);
                     } else {
                         uint32_t tt32 = ((uint32_t)(uint16_t)t16 << 16) | (uint16_t)t16;
                         int64_t tt40 = sxm ? (int64_t)(int32_t)tt32 : (int64_t)(uint32_t)tt32;
                         r = (dl_hi <= 0x5B) ? (lmem40 + tt40) : (lmem40 - tt40); /* DADST adds, the others subtract */
+                        if (dl_hi <= 0x5B) c54x_carry_add40(s, lmem40, tt40);
+                        else               c54x_carry_sub40(s, lmem40, tt40);
                     }
                     *dst = sext40(r);
                 }
+#undef DL_C16_ADD
+#undef DL_C16_SUB
                 return consumed + s->lk_used;
             }
             int dst = (op >> 8) & 1;
@@ -6217,6 +6603,9 @@ int c54x_exec_one(C54xState *s)
             int shft = op & 0xF;
             int64_t v = ((s->st1 & ST1_SXM) ? (int64_t)(int16_t)xv : (int64_t)xv) << shft;
             int64_t *srcp = (op & 0x0100) ? &s->b : &s->a;
+            /* [retenue] SPRU172C: ADD/SUB Xmem,SHFT affect C. isa_test 5. */
+            if (op & 0x0200) c54x_carry_sub40(s, *srcp, v);
+            else             c54x_carry_add40(s, *srcp, v);
             *srcp = sext40((op & 0x0200) ? (*srcp - v) : (*srcp + v));
             return consumed + s->lk_used;
         }
@@ -6355,7 +6744,7 @@ int c54x_exec_one(C54xState *s)
          * instead of continuing the bootloader handshake. */
         if (hi8 == 0x88 || hi8 == 0x89) {
             int src = (op >> 8) & 1;  /* 0 = A, 1 = B */
-            int mmr = op & 0x7F;
+            int mmr = resolve_mmr(s, op);   /* direct or *ARx / *ARx- / *ARx+ */
             uint16_t val = src ? (uint16_t)(s->b & 0xFFFF)
                                : (uint16_t)(s->a & 0xFFFF);
             data_write(s, (uint16_t)mmr, val);  /* MMRs alias addr 0x00..0x1F */
@@ -6645,7 +7034,11 @@ int c54x_exec_one(C54xState *s)
                     ? (int64_t)(uint16_t)xval_d * (int64_t)(int16_t)yval_d
                     : (int64_t)(int16_t)xval_d * (int64_t)(int16_t)yval_d;
                 if (s->st1 & ST1_FRCT) p <<= 1;
-                if (is_macr) p = (p + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
+                /* [2026-10-15] SPRU172C MACR Xmem,Ymem : dst = rnd(src + X*Y), the RESULT is
+                 * rounded (as for MACR Smem). Behind the same opt-in as the Smem forms
+                 * (CALYPSO_MAC=1); default keeps the product rounding. */
+                if (is_macr && c54x_mac_ancien()) p = (p + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
+                if (is_macr && !c54x_mac_ancien()) p += 0x8000;
                 int dstb, srcb;
                 if (is_mpy || is_macsu) {          /* mask 0xFE00: bit 8 = acc */
                     dstb = hi8 & 1; srcb = dstb;
@@ -6721,11 +7114,17 @@ int c54x_exec_one(C54xState *s)
             {
                 int64_t pr = (int64_t)(int16_t)xval_p * (int64_t)(int16_t)yval_p;
                 if (s->st1 & ST1_FRCT) pr <<= 1;
-                pr = (pr + 0x8000) & ~0xFFFFLL;     /* round: bits 15-0 cleared [2026-09-21] */
                 int srcr = (op >> 9) & 1, dstr = (op >> 8) & 1;
                 int64_t baser = srcr ? s->b : s->a;
-                if (dstr) s->b = sext40(baser - pr);
-                else      s->a = sext40(baser - pr);
+                int64_t resr;
+                if (c54x_mac_ancien()) {
+                    pr = (pr + 0x8000) & ~0xFFFFLL;     /* round: bits 15-0 cleared [2026-09-21] */
+                    resr = baser - pr;
+                } else {   /* [2026-10-15] SPRU172C MASR Xmem,Ymem : dst = rnd(src - X*Y) (CALYPSO_MAC=1) */
+                    resr = (baser - pr + 0x8000) & ~0xFFFFLL;
+                }
+                if (dstr) s->b = sext40(resr);
+                else      s->a = sext40(resr);
                 s->t = xval_p;
                 return consumed + s->lk_used;
             }
@@ -6767,8 +7166,13 @@ ba_handler:
             /* 0xAA/0xAB belong to the parallel LD||MACR family, and are NOT
              * STLM src,MMR (that is 0x88/0x89). One word, no effect. This stub
              * sits before the LD||MAC handler below and shadows it for those two
-             * opcodes. */
-            return 1;
+             * opcodes.
+             * [2026-10-15] isa_test 93 (SPRU172C LD *AR4+,A || MACR *AR5+,B):
+             * the stub loads nothing and advances no pointer. It now falls
+             * through to the LD||MAC handler; CALYPSO_LD_MACR_STUB=1 restores it. */
+            static int ld_macr_stub = -1;
+            if (ld_macr_stub < 0) ld_macr_stub = calypso_gate("CALYPSO_LD_MACR_STUB", 0);
+            if (ld_macr_stub) return 1;
         }
         if (hi8 == 0xBA) {
             /* LDMM MMR, dst — load the MMR value into the accumulator.
@@ -6810,10 +7214,16 @@ ba_handler:
             int arrondi= ((op >> 9)  & 1);           /* 0xAA/0xAE = round       */
             int64_t p_l = (int64_t)(int16_t)s->t * (int64_t)(int16_t)yv_l;
             if (s->st1 & ST1_FRCT) p_l <<= 1;
-            if (arrondi) p_l = (p_l + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
+            /* SPRU172C: dst_ = rnd(dst_ +/- T*Ymem) -- the RESULT is rounded, as for
+             * MACR/MASR Smem; the old product rounding is kept under
+             * c54x_mac_ancien() (default) like the single-operand MACR. */
+            int ld_rnd_ancien = c54x_mac_ancien();
+            if (arrondi && ld_rnd_ancien) p_l = (p_l + 0x8000) & ~0xFFFFLL;   /* [2026-09-21] rnd() clears bits 15-0 */
             int64_t *acc_ld = dst_l ? &s->b : &s->a;   /* receives the LD  */
             int64_t *acc_op = dst_l ? &s->a : &s->b;   /* receives the MAC */
-            *acc_op = sext40(soust ? (*acc_op - p_l) : (*acc_op + p_l));
+            int64_t r_l = soust ? (*acc_op - p_l) : (*acc_op + p_l);
+            if (arrondi && !ld_rnd_ancien) r_l = (r_l + 0x8000) & ~0xFFFFLL;
+            *acc_op = sext40(r_l);
             *acc_ld = sext40((int64_t)(int16_t)xv_l << 16);
             c54x_par_postmod(s, xar_l, xmod_l);
             c54x_par_postmod(s, yar_l, ymod_l);

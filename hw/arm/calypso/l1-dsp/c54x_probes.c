@@ -361,6 +361,7 @@ uint16_t g_last_ldp_pc  = 0;         /* PC of the instruction that set DP */;
 uint16_t g_last_ldp_val = 0;         /* DP value written */;
 int      g_last_ldp_kind = 0;        /* 1=LDP #k  2=LDP #k9  3=LD Smem,DP */;
 uint16_t g_prev_pc = 0;  /* PC of the instruction executed just before */
+uint16_t g_prev2_op = 0;
 uint16_t g_prev_op = 0;  /* its opcode; makes TC reliable for BC after CMPM/BITF */;
 uint16_t g_last_st0w_pc  = 0;        /* PC of the last full ST0 write (POPM ST0 / STLM) */;
 uint16_t g_last_st0w_val = 0;        /* ST0 value restored */;

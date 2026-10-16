@@ -7,6 +7,28 @@
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
+/* [2026-10-15] MMR operand of LDM / STLM / STM (SPRU131G 5.6 "Memory-mapped
+ * register addressing", SPRU172C STM/STLM examples). Direct form: the 7 LSBs
+ * of the opcode are the MMR address, DP/CPL ignored. Indirect form (bit 7 = 1,
+ * only *ARx, *ARx-, *ARx+ allowed): the 7 LSBs of ARx give the MMR address,
+ * and after the access ARx is post-modified with its 9 MSBs forced to 0
+ * (STM #8765h,*AR7+ : AR7 8010h -> 0011h, writes AR0 ; STLM B,*AR1- : AR1
+ * 3F17h -> 0016h). The old code took the opcode's low 7 bits in both cases,
+ * i.e. wrote MMR 0x17/0x0F... for an indirect operand and never touched ARx.
+ * The ROM has no indirect-MMR site (PROM0.dis), so this is ISA-only. */
+uint16_t resolve_mmr(C54xState *s, uint16_t opcode)
+{
+    if (!(opcode & 0x80)) return opcode & 0x7F;
+    int nar = opcode & 0x07, mod = (opcode >> 3) & 0x0F;
+    if ((s->st1 & ST1_CMPT) && nar == 0) nar = arp(s);
+    else if (s->st1 & ST1_CMPT)
+        s->st0 = (s->st0 & ~ST0_ARP_MASK) | (nar << ST0_ARP_SHIFT);
+    uint16_t addr = s->ar[nar] & 0x7F;
+    int d = mod == 0x1 ? -1 : mod == 0x2 ? +1 : 0;
+    s->ar[nar] = (uint16_t)(addr + d);
+    return addr;
+}
+
 uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
 {
     if (opcode & 0x80) {
@@ -19,6 +41,13 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         int mod = (opcode >> 3) & 0x0F;
         int nar = opcode & 0x07;
         int cur_arp = nar;
+        /* [2026-10-15] SPRU172C MAR / SPRU131G 5.5 : en mode compatibilite
+         * (CMPT = 1), un champ ARx = AR0 designe AR(ARP) et ne modifie pas l'ARP
+         * (exemple MAR *AR0- avec ARP = 4 : AR4 decremente, ARP reste 4).
+         * Sans effet en mode natif : la ROM ne met jamais CMPT a 1 (ST1 =
+         * 0x2900/0x6900). */
+        bool cmpt_ar0 = (s->st1 & ST1_CMPT) && nar == 0;
+        if (cmpt_ar0) cur_arp = arp(s);
         uint16_t addr = s->ar[cur_arp];
         uint16_t ar_before = s->ar[cur_arp];  /* MOD-MISMATCH probe: base before post-modify */
 
@@ -184,7 +213,7 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
 
         /* Update ARP - only in compatibility mode (ST1.CMPT = 1, SPRU131G 5.4.1);
          * with CMPT = 0 the ARP is left alone (manual example MAR *AR3+, ARP stays 0). */
-        if (s->st1 & ST1_CMPT)
+        if ((s->st1 & ST1_CMPT) && !cmpt_ar0)
             s->st0 = (s->st0 & ~ST0_ARP_MASK) | (nar << ST0_ARP_SHIFT);
 
         return addr;
@@ -318,11 +347,18 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
         default:   return true;
         }
     }
-    if ((cc & 0x30) == 0x30) return !!(s->st0 & ST0_TC);
-    if ((cc & 0x30) == 0x20) return  !(s->st0 & ST0_TC);
-    if ((cc & 0x0C) == 0x0C) return !!(s->st0 & ST0_C);
-    if ((cc & 0x0C) == 0x08) return  !(s->st0 & ST0_C);
-    return true;
+    /* [2026-10-16] Group 2 conditions combine: binutils lets TC/NTC (0x30/0x20),
+     * C/NC (0x0C/0x08) and BIO/NBIO (0x03/0x02) appear together (`bc 1000h,tc,nc,bio`,
+     * SPRU172C BC example, isa_test 28) and the instruction runs only when ALL hold.
+     * Only the first field was tested before. BIO is not wired: the pin reads high
+     * (inactive), so BIO is false and NBIO true. */
+    bool r = true;
+    if ((cc & 0x30) == 0x30) r = r &&  (s->st0 & ST0_TC);
+    if ((cc & 0x30) == 0x20) r = r && !(s->st0 & ST0_TC);
+    if ((cc & 0x0C) == 0x0C) r = r &&  (s->st0 & ST0_C);
+    if ((cc & 0x0C) == 0x08) r = r && !(s->st0 & ST0_C);
+    if ((cc & 0x03) == 0x03) r = false;
+    return r;
 }
 
 /* Per-instruction interrupt LEVEL check, gated by CALYPSO_C54X_IRQ_LEVEL.

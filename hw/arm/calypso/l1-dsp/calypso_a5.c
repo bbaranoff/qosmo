@@ -53,7 +53,19 @@ static struct {
     uint16_t flux[A5_N_FLUX];
     unsigned long n_calculs;
     unsigned long n_recales;   /* COUNT recales sur dernier depot + 1 */
+    uint32_t dernier_fn;       /* [2026-10-15] fn du dernier flux A5/1-2 calcule (couverture) */
+    unsigned dernier_algo;
 } a5;
+
+/* [2026-10-15] Pour la couverture (c54x_exe pont.c tx_tsp_publier) : vrai si le
+ * coprocesseur a calcule un flux A5/1 ou A5/2, *fn = la trame de ce flux. */
+bool calypso_a5_dernier(uint32_t *fn)
+{
+    if (!calypso_a5_on() || !a5.dernier_algo)
+        return false;
+    *fn = a5.dernier_fn;
+    return true;
+}
 
 bool calypso_a5_on(void)
 {
@@ -125,6 +137,8 @@ static void a5_calculer(C54xState *s, unsigned algo)
     } else {
         empaqueter(dl, &a5.flux[0]);
         empaqueter(ul, &a5.flux[8]);
+        a5.dernier_fn = fn;
+        a5.dernier_algo = algo;
     }
     a5.etat |= 0x0001;
     /* [2026-09-23] Sur stdout (dsp.log) : le stderr de c54x_exe n'est pas lu.

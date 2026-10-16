@@ -35,6 +35,31 @@
 #define L1CTL_DATA_IND      0x03
 #define L1CTL_RACH_CONF     0x0c
 #define L1CTL_DATA_CONF     0x0f
+/* [2026-10-15] PDCH : le firmware GPRS (layer1 l1gprs_fw.c) ne remonte pas de
+ * DATA_IND sur un PDTCH mais des L1CTL_GPRS_DL_BLOCK_IND (hdr fn BE32 + tn). */
+#define L1CTL_GPRS_DL_BLOCK_IND 0x23
+#define L1CTL_GPRS_UL_BLOCK_CNF 0x26
+
+/* [2026-10-15] COMPTEUR PDTCH DESCENDANT, pour separer les pertes de la ROM des
+ * autres causes de T3190/T3168 (banc-max « data »). Le firmware (l1gprs_fw.c
+ * l1gprs_fw_dl_block) remonte TOUS les blocs du PDCH : payload = l1ctl_hdr(4) fn(4)
+ * tn(1) pad(3) ber10k(2) ci(2) rx_lev(1) usf(1) [+ 23 octets si CRC bon ET TFI a nous
+ * ou bloc de controle]. usf != 0xff seulement si le CRC est bon. D'ou :
+ *   donnees   = 41 octets (hors PTCCH)      autre_tfi = 18 octets, usf != 0xff
+ *   crc_ko    = 18 octets, usf == 0xff, fn%104 != 12 (bloc perdu par la ROM)
+ *   ptcch     = fn%104 == 12                ul_cnf    = L1CTL_GPRS_UL_BLOCK_CNF
+ * Ligne « [pdtch] » sur stderr (qemu.log) tous les 100 blocs et a chaque PDCH arme. */
+static struct {
+    unsigned donnees, autre_tfi, crc_ko, ptcch, ul_cnf;
+    unsigned long ber_ko;
+} pdtch;
+
+static void pdtch_journal(const char *pourquoi)
+{
+    fprintf(stderr, "[pdtch] %s : dl donnees=%u autre_tfi=%u crc_ko=%u ptcch=%u | ul_cnf=%u | ber moyen crc_ko=%.1f%%\n",
+            pourquoi, pdtch.donnees, pdtch.autre_tfi, pdtch.crc_ko, pdtch.ptcch, pdtch.ul_cnf,
+            pdtch.crc_ko ? (double)pdtch.ber_ko / pdtch.crc_ko / 100.0 : 0.0);
+}
 
 #define SHM_DCCH_CFG        "/dev/shm/calypso_dcch_cfg"
 #define DCCH_RELEASED       0xFF
@@ -61,6 +86,9 @@ static struct {
  * grgsm ne lit jamais ce tap (sa couche 1 ecrit le fichier elle-meme). */
 #define DCCH_TCH_F          2
 #define DCCH_TCH_H          3
+/* [2026-10-15] genre 4 = PDCH (chan_nr 0b11000TTT, extension Osmocom) : le BSP
+ * joue TOUTES les trames de l intervalle, comme un TCH (calypso_bsp.c). */
+#define DCCH_PDCH           4
 
 /* 16 octets, comme les attend pont/state.py:Dedicated.read() :
  * seq(4) kind(1) ss(1) tn(1) chan_nr(1). kind 0 = SDCCH/4, 1 = SDCCH/8,
@@ -93,6 +121,10 @@ static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
         tap.trx_chan_nr = kind == DCCH_RELEASED ? 0xFF : chan_nr;
         calypso_trx_dcch(kind, ss, chan_nr & 0x07);
     }
+    if (kind == DCCH_PDCH) {
+        fprintf(stderr, "[dcch] canal dedie arme : chan_nr=0x%02x PDCH TN=%d (GPRS)\n", chan_nr, chan_nr & 7);
+        return;
+    }
     if (kind == DCCH_TCH_F || kind == DCCH_TCH_H) {
         fprintf(stderr, "[dcch] canal dedie arme : chan_nr=0x%02x TCH/%c SS=%d TN=%d\n",
                 chan_nr, kind == DCCH_TCH_F ? 'F' : 'H', ss, chan_nr & 7);
@@ -114,6 +146,45 @@ static void trame_complete(void)
     if (type == L1CTL_RACH_CONF && plen >= 12) {
         /* La trame d'emission du RACH, telle que le firmware la remonte. */
         calypso_trx_rach_conf(ldl_be_p(charge + 8));
+        return;
+    }
+    if (type == L1CTL_GPRS_DL_BLOCK_IND && plen >= 9) {
+        /* [2026-10-15] bloc PDTCH descendant : l1ctl_hdr(4) fn(4, BE) tn(1). Le
+         * firmware est sur le PDCH de ce TN : le BSP doit en jouer toutes les
+         * trames. Meme logique « publier au changement » que les canaux dedies. */
+        uint8_t tn = charge[8] & 0x07;
+        uint8_t chan_nr = 0xC0 | tn;
+        {
+            uint32_t bfn = ldl_be_p(charge + 4);
+            if (bfn % 104 == 12) {
+                pdtch.ptcch++;
+            } else if (plen >= 41) {
+                pdtch.donnees++;
+            } else if (plen >= 18 && charge[17] != 0xff) {
+                pdtch.autre_tfi++;
+            } else if (plen >= 18) {
+                pdtch.crc_ko++;
+                pdtch.ber_ko += ((unsigned)charge[12] << 8) | charge[13];
+                if (pdtch.crc_ko <= 5)
+                    fprintf(stderr, "[pdtch] bloc DL fn=%u TN=%d perdu (CRC faux, ber %u.%02u%%)\n", bfn, tn,
+                            (((unsigned)charge[12] << 8) | charge[13]) / 100,
+                            (((unsigned)charge[12] << 8) | charge[13]) % 100);
+            }
+            unsigned total = pdtch.donnees + pdtch.autre_tfi + pdtch.crc_ko + pdtch.ptcch;
+            if (total % 100 == 0)
+                pdtch_journal("releve");
+        }
+        tap.fn_dedie = ldl_be_p(charge + 4);
+        tap.fn_dedie_vue = true;
+        if (chan_nr != tap.dernier_chan_nr) {
+            tap.dernier_chan_nr = chan_nr;
+            dcch_cfg_publier(DCCH_PDCH, 0, chan_nr);
+            pdtch_journal("PDCH arme");
+        }
+        return;
+    }
+    if (type == L1CTL_GPRS_UL_BLOCK_CNF) {
+        pdtch.ul_cnf++;     /* ne touche pas dernier_chan_nr (relecture du 15/10) */
         return;
     }
     if ((type != L1CTL_DATA_CONF && type != L1CTL_DATA_IND) || plen < 5) {

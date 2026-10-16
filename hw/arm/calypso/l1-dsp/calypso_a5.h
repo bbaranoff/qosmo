@@ -11,5 +11,6 @@ typedef struct C54xState C54xState;
 bool calypso_a5_on(void);
 bool calypso_a5_portw(C54xState *s, uint16_t pa, uint16_t val);
 bool calypso_a5_portr(C54xState *s, uint16_t pa, uint16_t *out);
+bool calypso_a5_dernier(uint32_t *fn);
 
 #endif

@@ -2964,6 +2964,7 @@ int c54x_run(C54xState *s, int n_insns)
             static uint16_t s_last_run_pc = 0;
             static uint16_t s_last_run_op = 0;
             g_prev_pc = s_last_run_pc;
+            g_prev2_op = g_prev_op;     /* [2026-10-15] avant-derniere (BC apres cmpm/bitf ; st) */
             g_prev_op = s_last_run_op;
             s_last_run_pc = s->pc;
             s_last_run_op = exec_op;
@@ -3940,7 +3941,23 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static int ovm_on = -1;
             if (ovm_on < 0) { const char *e = getenv("CALYPSO_C54X_OVM"); ovm_on = (e && *e == '0') ? 0 : 1; }
-            if (ovm_on && !(s->st1 & ST1_C16)) {
+            /* [2026-10-15] CALYPSO_C54X_OVM_LOGIQUE=1 : les instructions LOGIQUES ne saturent pas
+             * (SPRU172C : SFTL, AND/OR/XOR, ROL/ROR/ROLTC ne dependent pas de OVM). La passe saturait
+             * aussi `sftl a,11` : dans le codec FR (PDROM 0xe4c4, lecture des bits 0-2 de l'en-tete de
+             * a_dd_0 avec OVM=1) l'en-tete c200 sign-etendu devenait 0x7fffffff -> bits « 111 » ->
+             * chaque trame jugee mauvaise -> parametres remplaces -> parole muette (rejeu du 15/10). */
+            static int ovm_logique = -1;
+            if (ovm_logique < 0) ovm_logique = calypso_gate("CALYPSO_C54X_OVM_LOGIQUE", 0);
+            bool op_logique = ovm_logique && (
+                (exec_op & 0xFC80) == 0xF080 ||                                    /* SFTL, AND/OR/XOR acc,shift */
+                (exec_op & 0xFCF0) == 0xF030 || (exec_op & 0xFCF0) == 0xF040 ||    /* AND/OR #lk,shift */
+                (exec_op & 0xFCF0) == 0xF050 ||                                    /* XOR #lk,shift */
+                (exec_op & 0xFCFF) == 0xF063 || (exec_op & 0xFCFF) == 0xF064 ||    /* AND/OR #lk,16 */
+                (exec_op & 0xFCFF) == 0xF065 ||                                    /* XOR #lk,16 */
+                (exec_op & 0xFE00) == 0x1800 || (exec_op & 0xFE00) == 0x1A00 ||    /* AND/OR Smem */
+                (exec_op & 0xFE00) == 0x1C00 ||                                    /* XOR Smem */
+                (exec_op & 0xFEFC) == 0xF490);                                     /* ROR/ROL/ROLTC */
+            if (ovm_on && !(s->st1 & ST1_C16) && !op_logique) {
                 for (int k = 0; k < 2; k++) {
                     int64_t *acc = k ? &s->b : &s->a;
                     if (*acc == (k ? b_avant_piste : a_avant_piste)) continue;
