@@ -292,7 +292,7 @@ Avec la L1 gr-gsm, QEMU écoute GSMTAP sur 4730 **en dur** : c'est le pont qui v
 `PONT_GSMTAP_PORT` (osmo-operator `pont/config.py`), que `pont/pont.py` met lui-même à 14730 quand
 `BRUIT_MODE` vaut `ber` ou `relais` ; le flux est fait de blocs L2 déjà décodés, d'où ces deux modes
 seulement. Avec la L1 DSP, le module exporte `CALYPSO_BSP_PORT=16702` pour QEMU et l'injecteur prend
-6702. En montage DSP de `start-direct.sh` (`qemu` retiré du plan), le module se saute.
+6702. En montage DSP de `start-native.sh` (`qemu` retiré du plan), le module se saute.
 Journal : `$LOG_DIR/bruit.log`. Détail : `osmo-operator/wiki/Injecteur-bruit.md`.
 
 ## Documentation liée

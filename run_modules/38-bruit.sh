@@ -36,14 +36,14 @@
 #   L1 gr-gsm (le build de ce banc) : QEMU ecoute GSMTAP sur 127.0.0.1:4730 en
 #     dur (calypso_l1_grgsm.c). C'est le pont qui change de cible : pont/pont.py
 #     vise PONT_GSMTAP_PORT, que lui-meme met a BRUIT_PORT_GRGSM (14730) quand
-#     BRUIT_MODE vaut ber ou relais. Le pont est lance par start-direct.sh, pas
+#     BRUIT_MODE vaut ber ou relais. Le pont est lance par start-native.sh, pas
 #     par ce plan : BRUIT_MODE doit donc etre dans l'environnement de
-#     start-direct.sh (BRUIT_MODE=ber BRUIT_BER=0.01 ./start-direct.sh --grgsm).
+#     start-native.sh (BRUIT_MODE=ber BRUIT_BER=0.01 ./start-native.sh --grgsm).
 #     Modes ber et relais seulement (blocs L2 deja decodes, cf. injecteur).
 #   L1 DSP dans QEMU (--enable-l1-dsp) : le BSP de QEMU ecoute BRUIT_PORT_DSP
 #     (CALYPSO_BSP_PORT, exporte ici avant 40-qemu), l'injecteur prend
 #     127.0.0.1:6702 et y recoit ce que le pont envoie a --dsp-port 6702.
-#   Montage DSP de start-direct.sh (--dsp) : qemu est retire de ce plan, le
+#   Montage DSP de start-native.sh (--dsp) : qemu est retire de ce plan, le
 #     module se saute ; c'est c54x_exe/run.sh qui intercale l'injecteur.
 # Journal de l'injecteur : $LOG_DIR/bruit.log. Detail :
 # osmo-operator/wiki/Injecteur-bruit.md.
@@ -74,7 +74,7 @@ d = {o["name"]: o["value"] for o in json.load(open(sys.argv[1]))}
 print("dsp" if d.get("l1_dsp") == "enabled" else "grgsm", end="")' "$j" 2>/dev/null || printf 'grgsm'
 }
 
-# qemu est-il dans le plan joue ? (start-direct.sh --dsp le retire : --skip qemu,...)
+# qemu est-il dans le plan joue ? (start-native.sh --dsp le retire : --skip qemu,...)
 _bruit_qemu_au_plan() {
     local m
     for m in "${selected[@]:-}"; do [ "$m" = qemu ] && return 0; done
@@ -109,7 +109,7 @@ _bruit_vivant() {
 
 mod_bruit_check() {
     if ! _bruit_qemu_au_plan; then
-        mod_skip "qemu hors du plan (montage DSP de start-direct.sh) : c54x_exe/run.sh intercale l'injecteur"
+        mod_skip "qemu hors du plan (montage DSP de start-native.sh) : c54x_exe/run.sh intercale l'injecteur"
         return $MOD_RC_SKIP
     fi
     [ -n "${BRUIT_MODE:-}" ] || { mod_ok; return $MOD_RC_OK; }      # BRUIT_SNR_DB seul : rien a lancer
@@ -168,7 +168,7 @@ mod_bruit_start() {
         mod_say "CALYPSO_BSP_PORT=$CALYPSO_BSP_PORT exporte : le BSP de QEMU y ecoutera, l'injecteur prend 6702"
     else
         mod_say "L1 gr-gsm : pont -> 127.0.0.1:${PONT_GSMTAP_PORT:-$BRUIT_PORT_GRGSM} (injecteur) -> QEMU ${PORT_GSMTAP_SI:-4730}"
-        mod_say "  le pont doit viser ce port : BRUIT_MODE dans l'environnement de start-direct.sh (pont/pont.py)"
+        mod_say "  le pont doit viser ce port : BRUIT_MODE dans l'environnement de start-native.sh (pont/pont.py)"
     fi
     mod_say "commande : python3 -u $BRUIT_PY ${BRUIT_ARGS[*]}"
     mod_say "journal  : $log"

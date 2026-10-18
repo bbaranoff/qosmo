@@ -16,7 +16,7 @@ _TEMPS_REEL_LIB_LOADED=1
 # (« Failed setting SCHED_RR priority 1 », exit 1 - vérifié sans CAP_SYS_NICE
 # ni rtprio). Ici on essaie d'abord : sans le droit, on lance comme avant.
 # Le droit : root (CAP_SYS_NICE) sur l'hôte ; « --ulimit rtprio=18 » dans les
-# conteneurs (start.sh, compose.yaml).
+# conteneurs (start-docker.sh, compose.yaml).
 #
 #   QOSMO_RT_PRIO=<1-99>  priorité SCHED_RR (défaut 1 : au-dessus de tout
 #                         SCHED_OTHER, sous le reste du temps réel)

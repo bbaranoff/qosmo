@@ -5,7 +5,7 @@
 #
 #  Autonome : ce depot et quelques paquets apt suffisent, osmo-operator n est
 #  pas necessaire. C est aussi CE script qu appellent le Dockerfile
-#  d osmo-operator (stage qemu), son Dockerfile.run, start.sh et l installation
+#  d osmo-operator (stage qemu), son Dockerfile.run, start-docker.sh et l installation
 #  native (install_modules/45-calypso.sh) : une seule liste de commandes.
 #
 #      ./install.sh                 tout, dans l ordre (voir --list)

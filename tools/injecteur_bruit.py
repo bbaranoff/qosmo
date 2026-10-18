@@ -52,7 +52,7 @@
 #           instant 0,35, elargissement 1,0, bruit propre ; gmsk_elargir 0,3 sur
 #           les NB -- seul ce dernier est imite ici, --iq-elargir).
 #           INCOMPATIBLE avec CALYPSO_BSP_STREAM=1 (le defaut de
-#           start-direct.sh --dsp) : en STREAM le BSP range les 148 premiers
+#           start-native.sh --dsp) : en STREAM le BSP range les 148 premiers
 #           octets du paquet comme des bits AVANT la branche IQ_PASSTHROUGH
 #           (calypso_bsp.c bsp_trxd_readable -> bsp_ts0_stocker). Refuse dans ce
 #           cas, sauf --forcer-iq. Necessite numpy.

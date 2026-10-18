@@ -6,7 +6,7 @@ _MODEM_LIB_LOADED=1
 #   BTS#1 (bts 1, TS5-7 PDCH) --TRXD 5720--> fake_trx --6720--> trxcon MS#2 (voix)
 #                                                   \--6740--> trxcon modem (GPRS)
 #   BTS#1 --/tmp/pcu_bts2--> osmo-pcu (second, nsei 11) --Gb--> osmo-sgsn --> osmo-ggsn (apn internet)
-# MODEM_GPRS=0 coupe tout le lot (start-direct.sh --no-gprs-modem).
+# MODEM_GPRS=0 coupe tout le lot (start-native.sh --no-gprs-modem).
 : "${MODEM_GPRS:=1}"
 : "${MODEM_BIN:=${OSMOCOM_BB:-${GSM_ROOT:-/opt/GSM}/osmocom-bb}/src/host/layer23/src/modem/modem}"
 : "${MODEM_BB_PORT:=6740}"            # base TRXD cote modem (fake_trx --trx ...:6740, trxcon -p 6740)
