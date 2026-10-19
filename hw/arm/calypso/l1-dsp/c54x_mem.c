@@ -21,11 +21,14 @@ int      g_fbwatch_on = -1;
 
 uint16_t data_read(C54xState *s, uint16_t addr)
 {
+    /* Mailbox monitor: logs the value as found in memory on entry. The few cells
+     * synthesized further down (FB-STREAM) show up on the write side anyway.
+     * [2026-10-19] AVANT le chemin rapide : c54x_exe tourne en c54x_rapide et
+     * CALYPSO_MAILBOX=1 ne produisait aucun fichier. Moniteur eteint, le cout
+     * est un chargement d'int (calypso_mbx_actif) par acces. */
+    calypso_mbx(MBX_DSP_RD, addr, s->data[addr], 0, s->pc, 0, s->insn_count);
     if (c54x_rapide)                       /* see calypso_c54x.h */
         return data_read_locked(s, addr);
-    /* Mailbox monitor: logs the value as found in memory on entry. The few cells
-     * synthesized further down (FB-STREAM) show up on the write side anyway. */
-    calypso_mbx(MBX_DSP_RD, addr, s->data[addr], 0, s->pc, 0, s->insn_count);
 
     /* FEED-DST - which buffer does the demod actually read? Gate
      * CALYPSO_FEED_DST (default 0), read-only, capped.
@@ -1080,6 +1083,8 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         if (rssi_on < 0) rssi_on = calypso_gate("CALYPSO_PM_RSSI", 1);
         if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) || (addr >= 0x0848 && addr <= 0x084A)))
             val = calypso_bsp_rssi_apm();
+        /* [2026-10-19] moniteur mailbox aussi sur le chemin rapide (voir data_read) */
+        calypso_mbx(MBX_DSP_WR, addr, val, s->data[addr], s->pc, 0, s->insn_count);
         data_write_locked(s, addr, val);
         return;
     }

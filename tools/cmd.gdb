@@ -729,4 +729,14 @@ help_osmo — liste toutes les commandes du panneau osmocom, avec leur role et l
 end
 
 printf "[cmd.gdb] panneau osmocom charge : help_osmo\n"
-source /var/tmp/iso-build-127617/rootfs/opt/GSM/qosmo/tools/demo-layer1.py
+python
+import gdb, os
+for _d in (os.environ.get("OSMO_GDB_TOOLS", ""), "/opt/GSM/qosmo/tools", "/opt/GSM/qosmo/tools"):
+    _f = os.path.join(_d, "demo-layer1.py") if _d else ""
+    if _f and os.path.isfile(_f):
+        gdb.execute("source " + _f)
+        break
+else:
+    gdb.write("[cmd.gdb] demo-layer1.py introuvable (OSMO_GDB_TOOLS=%r) : commande demo absente\n"
+              % os.environ.get("OSMO_GDB_TOOLS", ""))
+end

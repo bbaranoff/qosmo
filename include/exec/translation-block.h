@@ -141,6 +141,10 @@ struct TranslationBlock {
     uintptr_t jmp_list_head;
     uintptr_t jmp_list_next[2];
     uintptr_t jmp_dest[2];
+
+    /* [2026-10-19] -d exec : lookup_symbol(pc) resolu une fois a la
+     * traduction (bsearch dans la table ELF a chaque bloc execute, sinon). */
+    const char *log_sym;
 };
 
 /* The alignment given to TranslationBlock during allocation. */

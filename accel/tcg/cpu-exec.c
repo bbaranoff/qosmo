@@ -294,7 +294,8 @@ static void log_cpu_exec(vaddr pc, CPUState *cpu,
                       "Trace %d: %p [%08" PRIx64
                       "/%016" VADDR_PRIx "/%08x/%08x] %s\n",
                       cpu->cpu_index, tb->tc.ptr, tb->cs_base, pc,
-                      tb->flags, tb->cflags, lookup_symbol(pc));
+                      tb->flags, tb->cflags,
+                      tb->log_sym ? tb->log_sym : lookup_symbol(pc));
 
         if (qemu_loglevel_mask(CPU_LOG_TB_CPU)) {
             FILE *logfile = qemu_log_trylock();

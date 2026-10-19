@@ -43,6 +43,12 @@ typedef enum {
  * decides, and later accesses are filtered. */
 extern int calypso_mbx_actif;
 
+/* [2026-10-19] Deux processus tiennent chacun un bout de la boite : c54x_exe (DSP)
+ * et QEMU (ARM, fenetre API de calypso_trx.c). Le cote qui pose ce suffixe AVANT
+ * le premier evenement ecrit dans « <fichier>-<suffixe>.log » au lieu de
+ * « <fichier>.log », pour ne pas ecraser l'autre. Vide par defaut (DSP). */
+extern const char *calypso_mbx_suffixe;
+
 /* Opens the file and reads the configuration. Idempotent, called lazily on the
  * first event, so there is nothing to schedule at startup. */
 void calypso_mbx_init(void);

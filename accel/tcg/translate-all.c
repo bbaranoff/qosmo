@@ -332,6 +332,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     tb->cs_base = cs_base;
     tb->flags = flags;
     tb->cflags = cflags;
+    tb->log_sym = qemu_loglevel_mask(CPU_LOG_EXEC) ? lookup_symbol(pc) : "";
     tb_set_page_addr0(tb, phys_pc);
     tb_set_page_addr1(tb, -1);
     if (phys_pc != -1) {

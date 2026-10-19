@@ -26,6 +26,7 @@
 #include "hw/arm/calypso/calypso_debug.h"
 
 int calypso_mbx_actif = -1;   /* -1 = initialise on first access */
+const char *calypso_mbx_suffixe = "";
 
 static FILE    *g_f;
 static int      g_init;
@@ -196,6 +197,17 @@ void calypso_mbx_init(void)
         snprintf(def, sizeof(def), "%s/mailbox.log",
                  (d && *d) ? d : "/tmp/calypso/logs");
         e = def;
+    }
+    if (calypso_mbx_suffixe && *calypso_mbx_suffixe) {
+        /* mailbox.log -> mailbox-arm.log ; sans « .log » : suffixe en queue */
+        static char avec[600];
+        size_t n = strlen(e);
+        if (n > 4 && !strcmp(e + n - 4, ".log")) {
+            snprintf(avec, sizeof(avec), "%.*s-%s.log", (int)(n - 4), e, calypso_mbx_suffixe);
+        } else {
+            snprintf(avec, sizeof(avec), "%s-%s", e, calypso_mbx_suffixe);
+        }
+        e = avec;
     }
     g_f = fopen(e, "w");
     if (!g_f) {

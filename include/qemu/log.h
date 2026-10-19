@@ -42,6 +42,7 @@ bool qemu_log_separate(void);
 
 FILE *qemu_log_trylock(void) G_GNUC_WARN_UNUSED_RESULT;
 void qemu_log_unlock(FILE *fd);
+void qemu_log_flush(void);
 
 /* Logging functions: */
 

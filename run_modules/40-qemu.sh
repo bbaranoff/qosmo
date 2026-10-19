@@ -65,12 +65,27 @@ mod_qemu_start() {
     # intitulee « parallel0 », qui capte le clavier, pendant que le boot se passe
     # sur les pty. -parallel none supprime en plus le chardev (`info chardev` le
     # montrait encore en `vc` avec le seul -display none).
+    # icount / trace in_asm, désactivés par défaut (./run.sh --icount / --asm) :
+    #   QEMU_ICOUNT=auto|shift=N,…   -> -icount
+    #   QEMU_ASM=1|FICHIER           -> -d in_asm -D FICHIER (défaut $LOG_DIR/qemu-asm.log)
+    #   QEMU_ASM_FLAGS=…             remplace in_asm (in_asm,exec,nochain : chaque execution, trop lent pour l'attach)
+    #   QEMU_ASM_FILTRE=…            ajoute -dfilter
+    # Passés après `--` au lanceur : marche aussi avec un lanceur installé plus ancien.
+    local -a qx=()
+    case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) qx+=(-icount "$QEMU_ICOUNT") ;; esac
+    case "${QEMU_ASM:-}" in
+        ''|0|off) ;;
+        1) qx+=(-d "${QEMU_ASM_FLAGS:-in_asm}" -D "${LOG_DIR}/qemu-asm.log") ;;
+        *) qx+=(-d "${QEMU_ASM_FLAGS:-in_asm}" -D "$QEMU_ASM") ;;
+    esac
+    [ -n "${QEMU_ASM:-}" ] && [ -n "${QEMU_ASM_FILTRE:-}" ] && qx+=(-dfilter "$QEMU_ASM_FILTRE")
+    [ "${#qx[@]}" -gt 0 ] && mod_say "extra    : ${qx[*]}"
     local launcher="${QOSMO_LAUNCHER:-/usr/local/bin/qosmo}"
     if [ -x "$launcher" ]; then
         mod_say "lanceur  : $launcher (QOSMO_LAUNCHER) ; gdbstub ARM : $CALYPSO_GDB_PORT"
         setsid "$launcher" --qemu "$QEMU_BIN" -k "$FIRMWARE_ELF" --bin "$FIRMWARE_BIN" \
             --cpu arm946 --gdb "$CALYPSO_GDB_PORT" --rundir "$RUN_DIR" \
-            --monitor "${RUN_DIR}/qemu-monitor.sock" >>"$qlog" 2>&1 </dev/null &
+            --monitor "${RUN_DIR}/qemu-monitor.sock" -- "${qx[@]}" >>"$qlog" 2>&1 </dev/null &
         qpid=$!
     else
         mod_say "lanceur  : absent ($launcher) — ligne qemu-system-arm directe ; installez-le : make -C ${QEMU_TREE:-.}/tools/qosmo-launch install"
@@ -78,7 +93,7 @@ mod_qemu_start() {
             -display none -parallel none \
             -serial pty -serial pty \
             -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
-            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
+            -kernel "$FIRMWARE_ELF" "${qx[@]}" >>"$qlog" 2>&1 </dev/null &
         qpid=$!
     fi
     printf '%s\n' "$qpid" > "${RUN_DIR}/qemu.pid"

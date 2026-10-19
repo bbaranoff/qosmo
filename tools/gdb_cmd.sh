@@ -758,7 +758,30 @@ end
 printf "[cmd.gdb] panneau osmocom charge : help_osmo\n"
 GDB
 # [2026-10-06] la demo « la main sur le firmware » (tools/demo-layer1.py, Python gdb) : commande demo
-printf 'source %s/demo-layer1.py\n' "$HERE" >> "$OUT"
+# [2026-10-19] LE CHEMIN DE LA DEMO N'EST PLUS FIGE. `source $HERE/demo-layer1.py`
+# ecrivait le repertoire DE GENERATION : quand build-iso (52-qemu.sh) regenere
+# cmd.gdb dans le rootfs de l'image, c'est /var/tmp/iso-build-NNN/rootfs/opt/
+# GSM/qosmo/tools qui partait dans l'ISO - et sur la machine installee, chaque
+# `telnet 0 44444` finissait par « demo-layer1.py: No such file or directory »,
+# sans commande demo. cmd.gdb cherche desormais le fichier : la ou la console
+# telnet dit que sont les outils (OSMO_GDB_TOOLS, pose par gdb-telnet.py), puis
+# le chemin de generation debarrasse d'un eventuel prefixe de rootfs
+# (GDB_CMD_HERE le force), puis l'arbre installe.
+BAKED="${GDB_CMD_HERE:-$HERE}"
+case "$BAKED" in */rootfs/opt/GSM/*) BAKED="/opt/GSM/${BAKED#*/rootfs/opt/GSM/}" ;; esac
+cat >> "$OUT" <<GDB
+python
+import gdb, os
+for _d in (os.environ.get("OSMO_GDB_TOOLS", ""), "$BAKED", "/opt/GSM/qosmo/tools"):
+    _f = os.path.join(_d, "demo-layer1.py") if _d else ""
+    if _f and os.path.isfile(_f):
+        gdb.execute("source " + _f)
+        break
+else:
+    gdb.write("[cmd.gdb] demo-layer1.py introuvable (OSMO_GDB_TOOLS=%r) : commande demo absente\\n"
+              % os.environ.get("OSMO_GDB_TOOLS", ""))
+end
+GDB
 
 echo "ecrit : $OUT ($(wc -l < "$OUT") lignes, $(grep -c '^define ' "$OUT") commandes)"
 if [ "$INSTALL" = 1 ]; then

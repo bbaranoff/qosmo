@@ -398,6 +398,7 @@ static char *gdb_spec(const char *spec)
 /* ------------------------------------------------------------- options */
 typedef struct {
     const char *qemu, *firmware, *fw_bin, *cpu, *rundir, *monitor, *gdb, *display;
+    const char *icount, *asm_log;   /* -icount SPEC ; -d in_asm -D FICHIER */
     const char *l1ctl, *bind, *trx_port, *iq_tee;
     const char *pty_link, *irda_link;
     const char *dsp_spec;
@@ -452,6 +453,8 @@ static void usage(FILE *f)
 "                          La machine calypso n'a pas d'écran : `none` évite la fenêtre\n"
 "                          vide « parallel0 » et permet de tourner sans DISPLAY.\n"
 "      --nographic         équivalent de --display none\n"
+"      --icount[=SPEC]     -icount SPEC ($QOSMO_ICOUNT ; SPEC défaut : auto)\n"
+"      --asm[=FICHIER]     -d in_asm -D FICHIER ($QOSMO_ASM ; défaut : <rundir>/qemu-asm.log)\n"
 "  -e, --env VAR=VAL       variable d'environnement pour le modèle (CALYPSO_*, …)\n"
 "  -n, --dry-run           affiche l'environnement et la commande, ne lance rien\n"
 "  -q, --quiet             pas de bannière\n"
@@ -537,6 +540,10 @@ static void parse_args(int argc, char **argv, opts_t *o)
         else if (IS("--cpu", "-cpu", NULL))   o->cpu = VAL();
         else if (IS("--display", "-display", NULL)) o->display = VAL();
         else if (IS("--nographic", "-nographic", NULL)) o->display = "none";
+        else if (IS("--icount", NULL, NULL))  o->icount = eq ? eq + 1 : "auto";
+        else if (IS("--no-icount", NULL, NULL)) o->icount = "off";
+        else if (IS("--asm", "--in-asm", NULL)) o->asm_log = eq ? eq + 1 : "";
+        else if (IS("--no-asm", NULL, NULL))  o->asm_log = "off";
         else if (IS("-e", "--env", NULL))     argv_push(&o->envs, VAL());
         else if (IS("-n", "--dry-run", NULL)) o->dry_run = true;
         else if (IS("-q", "--quiet", NULL))   o->quiet = true;
@@ -750,11 +757,21 @@ int main(int argc, char **argv)
     if (!o.osmocon_debug) o.osmocon_debug = env_nonempty("OSMOCON_DEBUG") ? env_nonempty("OSMOCON_DEBUG") : DEF_OSMOCON_DEBUG;
     if (!o.osmocon_log)   o.osmocon_log   = xasprintf("%s/osmocon.log", o.rundir);
 
+    /* -- icount / trace in_asm (désactivés par défaut) --
+     * $QOSMO_ICOUNT=auto|shift=N,… ; $QOSMO_ASM=1 (fichier par défaut) ou un chemin.
+     * « off » (option ou variable) coupe. */
+    if (!o.icount)  o.icount  = env_nonempty("QOSMO_ICOUNT");
+    if (!o.asm_log) o.asm_log = env_nonempty("QOSMO_ASM");
+    if (o.icount && (!*o.icount || !strcmp(o.icount, "off") || !strcmp(o.icount, "0"))) o.icount = NULL;
+    if (o.asm_log && (!strcmp(o.asm_log, "off") || !strcmp(o.asm_log, "0"))) o.asm_log = NULL;
+    if (o.asm_log && (!*o.asm_log || !strcmp(o.asm_log, "1")))
+        o.asm_log = xasprintf("%s/qemu-asm.log", o.rundir);
+
     /* -- ligne de commande QEMU -- */
     argv_t qa = { 0 };
     argv_push(&qa, o.qemu);
     bool user_M = false, user_cpu = false, user_serial = false, user_kernel = false;
-    bool user_display = false, user_parallel = false;
+    bool user_display = false, user_parallel = false, user_icount = false, user_d = false;
     for (int i = 0; i < o.extra.n; i++) {
         if (!strcmp(o.extra.v[i], "-M") || !strcmp(o.extra.v[i], "-machine")) user_M = true;
         if (!strcmp(o.extra.v[i], "-cpu")) user_cpu = true;
@@ -762,6 +779,8 @@ int main(int argc, char **argv)
         if (!strcmp(o.extra.v[i], "-kernel")) user_kernel = true;
         if (!strcmp(o.extra.v[i], "-display") || !strcmp(o.extra.v[i], "-nographic")) user_display = true;
         if (!strcmp(o.extra.v[i], "-parallel")) user_parallel = true;
+        if (!strcmp(o.extra.v[i], "-icount")) user_icount = true;
+        if (!strcmp(o.extra.v[i], "-d") || !strcmp(o.extra.v[i], "-D")) user_d = true;
     }
     if (!user_M)   { argv_push(&qa, "-M"); argv_push(&qa, mach); }
     if (!user_cpu) { argv_push(&qa, "-cpu"); argv_push(&qa, o.cpu); }
@@ -776,6 +795,8 @@ int main(int argc, char **argv)
     if (!user_serial) { argv_push(&qa, "-serial"); argv_push(&qa, "pty"); argv_push(&qa, "-serial"); argv_push(&qa, "pty"); }
     if (!o.no_monitor) { argv_push(&qa, "-monitor"); char *m = xasprintf("unix:%s,server,nowait", o.monitor); argv_push(&qa, m); free(m); }
     if (!user_kernel) { argv_push(&qa, "-kernel"); argv_push(&qa, fw); }
+    if (o.icount && !user_icount) { argv_push(&qa, "-icount"); argv_push(&qa, o.icount); }
+    if (o.asm_log && !user_d) { argv_push(&qa, "-d"); argv_push(&qa, "in_asm"); argv_push(&qa, "-D"); argv_push(&qa, o.asm_log); }
     for (int i = 0; i < o.extra.n; i++) argv_push(&qa, o.extra.v[i]);
 
     /* -- bannière -- */
@@ -798,6 +819,8 @@ int main(int argc, char **argv)
             for (int i = 0; i < N_ROMS; i++) if (roms[i]) say("  %-9s: %s", rom_tokens[i], roms[i]);
         }
         say("rundir    : %s", o.rundir);
+        if (o.icount)  say("icount    : %s", o.icount);
+        if (o.asm_log) say("in_asm    : %s", o.asm_log);
         say("moniteur  : %s", o.no_monitor ? "(aucun)" : o.monitor);
         say("affichage : %s", user_display ? "(passé à QEMU tel quel)" : o.display);
         say("gdb ARM   : %s", gdb ? gdb : "(off)");

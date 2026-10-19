@@ -100,8 +100,12 @@ def session(conn, args):
                '-ex', f'target remote 127.0.0.1:{args.stub}',
                '-ex', 'continue &']
         # panneau osmocom (tools/cmd.gdb, genere par gdb_cmd.sh) : source auto
-        panel = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cmd.gdb')
+        tools = os.path.dirname(os.path.abspath(__file__))
+        panel = os.path.join(tools, 'cmd.gdb')
         if os.path.isfile(panel):
+            # [2026-10-19] cmd.gdb cherche demo-layer1.py d'abord ici : le chemin
+            # fige a sa generation peut etre celui d'un rootfs de build.
+            os.environ['OSMO_GDB_TOOLS'] = tools
             cmd += ['-x', panel]
         if args.elf:
             cmd.append(args.elf)

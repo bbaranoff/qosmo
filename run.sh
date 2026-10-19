@@ -23,6 +23,8 @@ Usage : ./run.sh [options]
   --reset             repart d'un état propre : arrête la pile, tue le serveur
                       tmux, archive les journaux, purge sockets et fichiers partagés
   --lang <code>       langue de l'affichage (fr de en es pt it hi zh ar)
+  --icount[=SPEC]     QEMU avec -icount SPEC (défaut : auto) ; = QEMU_ICOUNT
+  --asm[=FICHIER]     QEMU avec -d in_asm -D FICHIER (défaut : $LOG_DIR/qemu-asm.log) ; = QEMU_ASM
   --profile <nom>     accepté pour compatibilité, sans effet (un seul banc)
   --verbose           accepté pour compatibilité, sans effet
   -h, --help          cette aide
@@ -110,6 +112,10 @@ while [ $# -gt 0 ]; do
         --reset)       ACTION=reset ;;
         --restart)     ACTION=restart ;;
         --lang)        CALYPSO_LANG="${2:-}"; export CALYPSO_LANG; shift ;;
+        --icount)      export QEMU_ICOUNT=auto ;;
+        --icount=*)    export QEMU_ICOUNT="${1#--icount=}" ;;
+        --asm)         export QEMU_ASM=1 ;;
+        --asm=*)       export QEMU_ASM="${1#--asm=}" ;;
         -h|--help)     usage; exit 0 ;;
         *) printf 'option inconnue : %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac

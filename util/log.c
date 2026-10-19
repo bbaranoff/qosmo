@@ -132,10 +132,53 @@ FILE *qemu_log_trylock(void)
     return qemu_log_trylock_with_err(NULL);
 }
 
+/* [2026-10-19] QEMU_LOG_BUFFERED=<octets> : le fichier -D est pleinement
+ * bufferise (setvbuf) et qemu_log_unlock() ne fait plus de fflush() par ligne.
+ * Avec -d exec chaque bloc execute coutait un write(2) (32 M en 3 min sur le
+ * banc Calypso). Le contenu n'arrive sur disque que par paquets : en cas de
+ * plantage les dernieres lignes manquent, d'ou l'option (defaut : inchange). */
+static size_t qemu_log_buffered(void)
+{
+    static ssize_t sz = -1;
+    if (sz < 0) {
+        const char *e = getenv("QEMU_LOG_BUFFERED");
+        sz = (e && *e) ? (ssize_t)strtoll(e, NULL, 0) : 0;
+        if (sz < 0) {
+            sz = 0;
+        }
+    }
+    return (size_t)sz;
+}
+
+static void qemu_log_setvbuf(FILE *f)
+{
+    size_t sz = qemu_log_buffered();
+    if (f && sz >= 4096) {
+        setvbuf(f, NULL, _IOFBF, sz);
+    }
+}
+
+/* [2026-10-19] Vidage explicite du tampon QEMU_LOG_BUFFERED : appele par la
+ * machine calypso a chaque arret de la VM (Ctrl-C gdb, stop moniteur), pour que
+ * les dernieres lignes soient dans le fichier au moment ou on les lit. */
+void qemu_log_flush(void)
+{
+    FILE *f = qemu_log_trylock();
+    if (f) {
+        fflush(f);
+        qemu_funlockfile(f);
+        if (!log_per_thread) {
+            rcu_read_unlock();
+        }
+    }
+}
+
 void qemu_log_unlock(FILE *logfile)
 {
     if (logfile) {
-        fflush(logfile);
+        if (!qemu_log_buffered()) {
+            fflush(logfile);
+        }
         qemu_funlockfile(logfile);
         if (!log_per_thread) {
             rcu_read_unlock();
@@ -323,6 +366,7 @@ static bool qemu_set_log_internal(const char *filename, bool changed_name,
                                      filename);
                     return false;
                 }
+                qemu_log_setvbuf(logfile);
             }
             /* In case we are a daemon redirect stderr to logfile */
             if (daemonized) {

@@ -2,6 +2,7 @@
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "qemu/log.h"
 #include "sysemu/runstate.h"
 #include "exec/address-spaces.h"
 #include "exec/cpu-common.h"
@@ -19,6 +20,7 @@ extern void calypso_twl3025_set_afc_dac(int16_t dac_value) __attribute__((weak))
 #include "hw/arm/calypso/calypso_timer.h"
 #include "hw/arm/calypso/calypso_sim.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
+#include "hw/arm/calypso/l1-dsp/calypso_mailbox.h"
 #include <pthread.h>
 #include <time.h>
 #include <poll.h>
@@ -513,6 +515,17 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
             }
         }
     }
+    /* [2026-10-19] moniteur mailbox, cote ARM (CALYPSO_MAILBOX=1, fichier
+     * mailbox-arm.log ; le cote DSP est dans c54x_exe). Mot DSP = 0x0800 + off/2,
+     * ctx = PC ARM, fn = trame courante du pont. */
+    if (calypso_mbx_actif && (size == 2 || size == 4)) {
+        calypso_mbx_suffixe = "arm";
+        uint32_t pc = (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
+        calypso_mbx(MBX_ARM_RD, (uint16_t)(0x0800 + off / 2), (uint16_t)val, 0, pc, s->fn, 0);
+        if (size == 4) {
+            calypso_mbx(MBX_ARM_RD, (uint16_t)(0x0801 + off / 2), (uint16_t)(val >> 16), 0, pc, s->fn, 0);
+        }
+    }
     if (size != 2) {
         return val;
     }
@@ -553,6 +566,14 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
     CalypsoTRX *s = opaque;
     if (off >= CALYPSO_API_SIZE) {
         return;
+    }
+    if (calypso_mbx_actif && (size == 2 || size == 4)) {        /* [2026-10-19] voir api_read */
+        calypso_mbx_suffixe = "arm";
+        uint32_t pc = (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
+        calypso_mbx(MBX_ARM_WR, (uint16_t)(0x0800 + off / 2), (uint16_t)value, s->api_ram[off / 2], pc, s->fn, 0);
+        if (size == 4) {
+            calypso_mbx(MBX_ARM_WR, (uint16_t)(0x0801 + off / 2), (uint16_t)(value >> 16), s->api_ram[off / 2 + 1], pc, s->fn, 0);
+        }
     }
     if (size == 2) {
         s->api_ram[off / 2] = (uint16_t)value;
@@ -831,8 +852,37 @@ static void cpu_idle_park(void)
     if (pc < IDLE_PC_LO || pc >= IDLE_PC_HI) {
         return;
     }
+    /* [2026-10-19] PAS DE PARK EN CONTEXTE D'INTERRUPTION. La plage IDLE_PC
+     * (0x823000-0x826000) contient l1a_l23_handler, mframe_schedule et les
+     * puts() de l1_sync : du code qui tourne aussi dans le handler d'IT trame
+     * et d'UART (mode IRQ, bit I leve). Avec -d exec,nochain l'ARM est 5 fois
+     * plus lent (2 ms de CPU par trame au lieu de 0,4) et se trouve souvent
+     * la, en plein ISR, quand l'impulsion de 1 ms retombe : il etait halte
+     * IT masquees (PSR=0x80000192 au moniteur, 12 echantillons sur 12,
+     * PC=0x824b20), ne reveille que par l'IT suivante, l'EOI trame ne venait
+     * jamais et le pont attendait jusqu'a 2,4 s (« l1_sync finie apres 9210
+     * a 29907 attentes », puis « GO envoye quand meme »). Mesure du
+     * 2026-10-19 11:09 : 60 trames/s, mobile « no cell available ».
+     * Le vrai idle (while(1) de main) tourne en mode SYS/SVC, IT ouvertes :
+     * on ne parque que lui. */
+    {
+        CPUARMState *env = &ARM_CPU(cs)->env;
+        uint32_t cpsr = cpsr_read(env);
+        uint32_t mode = cpsr & CPSR_M;
+        if ((cpsr & CPSR_I) || mode == ARM_CPU_MODE_IRQ || mode == ARM_CPU_MODE_FIQ ||
+            mode == ARM_CPU_MODE_ABT || mode == ARM_CPU_MODE_UND) {
+            return;
+        }
+    }
     cs->halted = 1;
     cpu_exit(cs);
+}
+
+static void calypso_trx_vm_state(void *opaque, bool running, RunState state)
+{
+    if (!running) {
+        qemu_log_flush();
+    }
 }
 
 static void frame_irq_lower(void *o)
@@ -1287,6 +1337,10 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs)
            CALYPSO_SIM_SIZE);
 
     s->tdma_timer = timer_new_ns(QEMU_CLOCK_REALTIME, tdma_tick, s);
+    /* [2026-10-19] -D bufferise (QEMU_LOG_BUFFERED) : a chaque arret de la VM
+     * (Ctrl-C de la console gdb, « stop » moniteur) on vide le tampon pour que
+     * la trace lue a ce moment aille jusqu'au dernier bloc execute. */
+    qemu_add_vm_change_state_handler(calypso_trx_vm_state, s);
     s->frame_irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, frame_irq_lower, s);
     s->kick_timer = timer_new_ns(QEMU_CLOCK_REALTIME, cpu_kick, s);
     timer_mod_ns(s->kick_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CPU_KICK_NS);

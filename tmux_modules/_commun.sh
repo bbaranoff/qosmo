@@ -4,6 +4,13 @@ C_MS1=colour179
 C_MS2=colour215
 C_VOIX=colour176
 SUIVRE="tail -n 100 -F"
+# [2026-10-19] Couleurs a l'affichage (tools/qosmo-couleurs.py) : tags [trx] [sim]
+# [c54x]..., fn=, hex, erreurs en rouge, trace asm (adresse, octets, PC, symbole),
+# mailbox (ARM>WR ...). Rien dans les fichiers. QOSMO_COULEURS=0 coupe.
+_couleurs() {
+    local p="${QOSMO_COULEURS_PY:-${QEMU_TREE:-.}/tools/qosmo-couleurs.py}"
+    [ "${QOSMO_COULEURS:-1}" != 0 ] && [ -f "$p" ] && printf " | python3 -u '%s' --force" "$p"
+}
 : "${OSMO_LOG_DIR:=/var/log/osmocom}"
 
 _paint() {
@@ -25,8 +32,17 @@ _split() {
 }
 
 _tail() {
-    printf "%s %s 2>/dev/null | stdbuf -oL tr -d '\\\\007' || sleep infinity" \
-           "$SUIVRE" "$*"
+    printf "%s %s 2>/dev/null | stdbuf -oL tr -d '\\\\007'%s || sleep infinity" \
+           "$SUIVRE" "$*" "$(_couleurs)"
+}
+
+# [2026-10-19] Pane de la trace asm (ASSEMBLY_LOGS=1 / QEMU_ASM) : PAS un tail -F,
+# le fichier grossit jusqu'a 150 Mo/s avec exec,nochain et un tail -F a des secondes
+# de retard (et gonfle le scrollback). On rafraichit les 60 dernieres lignes deux
+# fois par seconde ; en --dsp le fichier est celui de c54x_exe (/tmp/c54x-pont).
+_asm_watch() {
+    printf "watch -t -n 0.5 --color \"for f in /tmp/c54x-pont/qemu-asm.log '%s/qemu-asm.log'; do [ -f \\\$f ] && { tail -n 60 \\\$f%s; break; }; done\"" \
+           "${LOG_DIR}" "$(_couleurs)"
 }
 
 _fenetre_coeur() {

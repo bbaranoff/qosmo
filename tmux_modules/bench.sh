@@ -2,8 +2,8 @@ TMUX_FENETRE_PREMIERE=radio
 TMUX_RESUME="6 fenêtres : radio · coeur · ms1 · ms2 (side-car) · voix · shell"
 
 tmux_layout_premiere() {
-    printf "tail -n 200 -F '%s/qemu.log' 2>/dev/null | stdbuf -oL tr -d '\\\\007' || sleep infinity" \
-           "${LOG_DIR}"
+    printf "tail -n 200 -F '%s/qemu.log' 2>/dev/null | stdbuf -oL tr -d '\\\\007'%s || sleep infinity" \
+           "${LOG_DIR}" "$(_couleurs)"
 }
 
 tmux_layout() {
@@ -15,6 +15,11 @@ tmux_layout() {
         "$(_tail "'$L/osmocon.log'")" "$C_RADIO"
     _split radio "pont | transceiver du BTS#0 - bursts TRXD 5700-5702 <-> QEMU 4730/4731" \
         "$(_tail "'/dev/shm/pont.log'")" "$C_RADIO"
+    # [2026-10-19] trace asm de l'ARM quand elle est demandee (--asm / --assembly-logs)
+    if { [ -n "${QEMU_ASM:-}" ] && [ "${QEMU_ASM}" != 0 ]; } || [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then
+        _split radio "asm | blocs ARM (-d ${QEMU_ASM_FLAGS:-in_asm}), 60 dernieres lignes, 2x/s - anneau : tbring-dump" \
+            "$(_asm_watch)" "$C_RADIO"
+    fi
     _fenetre_coeur
     _w     ms1 "MS#1 | pile L2/L3 du telephone emule - camp, LU, appels" \
         "$(_tail "'$L/mobile.log'")" "$C_MS1"

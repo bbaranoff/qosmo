@@ -14,6 +14,12 @@ arm_ss.add(when: 'CONFIG_CALYPSO', if_true: files(
   'calypso_sim.c',
   'calypso_l1_dispatch.c',
   'calypso_dcch_tap.c',
+  # [2026-10-19] Moniteur de la boite aux lettres ARM<->DSP (CALYPSO_MAILBOX=1),
+  # branche sur la fenetre API de calypso_trx.c : un DIAGNOSTIC, pas une couche 1,
+  # il ne decode rien. Il vit sous l1-dsp/ parce que c54x_exe le compile aussi
+  # (cote DSP) ; calypso_debug.c lui fournit calypso_getenv().
+  'calypso_debug.c',
+  'l1-dsp/calypso_mailbox.c',
 ))
 
 # ─── DEVICES DE LA CARTE E88 : PRESENTS DANS L'ARBRE, PAS DANS LE BUILD ──────
