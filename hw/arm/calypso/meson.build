@@ -14,6 +14,11 @@ arm_ss.add(when: 'CONFIG_CALYPSO', if_true: files(
   'calypso_sim.c',
   'calypso_l1_dispatch.c',
   'calypso_dcch_tap.c',
+  # [2026-10-19] la carte vue de l'utilisateur : clavier (ARMIO), I2C reel et
+  # ecran ST7558 du C123. Pas une couche 1 : des peripheriques du SoC.
+  'calypso_armio.c',
+  'calypso_i2c_ctrl.c',
+  'calypso_st7558.c',
   # [2026-10-19] Moniteur de la boite aux lettres ARM<->DSP (CALYPSO_MAILBOX=1),
   # branche sur la fenetre API de calypso_trx.c : un DIAGNOSTIC, pas une couche 1,
   # il ne decode rien. Il vit sous l1-dsp/ parce que c54x_exe le compile aussi

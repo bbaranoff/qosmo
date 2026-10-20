@@ -603,6 +603,97 @@ uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
 static uint32_t g_ts0_next; static int g_ts0_any;
 static int64_t g_ts0_offset = INT64_MIN;
+/* [2026-10-20] MODE TRX (CALYPSO_BSP_TRX=1, c54x_exe/run.sh OSMO_TRX=1) : cette instance est la radio de la
+ * BTS (firmware trx), elle ne recoit jamais de SB ; ses bursts montants arrivent de l'air (pont/air.py)
+ * tagues du fn GSM du mobile. L'offset fn <-> tick est alors POSE par pont.c, qui decode le sch du SB
+ * que le firmware emet (fn F au tick T) : calypso_bsp_trx_calage(). Le burst montant fn X est attendu
+ * dans la trame DSP ou part le burst descendant fn X+1 (l1s_bts_cmd programme TX next_time.fn et RX
+ * « in the next frame », l1s_bts_resp tague current_fn - 2) : offset = F - T + delta, delta = -1 par
+ * defaut avec le firmware d'origine, -2 avec BTS_RX_LAG 3 (prim_bts.c patche : une trame de marge pour l'air) (CALYPSO_BSP_TRX_DELTA). Une fois cale, les recalages du mode mobile (SB livre, seconde chance)
+ * ne touchent plus l'offset. */
+static int g_trx_cale = 0;
+/* [2026-10-20] PROTHESE MONTANTE (mode TRX). Mesure du jour, capture TRXD TRX -> osmo-bts-trx : la BTS
+ * recoit les 4 bursts de chaque bloc SDCCH au bon fn, mais leurs bits sont presque tous a zero
+ * (mots de resultat d[5..33] = 0000/8080/0007...) alors que le mobile a bien emis un SABM : la
+ * demodulation NB de l'extcode du firmware trx (dsp_extcode.c) ne sort rien de juste sur ce coeur,
+ * comme son codeur SCH. L'air transportant les bits exacts, on les ecrit nous-memes dans la page de
+ * resultat que l'ARM va lire (l1s_bts_resp : d[0] toa, d[1] pm, d[3] energie > 0x1000, d[5+i/4]
+ * nibble (3 - i%4), bit 3 = valeur ; ordre des 116 bits : burst[3..59], burst[88..144], burst[87],
+ * burst[60]). Le RACH (rx cmd AB) passe par les I/Q et n'est pas touche. Le jour ou le coeur
+ * emule juste l'extcode, le compteur « bits deja justes » le dira (CALYPSO_BSP_TRX_UL=0 pour couper). */
+static struct { uint32_t fn, tick; uint8_t bits[148]; int valide; } g_trx_ul;
+/* burst d'acces (05.02 5.2.7) : 8 bits de queue etendue puis la sequence de synchro de 41 bits */
+static int bsp_ts0_est_rach(const uint8_t *bits)
+{
+    static const char sync[] = "01001011011111111001100110101010001111000";
+    for (int i = 0; i < 41; i++) if ((bits[8 + i] & 1) != (uint8_t)(sync[i] - '0')) return 0;
+    return 1;
+}
+int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
+{
+    static int actif = -1; static unsigned n_ok, n_pages, n_justes;
+    if (actif < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TRX_UL"); actif = !(e && *e == '0'); }
+    if (!actif || !g_trx_ul.valide) return 0;
+    if ((int32_t)(tick - g_trx_ul.tick) < 0 || (int32_t)(tick - g_trx_ul.tick) > 2) { if ((int32_t)(tick - g_trx_ul.tick) > 2) g_trx_ul.valide = 0; return 0; }
+    int fait = 0;
+    /* La page de resultat que l'ARM va lire : la page R du firmware = l'autre que sa page W
+     * (d_dsp_page, B_GSM_PAGE, lu dans pont.c a la phase A). Mesure : l'extcode ne pose une energie
+     * (d3=0x4000) que pour 1 burst joue sur 2 a 4 ; sans elle le firmware ignore le burst. On ne se
+     * fie donc plus a d3 : on ecrit bits ET energie dans la page R, une seule fois par burst. */
+    /* w_page et r_page du firmware basculent ensemble (l1_sync) : la page de resultat lue a la trame
+     * k+2 porte le MEME index que la page W courante. Mesure : d3=0x4000 toujours dans la page de
+     * l'index d_dsp_page (bit -> 0x2200), jamais dans l'autre. */
+    unsigned base = w_page ? 0x2200 : 0x2000;
+    static unsigned n_dbg;
+    if (n_dbg < 40) {
+        n_dbg++;
+        printf("  [ts0] prothese montante ? tick %u burst fn=%u joue au tick %u : w_page=%d -> page %04x ; page 2000 rx0.cmd=%u d3=%04x | page 2200 rx0.cmd=%u d3=%04x\n",
+               tick, g_trx_ul.fn, g_trx_ul.tick, w_page, base, dspdata[0x2000 + 16], dspdata[0x2000 + 66 + 3], dspdata[0x2200 + 16], dspdata[0x2200 + 66 + 3]);
+    }
+    if ((int32_t)(tick - g_trx_ul.tick) != 1) return 0;     /* le resultat du burst joue au tick T se lit a la phase A de T+1 */
+    {
+        uint16_t *db = &dspdata[base];
+        if (db[16] != 2) { g_trx_ul.valide = 0; return 0; }   /* rx[0].cmd : 2 = NB ; autre fenetre (AB) : on ne touche pas */
+        uint16_t *d = &db[34 + 32];                /* db->data[32] : d[] de l1s_bts_resp */
+        if (d[3] <= 0x1000) { d[3] = 0x4000; d[1] = 0x1530; d[2] = 0; }   /* l'extcode n'a rien vu : on pose l'energie et la puissance */
+        int justes = 0;
+        for (int i = 0; i < 116; i++) {
+            int pos = i < 57 ? 3 + i : i < 114 ? 88 + (i - 57) : i == 114 ? 87 : 60;
+            int bit = g_trx_ul.bits[pos] & 1;
+            int sh = (3 - (i & 3)) << 2;
+            if (((d[5 + (i >> 2)] >> sh) & 8) == (bit ? 8 : 0)) justes++;
+            d[5 + (i >> 2)] = (uint16_t)((d[5 + (i >> 2)] & ~(0xf << sh)) | ((bit ? 0xf : 0x0) << sh));
+        }
+        d[0] = 3;                                  /* toa = d[0] - 3 = 0 */
+        n_justes += (unsigned)justes; n_pages++; fait = 1;
+    }
+    if (fait) {
+        n_ok++;
+        if (n_ok <= 5 || n_ok % 500 == 0)
+            printf("  [ts0] prothese montante : burst fn=%u (tick %u) ecrit dans %d page(s) a la phase A du tick %u ; bits deja justes avant ecriture : %.1f/116 en moyenne (%u bursts)\n",
+                   g_trx_ul.fn, g_trx_ul.tick, fait, tick, n_pages ? (double)n_justes / n_pages : 0.0, n_ok);
+        g_trx_ul.valide = 0;
+    }
+    return fait;
+}
+int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
+{
+    static int actif = -1, delta = -2;   /* -2 : BTS_RX_LAG 3 du firmware trx patche (prim_bts.c) ; -1 pour le firmware d'origine */
+    if (actif < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_TRX"); actif = (e && *e == '1') ? 1 : 0;
+        e = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); if (e && *e) delta = atoi(e);
+        if (actif) BSP_LOG("mode TRX : offset fn/tick pose par le SB emis (delta %d), bursts montants joues a la trame du firmware", delta);
+    }
+    if (!actif) return 0;
+    int64_t off = ((int64_t)fn_sb + delta - (int64_t)tick) % (int64_t)BSP_FN_MAX; if (off < 0) off += BSP_FN_MAX;
+    if (g_trx_cale && off == g_ts0_offset) return 1;
+    static unsigned n;
+    if (n++ < 10 || n % 500 == 0)
+        printf("  [ts0] mode TRX : offset fn-tick %s %lld (SB fn=%u au tick %u, delta %d)\n",
+               g_trx_cale ? "recale a" : "pose a", (long long)off, fn_sb, tick, delta);
+    g_ts0_offset = off; g_trx_cale = 1;
+    return 1;
+}
 static uint32_t g_ts0_fn_max;   /* trame BTS la plus recente stockee */
 static unsigned long g_ts0_recales;      /* nb de recalages d'offset (voir bsp_ts0_service) */
 static unsigned long g_ts0_silences;     /* effacements deposes (voir bsp_ts0_service) */
@@ -1065,7 +1156,7 @@ int calypso_bsp_sb_retenter(void)
      * exactement comme la livraison native en fenetre SB (bsp_ts0_livrer). */
     int64_t off = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant;
     int recale = (off != g_ts0_offset);
-    g_ts0_offset = off;
+    if (!g_trx_cale) g_ts0_offset = off;
     if (g_sb_relivres <= 100 || g_sb_relivres % 100 == 0)
         printf("  [sbwin] SB fn=%u RELIVRE au tick %u (depose au tick %u, fenetre SB armee apres) : page=%d marge=%d%s [%lu relivres, %lu expires]\n",
                g_dernier_sch.fn, g_tick_courant, g_dernier_sch.tick, total, marge,
@@ -1237,6 +1328,12 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         if (!armee) sb_action = "DMA NON ARMEE (le RIF jette) : SCH memorise pour la fenetre SB";
         else if (!(one_shot && nwin >= 190)) sb_action = "autre fenetre (PM/NB/continue) : SCH memorise pour la fenetre SB";
     }
+    /* [2026-10-20] mode TRX : le burst montant NB joue ici est memorise ; a la phase A de la trame
+     * suivante, calypso_bsp_trx_ul_prothese() ecrit ses bits exacts dans la page de resultat de
+     * l'extcode (voir la fonction). */
+    if (g_trx_cale && !sb && !fcch && !bsp_ts0_est_rach(bits)) {
+        g_trx_ul.fn = g_ts0[i].fn; g_trx_ul.tick = tick_fn; memcpy(g_trx_ul.bits, bits, 148); g_trx_ul.valide = 1;
+    }
     if (sb) sb_moduler(bits, iq + 2 * marge, g_ts0[i].fn);   /* [2026-09-30] voir sb_moduler() */
     else    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
     if (!sb && !fcch) {
@@ -1269,7 +1366,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;
         if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
                                         g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
-        g_ts0_offset = off;
+        if (!g_trx_cale) g_ts0_offset = off;
     }
     /* [2026-09-21] Une ligne par trame livree : c'etait la sonde de calage des
      * fenetres (nwin > 0 est vrai pour TOUT burst normal depuis la DMA one-shot,
@@ -1439,7 +1536,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
             if (sc_rom_a_decode()) {
                 int64_t off = (int64_t)g_sc.fn_sch - (int64_t)g_sc.tick;
                 if (off < 0) off += BSP_FN_MAX;
-                g_sc.ok++; g_ts0_offset = off;
+                g_sc.ok++; if (!g_trx_cale) g_ts0_offset = off;
                 if (g_sc.ok <= 300 || g_sc.ok % 50 == 0)
                     printf("  [sbwin] SECONDE CHANCE : SB fn=%u DECODE a la tentative 1 (tick %u), offset ARM-tick recale [%u/%u]\n",
                            g_sc.fn_sch, g_sc.tick, g_sc.ok, g_sc.n);
@@ -1477,7 +1574,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 g_sb_variante = 1;
                 bsp_ts0_livrer(tick_fn, j);           /* le SCH suivant, forme D, dans la fenetre de la tentative 1 */
                 g_sb_variante = 0;
-                g_ts0_offset = off_avant;
+                if (!g_trx_cale) g_ts0_offset = off_avant;
                 g_ts0[i].joue = 1;                    /* la trame FCCH n'est pas jouee : la fenetre etait pour le SB */
                 g_sc.actif = 1; g_sc.fn_sch = g_ts0[j].fn; g_sc.tick = tick_fn; g_sc.n++;
                 if (g_sc.n <= 300 || g_sc.n % 50 == 0)
@@ -2286,7 +2383,11 @@ static void bsp_attendre_trame(uint32_t tick_fn)
             printf("  [ts0] attente des trames en retard de la BTS : jusqu'a %d ms\n", max_ms);
         }
     }
-    if (max_ms <= 0 || !g_ts0 || !g_ts0_any || g_ts0_offset == INT64_MIN || bsp.trxd_fd < 0) {
+    /* [2026-10-20] mode TRX (g_trx_cale) : les bursts montants sont RARES (RACH, puis 4 bursts par bloc
+     * SDCCH) ; attendre 40 ms a chaque trame sans burst etouffait la cadence DSP/ARM en lockstep des le
+     * premier burst recu (le firmware trx ne programmait plus rien : 121 insn/trame, horloge perdue,
+     * osmo-bts-trx sortait 2 s apres le premier RACH du mobile). Une trame sans burst est un silence. */
+    if (max_ms <= 0 || !g_ts0 || !g_ts0_any || g_ts0_offset == INT64_MIN || bsp.trxd_fd < 0 || g_trx_cale) {
         return;
     }
     int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX;

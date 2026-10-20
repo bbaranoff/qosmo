@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
+#include "hw/i2c/i2c.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
@@ -23,7 +24,9 @@ CalypsoUARTState *g_uart_irda;
 #define CALYPSO_TIMER2_BASE   0xFFFE3C00
 #define CALYPSO_SPI_BASE      0xFFFE3000
 #define CALYPSO_I2C_BASE      0xFFFE1800
-#define CALYPSO_KEYPAD_BASE   0xFFFE4800
+#define CALYPSO_KEYPAD_BASE   0xFFFE4800    /* ARMIO : GPIO + clavier (calypso_armio.c) */
+#define CALYPSO_I2C_CTRL_BASE 0xFFFE2800    /* le vrai I2C (calypso_i2c_ctrl.c) ; 0xFFFE1800 est la RTC */
+#define CALYPSO_IRQ_KEYPAD_GPIO 8
 #define CALYPSO_UART_IRDA     0xFFFF5000
 #define CALYPSO_UART_MODEM    0xFFFF5800
 #define CALYPSO_CNTL_BASE     0xFFFFFD00
@@ -50,17 +53,6 @@ static const MemoryRegionOps stub16_ops = {
     .write = stub_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .impl = { .min_access_size = 2, .max_access_size = 2 },
-};
-
-static uint64_t keypad_read(void *o, hwaddr a, unsigned s)
-{
-    return 0xFF;
-}
-
-static const MemoryRegionOps keypad_ops = {
-    .read = keypad_read,
-    .write = stub_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static uint64_t cntl_read(void *opaque, hwaddr offset, unsigned size)
@@ -207,7 +199,22 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
     calypso_trx_init(sysmem, irqs);
 #undef INTH_IRQ
 
-    add_stub(sysmem, "calypso.keypad", CALYPSO_KEYPAD_BASE, &keypad_ops, 0x100);
+    /* [2026-10-19] ARMIO + clavier matriciel du C123 (calypso_armio.c), IRQ 8,
+     * et le vrai contrôleur I2C (calypso_i2c_ctrl.c) avec l'ecran ST7558 (0x3c,
+     * calypso_st7558.c) dessous : rssi.highram.elf, menu, trx affichent et
+     * lisent les touches. Avant : bouchon clavier a 0xFF, I2C jete au catchall. */
+    {
+        DeviceState *armio = qdev_new("calypso-armio");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(armio), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(armio), 0, CALYPSO_KEYPAD_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(armio), 0,
+                           qdev_get_gpio_in(DEVICE(&s->inth), CALYPSO_IRQ_KEYPAD_GPIO));
+
+        DeviceState *i2cc = qdev_new("calypso-i2c-ctrl");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(i2cc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(i2cc), 0, CALYPSO_I2C_CTRL_BASE);
+        i2c_slave_create_simple(I2C_BUS(qdev_get_child_bus(i2cc, "i2c")), "st7558", 0x3c);
+    }
     add_stub(sysmem, "calypso.tmr6800", 0xFFFE6800, &stub8_ops, 0x100);
     add_stub(sysmem, "calypso.mmio_80xx", 0xFFFE8000, &stub8_ops, 0x100);
     add_stub(sysmem, "calypso.conf", 0xFFFEF000, &stub16_ops, 0x100);

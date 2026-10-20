@@ -3,6 +3,7 @@ config CALYPSO
     default y
     depends on ARM
     select PFLASH_CFI01
+    select I2C
 
 config ARM_VIRT
     bool

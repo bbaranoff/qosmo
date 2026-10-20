@@ -37,6 +37,8 @@ void calypso_bsp_set_tpu_offset(int qbits);
  * TS0 dans la fenetre livree au DSP. */
 void calypso_bsp_set_dedie(int tn, int genre, int ss);
 void calypso_bsp_toa_feedback(int toa);
+int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick);
+int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page);   /* [2026-10-20] mode TRX : bits exacts du burst montant dans la page de resultat (pont.c, phase A) */   /* [2026-10-20] mode TRX : offset fn/tick depuis le SB emis (pont.c) */
 int  calypso_bsp_service(uint32_t current_fn);
 int  calypso_bsp_sb_retenter(void);
 void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH pendant n ticks ([sbwin]) */     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
