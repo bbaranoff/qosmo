@@ -21,7 +21,10 @@ CalypsoUARTState *g_uart_irda;
 #define CALYPSO_IRAM_SIZE     (256 * 1024)
 #define CALYPSO_INTH_BASE     0xFFFFFA00
 #define CALYPSO_TIMER1_BASE   0xFFFE3800
-#define CALYPSO_TIMER2_BASE   0xFFFE3C00
+/* [2026-10-20] TIMER2 est a TIMER1 + 0x3000 (firmware calypso/timer.c TIMER2_OFFSET) : 0xFFFE6800, pas 0xFFFE3C00.
+ * Mappe au mauvais endroit, timer_init() ecrivait dans le vide : jiffies restait a 0, timer_irq() ne tournait
+ * jamais, donc ni keypad_poll() (clavier du C123 muet dans rssi/menu) ni les osmo_timers du firmware. */
+#define CALYPSO_TIMER2_BASE   0xFFFE6800
 #define CALYPSO_SPI_BASE      0xFFFE3000
 #define CALYPSO_I2C_BASE      0xFFFE1800
 #define CALYPSO_KEYPAD_BASE   0xFFFE4800    /* ARMIO : GPIO + clavier (calypso_armio.c) */
@@ -215,7 +218,7 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(i2cc), 0, CALYPSO_I2C_CTRL_BASE);
         i2c_slave_create_simple(I2C_BUS(qdev_get_child_bus(i2cc, "i2c")), "st7558", 0x3c);
     }
-    add_stub(sysmem, "calypso.tmr6800", 0xFFFE6800, &stub8_ops, 0x100);
+    /* [2026-10-20] plus de bouchon en 0xFFFE6800 : c'est TIMER2 (CALYPSO_TIMER2_BASE), mappe plus haut */
     add_stub(sysmem, "calypso.mmio_80xx", 0xFFFE8000, &stub8_ops, 0x100);
     add_stub(sysmem, "calypso.conf", 0xFFFEF000, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.dpll", 0xFFFF9800, &stub16_ops, 0x100);

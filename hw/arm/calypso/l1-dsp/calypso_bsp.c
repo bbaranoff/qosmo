@@ -622,6 +622,10 @@ static int g_trx_cale = 0;
  * burst[60]). Le RACH (rx cmd AB) passe par les I/Q et n'est pas touche. Le jour ou le coeur
  * emule juste l'extcode, le compteur « bits deja justes » le dira (CALYPSO_BSP_TRX_UL=0 pour couper). */
 static struct { uint32_t fn, tick; uint8_t bits[148]; int valide; } g_trx_ul;
+#define BSP_AUTRES_RING (1u << 16)
+struct autres_s { uint32_t fn; uint8_t bits[7][148]; uint8_t presents; };
+static struct autres_s *g_autres;   /* rempli par bsp_autres_stocker (TS1..7 du mobile), lu par la prothese TS1 */
+static unsigned long g_autres_stockes, g_autres_joues;
 /* burst d'acces (05.02 5.2.7) : 8 bits de queue etendue puis la sequence de synchro de 41 bits */
 static int bsp_ts0_est_rach(const uint8_t *bits)
 {
@@ -629,56 +633,105 @@ static int bsp_ts0_est_rach(const uint8_t *bits)
     for (int i = 0; i < 41; i++) if ((bits[8 + i] & 1) != (uint8_t)(sync[i] - '0')) return 0;
     return 1;
 }
+static void trx_ul_ecrire(uint16_t *d, const uint8_t *bits, int *justes)
+{
+    /* d[] de l1s_bts_resp : toa, pm, -, energie, -, 116 bits par nibbles (bit 3) ; ordre des bits :
+     * burst[3..59], burst[88..144], burst[87], burst[60] */
+    int j = 0;
+    for (int i = 0; i < 116; i++) {
+        int pos = i < 57 ? 3 + i : i < 114 ? 88 + (i - 57) : i == 114 ? 87 : 60;
+        int bit = bits[pos] & 1;
+        int sh = (3 - (i & 3)) << 2;
+        if (((d[5 + (i >> 2)] >> sh) & 8) == (bit ? 8 : 0)) j++;
+        d[5 + (i >> 2)] = (uint16_t)((d[5 + (i >> 2)] & ~(0xf << sh)) | ((bit ? 0xf : 0x0) << sh));
+    }
+    d[0] = 3;                                      /* toa = d[0] - 3 = 0 */
+    if (d[3] <= 0x1000) { d[3] = 0x4000; d[1] = 0x1530; d[2] = 0; }
+    if (justes) *justes = j;
+}
 int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
 {
-    static int actif = -1; static unsigned n_ok, n_pages, n_justes;
+    static int actif = -1; static unsigned n_ok, n_pages, n_justes, n_ts1;
     if (actif < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TRX_UL"); actif = !(e && *e == '0'); }
-    if (!actif || !g_trx_ul.valide) return 0;
-    if ((int32_t)(tick - g_trx_ul.tick) < 0 || (int32_t)(tick - g_trx_ul.tick) > 2) { if ((int32_t)(tick - g_trx_ul.tick) > 2) g_trx_ul.valide = 0; return 0; }
+    if (!actif || !g_trx_cale) return 0;
+    (void)w_page;
+    /* [2026-10-20 soir] LA PAGE PAR LA PARITE DU fn, PAS PAR d_dsp_page. La page W de l'ARM (index 0/1,
+     * bascule a chaque trame) et le bit de page du DSP partent chacun de 0 a leur reset : leur relation
+     * change d'un demarrage a l'autre, d'ou une LU qui passait une fois sur deux. La page de resultat de
+     * la trame fn est celle d'index (fn + parite) & 1 ; la parite est VOTEE sur les detections d'energie
+     * de l'extcode (d3 > 0x1000 dans une seule page, pour un burst joue de fn connu). Tant qu'elle n'est
+     * pas connue, on ecrit les deux pages. */
+    static int parite = -1; static unsigned votes[2];
     int fait = 0;
-    /* La page de resultat que l'ARM va lire : la page R du firmware = l'autre que sa page W
-     * (d_dsp_page, B_GSM_PAGE, lu dans pont.c a la phase A). Mesure : l'extcode ne pose une energie
-     * (d3=0x4000) que pour 1 burst joue sur 2 a 4 ; sans elle le firmware ignore le burst. On ne se
-     * fie donc plus a d3 : on ecrit bits ET energie dans la page R, une seule fois par burst. */
-    /* w_page et r_page du firmware basculent ensemble (l1_sync) : la page de resultat lue a la trame
-     * k+2 porte le MEME index que la page W courante. Mesure : d3=0x4000 toujours dans la page de
-     * l'index d_dsp_page (bit -> 0x2200), jamais dans l'autre. */
-    unsigned base = w_page ? 0x2200 : 0x2000;
-    static unsigned n_dbg;
-    if (n_dbg < 40) {
-        n_dbg++;
-        printf("  [ts0] prothese montante ? tick %u burst fn=%u joue au tick %u : w_page=%d -> page %04x ; page 2000 rx0.cmd=%u d3=%04x | page 2200 rx0.cmd=%u d3=%04x\n",
-               tick, g_trx_ul.fn, g_trx_ul.tick, w_page, base, dspdata[0x2000 + 16], dspdata[0x2000 + 66 + 3], dspdata[0x2200 + 16], dspdata[0x2200 + 66 + 3]);
-    }
-    if ((int32_t)(tick - g_trx_ul.tick) != 1) return 0;     /* le resultat du burst joue au tick T se lit a la phase A de T+1 */
-    {
-        uint16_t *db = &dspdata[base];
-        if (db[16] != 2) { g_trx_ul.valide = 0; return 0; }   /* rx[0].cmd : 2 = NB ; autre fenetre (AB) : on ne touche pas */
-        uint16_t *d = &db[34 + 32];                /* db->data[32] : d[] de l1s_bts_resp */
-        if (d[3] <= 0x1000) { d[3] = 0x4000; d[1] = 0x1530; d[2] = 0; }   /* l'extcode n'a rien vu : on pose l'energie et la puissance */
-        int justes = 0;
-        for (int i = 0; i < 116; i++) {
-            int pos = i < 57 ? 3 + i : i < 114 ? 88 + (i - 57) : i == 114 ? 87 : 60;
-            int bit = g_trx_ul.bits[pos] & 1;
-            int sh = (3 - (i & 3)) << 2;
-            if (((d[5 + (i >> 2)] >> sh) & 8) == (bit ? 8 : 0)) justes++;
-            d[5 + (i >> 2)] = (uint16_t)((d[5 + (i >> 2)] & ~(0xf << sh)) | ((bit ? 0xf : 0x0) << sh));
+    static unsigned n_pas_valide, n_diff, n_appels;
+    n_appels++;
+    if (!g_trx_ul.valide) n_pas_valide++;
+    else if ((int32_t)(tick - g_trx_ul.tick) != 1) n_diff++;
+    if (n_appels % 20000 == 0)
+        printf("  [ts0] prothese TS0 : %u appels, %u sans burst, %u mauvais tick, parite %d (votes %u/%u)\n", n_appels, n_pas_valide, n_diff, parite, votes[0], votes[1]);
+    /* TS0 : le burst joue par bsp_ts0_livrer au tick T = tick - 1 */
+    if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) == 1) {
+        if (parite < 0) {
+            int det = -1;
+            for (int pg = 0; pg < 2; pg++) {
+                uint16_t *db = &dspdata[pg ? 0x2200 : 0x2000];
+                if (db[16] == 2 && db[34 + 32 + 3] > 0x1000) det = (det < 0) ? pg : -2;
+            }
+            if (det >= 0) {
+                votes[(unsigned)(det ^ (g_trx_ul.fn & 1))]++;
+                if (votes[0] + votes[1] >= 6 && votes[0] != votes[1]) {
+                    parite = votes[1] > votes[0];
+                    printf("  [ts0] prothese : parite de page calibree = %d (votes %u/%u) : la trame fn ecrit dans la page (fn + %d) & 1\n", parite, votes[0], votes[1], parite);
+                }
+            }
         }
-        d[0] = 3;                                  /* toa = d[0] - 3 = 0 */
-        n_justes += (unsigned)justes; n_pages++; fait = 1;
-    }
-    if (fait) {
-        n_ok++;
-        if (n_ok <= 5 || n_ok % 500 == 0)
-            printf("  [ts0] prothese montante : burst fn=%u (tick %u) ecrit dans %d page(s) a la phase A du tick %u ; bits deja justes avant ecriture : %.1f/116 en moyenne (%u bursts)\n",
-                   g_trx_ul.fn, g_trx_ul.tick, fait, tick, n_pages ? (double)n_justes / n_pages : 0.0, n_ok);
+        for (int pg = 0; pg < 2; pg++) {
+            if (parite >= 0 && pg != (int)((g_trx_ul.fn + parite) & 1)) continue;
+            uint16_t *db = &dspdata[pg ? 0x2200 : 0x2000];
+            if (db[16] != 2) continue;                 /* rx[0].cmd : 2 = NB (fenetre AB : on ne touche pas) */
+            int justes = 0;
+            trx_ul_ecrire(&db[34 + 32], g_trx_ul.bits, &justes);
+            n_justes += (unsigned)justes; n_pages++; fait = 1;
+        }
+        if (fait) {
+            n_ok++;
+            if (n_ok <= 5 || n_ok % 500 == 0)
+                printf("  [ts0] prothese montante : burst fn=%u (tick %u) ecrit a la phase A du tick %u ; bits deja justes avant ecriture : %.1f/116 en moyenne (%u bursts, parite %d)\n",
+                       g_trx_ul.fn, g_trx_ul.tick, tick, n_pages ? (double)n_justes / n_pages : 0.0, n_ok, parite);
+        }
         g_trx_ul.valide = 0;
+    } else if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) > 1) g_trx_ul.valide = 0;
+    /* TS1 (le TCH) : le burst montant du mobile stocke pour la trame w = T + offset, ecrit dans rx[2] /
+     * data[72..] de la page de w, que le firmware patche remonte avec tn = rx_start + 1 (prim_bts.c). */
+    if (g_autres && g_ts0_offset != INT64_MIN) {
+        int64_t w = ((int64_t)(tick - 1) + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
+        unsigned i = (unsigned)w % BSP_AUTRES_RING;
+        static unsigned n_look, n_trouve;
+        n_look++;
+        if (g_autres[i].fn == (uint32_t)w && (g_autres[i].presents & 1)) {
+            n_trouve++;
+            for (int pg = 0; pg < 2; pg++) {
+                if (parite >= 0 && pg != (int)(((uint32_t)w + parite) & 1)) continue;
+                uint16_t *db = &dspdata[pg ? 0x2200 : 0x2000];
+                uint16_t *d = &db[34 + 72];
+                memset(d, 0, 40 * sizeof *d);
+                trx_ul_ecrire(d, g_autres[i].bits[0], NULL);
+                db[16 + 2 * 2] = 2;                    /* rx[2].cmd = NB : le marqueur lu par l1s_bts_resp */
+                fait = 1;
+            }
+            g_autres[i].presents &= (uint8_t)~1u;
+            n_ts1++;
+            if (n_ts1 <= 5 || n_ts1 % 500 == 0)
+                printf("  [ts0] prothese montante TS1 : burst fn=%u ecrit (rx[2], data[72]) a la phase A du tick %u (%u bursts TS1, parite %d)\n", (uint32_t)w, tick, n_ts1, parite);
+        }
+        if (n_look % 20000 == 0)
+            printf("  [ts0] prothese TS1 : %u recherches, %u trouvees, %lu bursts TS1..7 stockes au total\n", n_look, n_trouve, g_autres_stockes);
     }
     return fait;
 }
 int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
 {
-    static int actif = -1, delta = -2;   /* -2 : BTS_RX_LAG 3 du firmware trx patche (prim_bts.c) ; -1 pour le firmware d'origine */
+    static int actif = -1, delta = -3;   /* -3 : BTS_RX_LAG 4 du firmware trx patche (prim_bts.c) ; -1 pour le firmware d'origine */
     if (actif < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TRX"); actif = (e && *e == '1') ? 1 : 0;
         e = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); if (e && *e) delta = atoi(e);
@@ -702,11 +755,23 @@ static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,
 static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
 static int bsp_ts0_est_fcch(const uint8_t *b) { for (int k = 0; k < 148; k++) if (b[k] & 1) return 0; return 1; }
 static int g_toa_bias = 0;   /* biais de placement, en echantillons ; voir calypso_bsp_toa_feedback() */
+static uint32_t g_tick_courant;        /* (definition anticipee : le tick en cours, pose par bsp_ts0_service) */
 static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
 {
     if (!g_ts0) g_ts0 = calloc(BSP_TS0_RING, sizeof *g_ts0);
     if (!g_ts0) return;
     unsigned i = fn % BSP_TS0_RING;
+    /* [2026-10-20] mode TRX : marge d'arrivee du burst montant = (tick ou il sera joue) - (tick courant) ;
+     * <= 0 : arrive trop tard, perdu. Statistique sur les 2000 premiers, puis tous les 2000. */
+    if (g_trx_cale) {
+        static long n, n_tard, somme; static int mini = 999;
+        int64_t tj = ((int64_t)fn - g_ts0_offset) % (int64_t)BSP_FN_MAX; if (tj < 0) tj += BSP_FN_MAX;
+        int64_t dm = tj - (int64_t)g_tick_courant; if (dm > BSP_FN_MAX / 2) dm -= BSP_FN_MAX; if (dm < -(int64_t)BSP_FN_MAX / 2) dm += BSP_FN_MAX;
+        int m = (int)dm;
+        n++; somme += m; if (m < mini) mini = m; if (m <= 0) n_tard++;
+        if (n == 50 || n == 500 || n % 2000 == 0)
+            printf("  [ts0] mode TRX : marge d'arrivee des bursts montants : min %d, moyenne %.1f trame(s), %ld/%ld en retard\n", mini, (double)somme / n, n_tard, n);
+    }
     g_ts0[i].fn = fn; memcpy(g_ts0[i].bits, bits, 148); g_ts0[i].valid = 1; g_ts0[i].joue = 0;
     /* [2026-09-22] La trame la plus recente recue du BTS. Sert a dire, sur un
      * manque, DE QUEL COTE vient l'ecart : si la trame reclamee depasse
@@ -774,9 +839,6 @@ static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid; } *g_dedie;
  * Le bourrage a zero, lui, EN EST une : le mobile n'entend rien de ce que la
  * BTS emet ailleurs que sur TS0. On garde donc les huit intervalles, et la
  * trame remise au DSP porte ce que la BTS a reellement emis. */
-#define BSP_AUTRES_RING (1u << 16)
-static struct { uint32_t fn; uint8_t bits[7][148]; uint8_t presents; } *g_autres;
-static unsigned long g_autres_stockes, g_autres_joues;
 
 static void bsp_autres_stocker(uint32_t fn, unsigned tn, const uint8_t *bits)
 {
@@ -1528,6 +1590,19 @@ static int sc_rom_a_decode(void)
 }
 static void bsp_ts0_service(uint32_t tick_fn)
 {
+    /* [2026-10-20] telephone 2 du TRX (TS1) : il n'emet pas de SB, l'offset fn/tick est donne
+     * (CALYPSO_BSP_TRX_OFFSET = fn du firmware - tick, -1 mesure sur le telephone 1) + delta */
+    static int fixe = -1;
+    if (fixe < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_TRX_OFFSET");
+        fixe = (e && *e) ? 1 : 0;
+        if (fixe) {
+            const char *dd = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); int delta = (dd && *dd) ? atoi(dd) : -3;
+            int64_t off = ((int64_t)atoi(e) + delta) % (int64_t)BSP_FN_MAX; if (off < 0) off += BSP_FN_MAX;
+            g_ts0_offset = off; g_trx_cale = 1;
+            printf("  [ts0] mode TRX : offset fn-tick FIXE %lld (CALYPSO_BSP_TRX_OFFSET=%s, delta %d)\n", (long long)off, e, delta);
+        }
+    }
     if (!g_ts0 || !g_ts0_any) return;
     g_tick_courant = tick_fn;
     /* seconde chance : au tick suivant, le verdict de la ROM decide de l'horloge */

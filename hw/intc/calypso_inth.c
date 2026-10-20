@@ -84,7 +84,10 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
         uint16_t num = s->ith_v;
         s->last_num = num;
 
-        if (num == 4 || num == 5 || num == 15) {
+        /* [2026-10-20] une source configuree SUR FRONT (ILR bit 1 : TIMER2 de jiffies, qui ne redescend jamais
+         * sa ligne) est acquittee par la lecture d'IRQ_NUM, comme 4/5/15 ; sinon elle reste pendante et
+         * l'ARM reprend l'IT en boucle (clavier C123 : keypad_poll jamais atteint). */
+        if (num == 4 || num == 5 || num == 15 || (s->ilr[num] & 0x2)) {
             s->levels &= ~(1u << num);
         }
 
@@ -96,7 +99,7 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
     {
 
         uint16_t num = s->fiq_v;
-        if (num == 4 || num == 5 || num == 15) {
+        if (num == 4 || num == 5 || num == 15 || (s->ilr[num] & 0x2)) {
             s->levels &= ~(1u << num);
         }
         calypso_inth_update(s);
@@ -163,7 +166,11 @@ static void calypso_inth_write(void *opaque, hwaddr offset, uint64_t value,
     default:
         if (offset >= 0x20 && offset < 0x60) {
             int idx = (offset - 0x20) / 2;
-            s->ilr[idx] = value & 0x1FFF;
+            /* [2026-10-20] ILR = 7 bits (FIQ/nIRQ, SENSE_EDGE, PRIORITY[4:0]). Le firmware ecrit 0xfffe pour
+             * TIMER2 (default_irq_prio 0xff lu en int8_t -1, irq.c irq_config) : avec un masque 0x1FFF le bit 8
+             * passait pour le drapeau FIQ (calypso_inth_update) et le timer de jiffies partait en FIQ, jamais
+             * acquitte -> avalanche (jiffies +160 000/s, ARM coince dans fiq()). */
+            s->ilr[idx] = value & 0x7F;
 
             if (idx == 7) {
                 s->ilr[7] = (s->ilr[7] & ~0x1F) | (s->ilr[4] & 0x1F);
