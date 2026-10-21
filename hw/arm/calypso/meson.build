@@ -12,6 +12,7 @@ arm_ss.add(when: 'CONFIG_CALYPSO', if_true: files(
   'calypso_tsp.c',
   'calypso_trf6151.c',
   'calypso_sim.c',
+  'calypso_comp128.c',   # [2026-10-21] COMP128v1 de la SIM emulee (copie de libosmocore)
   'calypso_l1_dispatch.c',
   'calypso_dcch_tap.c',
   # [2026-10-19] la carte vue de l'utilisateur : clavier (ARMIO), I2C reel et

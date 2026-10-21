@@ -5,9 +5,19 @@
 #include "qemu/main-loop.h"
 #include "exec/cpu-common.h"
 #include "hw/core/cpu.h"
+#include "target/arm/cpu.h"
 #include "hw/arm/calypso/calypso_sim.h"
 
 #define SIM_LOG(...) do { fprintf(stderr, "[sim] " __VA_ARGS__); fputc('\n', stderr); } while(0)
+static uint32_t sim_guest_pc(void)
+{
+    return (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
+}
+static uint32_t sim_guest_lr(void)
+{
+    ARMCPU *cpu = ARM_CPU(first_cpu);
+    return (uint32_t)cpu->env.regs[14];
+}
 
 #define APDU_MAX_LEN     261
 #define RX_FIFO_SIZE     512
@@ -56,11 +66,47 @@ static SimFile sim_files[] = {
         0xFF, 0xFF, 0xFF,
         0x00, 0x00,
         0xFF, 0x00 } },
+    /* [2026-10-21] EF_BCCH (liste BA) : seul l'ARFCN 1 (bit 6 de l'octet 0, MSB d'abord).
+     * A 0xFF la liste couvrait presque tous les ARFCN : la recherche balayait 1..409 au hasard. */
     { 0x6F74, 0x7F20, EF_TRANSPARENT, 16, 0,
-      { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
+      { 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
     { 0x6F46, 0x7F20, EF_TRANSPARENT, 17, 0,
       { 0x01, 'Q','E','M','U','-','S','I','M', ' ',' ',' ',' ',' ',' ',' ',' ' } },
+    /* [2026-10-21] EF absents -> « SIM Invalid » sur Magnetite (la pile TI lit Kc et
+     * PHASE a l'activation ; « file not found » les fait echouer). GSM 11.11 :
+     * Kc = 8 octets + CKSN (0x07 = pas de cle) ; PHASE 0x03 = phase 2+ ;
+     * HPLMN 0xFF = recherche desactivee ; FPLMN vide (0xFF). */
+    { 0x6F20, 0x7F20, EF_TRANSPARENT, 9, 0,
+      { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07 } },
+    /* [2026-10-21] ECC (112) et LP (anglais) : « file not found » juste apres l'activation,
+     * le MMI affiche « SIM Invalid » (activation SIM_NO_ERROR, cause 0x80FF mesuree). */
+    { 0x6FB7, 0x7F20, EF_TRANSPARENT, 3, 0,
+      { 0x11, 0xF2, 0xFF } },
+    { 0x6F05, 0x7F20, EF_TRANSPARENT, 1, 0,
+      { 0x01 } },
+    /* [2026-10-21] EF_ADN (repertoire) : la SST annonce ADN (service 1). Sans ce fichier le driver
+     * SIM met crdFun = SIM_NO_OPERATION -> SS_INV -> CME_ERR_SimWrong -> « SIM Invalid ». */
+    { 0x6FAE, 0x7F20, EF_TRANSPARENT, 1, 0,
+      { 0x03 } },
+    { 0x6F31, 0x7F20, EF_TRANSPARENT, 1, 0,
+      { 0xFF } },
+    { 0x6F7B, 0x7F20, EF_TRANSPARENT, 12, 0,
+      { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
+    /* [2026-10-21] EF_SMS : capacite de stockage SMS (memory.total = nb d'enregistrements).
+     * Sans ce fichier g_max_messages = 0 -> ALLOC_MEMORY(0) dans smsidle_sms_cb -> « mfwAlloc invalid »
+     * et « Messages: full ». 4 enregistrements libres de 176 octets. */
+    { 0x6F3C, 0x7F20, EF_LINEAR_FIXED, 704, 176,
+      { 0 } },
+    /* [2026-10-21] SMS init : EF SMSP (1 enregistrement libre), SMSS et CBMI vides */
+    { 0x6F42, 0x7F20, EF_LINEAR_FIXED, 28, 28,
+      { 0xFF } },
+    { 0x6F43, 0x7F20, EF_TRANSPARENT, 2, 0,
+      { 0xFF, 0xFF } },
+    { 0x6F45, 0x7F20, EF_TRANSPARENT, 2, 0,
+      { 0xFF, 0xFF } },
+    { 0x6F48, 0x7F20, EF_TRANSPARENT, 2, 0,
+      { 0xFF, 0xFF } },
 };
 #define SIM_FILE_COUNT (sizeof(sim_files) / sizeof(sim_files[0]))
 
@@ -297,9 +343,14 @@ static int build_select_response(CalypsoSim *s, SimFile *f, uint8_t *out)
         out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00;
-        out[p++] = 0xAA;
-        out[p++] = 0x00; out[p++] = 0x00;
-        out[p++] = 0x00;
+        /* [2026-10-21] file status (octet 11) : b1 = 1 -> fichier non invalide. 0xAA (b1 = 0)
+         * faisait croire a app_check_imsi_loci_validation() que IMSI/LOCI sont invalides ->
+         * rehabilitation -> SIM_NO_OPERATION (« SIM Invalid ») */
+        out[p++] = 0xAB;
+        /* [2026-10-21] octets 13-15 (GSM 11.11 9.2.1) : longueur des donnees suivantes (2), structure,
+         * longueur d'enregistrement. Trois zeros de trop decalaient tout : structure lue 00
+         * (transparent) et longueur d'enregistrement 0 -> l'entite SIM ne lisait que l'enregistrement 1
+         * de EF SMS, capacite SMS 0 -> mfwAlloc(0) en boucle et « Messages: full » dans l'IHM. */
         out[p++] = 0x02;
         out[p++] = (f->structure == EF_TRANSPARENT) ? 0x00
                 : (f->structure == EF_LINEAR_FIXED) ? 0x01 : 0x03;
@@ -353,7 +404,7 @@ static void cmd_select(CalypsoSim *s, uint8_t p1, uint8_t p2,
 
     uint8_t resp[32];
     int n = build_select_response(s, f, resp);
-    SIM_LOG("SELECT 0x%04x (%s) → %d bytes pending",
+    SIM_LOG("pc=0x%08x SELECT 0x%04x (%s) → %d bytes pending", sim_guest_pc(),
             fid,
             f->structure == EF_MF ? "MF" :
             f->structure == EF_DF ? "DF" : "EF",
@@ -373,6 +424,35 @@ static void cmd_get_response(CalypsoSim *s, uint8_t le)
     s->resp_len = 0;
 }
 
+static void cmd_read_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t le)
+{
+    SimFile *f = find_file(s->selected_ef, 0);
+    if (!f || f->structure != EF_LINEAR_FIXED) {
+        respond_sw(s, 0x94, 0x00);
+        return;
+    }
+    int nrec = f->size / f->rec_len;
+    /* [2026-10-21] modes 02 (suivant) / 03 (precedent) en plus de 04 (absolu), GSM 11.11 9.2.5 */
+    static uint16_t rec_ef; static int rec_cur;
+    if (rec_ef != s->selected_ef) { rec_ef = s->selected_ef; rec_cur = 0; }
+    if (mode == 0x02) rec = (uint8_t)(rec_cur + 1);
+    else if (mode == 0x03) rec = (uint8_t)(rec_cur > 0 ? rec_cur - 1 : nrec);
+    else if (mode != 0x04) { respond_sw(s, 0x6B, 0x00); return; }
+    if (rec < 1 || rec > nrec) {
+        respond_sw(s, 0x94, 0x02);
+        return;
+    }
+    rec_cur = rec;
+    /* enregistrements libres (0xFF) : pas de contenu stocke pour ce fichier */
+    uint8_t buf[256];
+    int n = (le == 0) ? f->rec_len : le;
+    if (n > f->rec_len) n = f->rec_len;
+    memset(buf, 0xFF, n);
+    rx_push_n(s, buf, n);
+    SIM_LOG("READ_RECORD EF=0x%04x rec=%d len=%d", s->selected_ef, rec, n);
+    respond_sw(s, 0x90, 0x00);
+}
+
 static void cmd_read_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t le)
 {
     SimFile *f = find_file(s->selected_ef, 0);
@@ -388,6 +468,29 @@ static void cmd_read_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t le)
     }
     rx_push_n(s, f->data + offset, n);
     SIM_LOG("READ_BINARY EF=0x%04x off=%d len=%d", s->selected_ef, offset, n);
+    respond_sw(s, 0x90, 0x00);
+}
+
+/* [2026-10-21] UPDATE BINARY / UPDATE RECORD : refuses (6D00) jusqu'ici, le telephone ne pouvait
+ * rien ecrire (LOCI, Kc, FPLMN, SMS...). Le transparent est garde dans data[] tant qu'il y tient ;
+ * les enregistrements sont acceptes sans etre gardes (les lectures rendent des enregistrements libres). */
+static void cmd_update_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t lc, const uint8_t *data)
+{
+    SimFile *f = find_file(s->selected_ef, 0);
+    if (!f || f->structure != EF_TRANSPARENT) { respond_sw(s, 0x94, 0x08); return; }
+    int offset = (p1 << 8) | p2;
+    if (offset + lc > f->size) { respond_sw(s, 0x67, 0x00); return; }
+    if (offset + lc <= (int)sizeof f->data) memcpy(f->data + offset, data, lc);
+    SIM_LOG("UPDATE_BINARY EF=0x%04x off=%d len=%d", s->selected_ef, offset, lc);
+    respond_sw(s, 0x90, 0x00);
+}
+
+static void cmd_update_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t lc)
+{
+    SimFile *f = find_file(s->selected_ef, 0);
+    if (!f || f->structure != EF_LINEAR_FIXED) { respond_sw(s, 0x94, 0x08); return; }
+    if (lc != f->rec_len) { respond_sw(s, 0x67, 0x00); return; }
+    SIM_LOG("UPDATE_RECORD EF=0x%04x rec=%d mode=%d len=%d (non garde)", s->selected_ef, rec, mode, lc);
     respond_sw(s, 0x90, 0x00);
 }
 
@@ -411,16 +514,25 @@ static void cmd_verify_chv(CalypsoSim *s, uint8_t p2, uint8_t lc,
     respond_sw(s, 0x90, 0x00);
 }
 
+void comp128v1(const uint8_t *ki, const uint8_t *rand, uint8_t *sres, uint8_t *kc);   /* calypso_comp128.c */
 static void cmd_run_gsm_algo(CalypsoSim *s, uint8_t lc, const uint8_t *data)
 {
 
     if (lc != 16) { respond_sw(s, 0x67, 0x00); return; }
 
     uint8_t resp[12];
-    for (int i = 0; i < 4; i++) resp[i]    = data[i] ^ 0xAA;
-    for (int i = 0; i < 8; i++) resp[4+i] = 0x00;
-    SIM_LOG("RUN_GSM_ALGORITHM (RAND[0]=0x%02x) → SRES[0]=0x%02x",
-            data[0], resp[0]);
+    /* [2026-10-21] le VRAI calcul : COMP128v1 avec la Ki de mobile.cfg (calypso_comp128.c). Le faux SRES
+     * (RAND ^ 0xAA, Kc 0) ne genait pas le mobile osmocom (sim test : comp128 fait dans layer23), mais le
+     * firmware TI (Magnetite) demande le calcul a la carte -> LOCATION UPDATING REJECT du MSC. */
+    if (s->ki_valid) {
+        comp128v1(s->ki, data, resp, resp + 4);
+        SIM_LOG("RUN_GSM_ALGORITHM COMP128v1 (RAND[0]=0x%02x) → SRES=%02x%02x%02x%02x Kc[0]=0x%02x",
+                data[0], resp[0], resp[1], resp[2], resp[3], resp[4]);
+    } else {
+        for (int i = 0; i < 4; i++) resp[i]    = data[i] ^ 0xAA;
+        for (int i = 0; i < 8; i++) resp[4+i] = 0x00;
+        SIM_LOG("RUN_GSM_ALGORITHM SANS Ki (CALYPSO_SIM_CFG ?) → SRES bidon RAND^0xAA");
+    }
     respond_with_data_pending(s, resp, 12);
 }
 
@@ -451,6 +563,9 @@ static void dispatch_apdu(CalypsoSim *s)
     switch (ins) {
     case 0xA4: cmd_select(s, p1, p2, p3, data ? data : (const uint8_t *)""); break;
     case 0xB0: cmd_read_binary(s, p1, p2, p3); break;
+    case 0xB2: cmd_read_record(s, p1, p2, p3); break;
+    case 0xD6: cmd_update_binary(s, p1, p2, p3, data ? data : (const uint8_t *)""); break;
+    case 0xDC: cmd_update_record(s, p1, p2, p3); break;
     case 0xC0: cmd_get_response(s, p3); break;
     case 0xF2: cmd_status(s, p3); break;
     case 0x20: cmd_verify_chv(s, p2, p3, data ? data : (const uint8_t *)""); break;
@@ -582,7 +697,7 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
              * driver TI : la carte repondait avant que SIM_ManualStart ait mis
              * VCC, SIO et l'horloge, et la sequence ne finissait jamais. L'ATR
              * du mode manuel part sur CONF1 (SCLKEN / SRSTLEV, ci-dessous). */
-            SIM_LOG("RESET → ATR delivered (synchronous)");
+            SIM_LOG("RESET → ATR delivered (synchronous) pc=0x%08x lr=0x%08x", sim_guest_pc(), sim_guest_lr());
             s->apdu_pos = 0;
             s->apdu_expected = 0;
             s->resp_len = 0;

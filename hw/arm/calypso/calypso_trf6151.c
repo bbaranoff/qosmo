@@ -43,7 +43,10 @@ static int trf6151_gain_from_reg(uint16_t reg_rx)
 
 void calypso_trf6151_tsp_write(uint8_t dev_idx, uint32_t word)
 {
-    if (dev_idx != TRF6151_TSP_DEV) {
+    /* [2026-10-21 18:50] TSPEN1 (osmocom, Pirelli) ou TSPEN2 : le firmware TI des Motorola C1xx
+     * adresse le TRF6151 sur le peripherique TSP 2 (tpudrv12.h, TC1_DEVICE_RF = TC1_DEVICE2) ; ignore,
+     * l'ARFCN restait inconnu et le faux air ne filtrait rien. */
+    if (dev_idx != TRF6151_TSP_DEV && dev_idx != 2) {
         return;
     }
     switch (word & TRF6151_REG_ADDR_MASK) {
@@ -101,6 +104,13 @@ uint16_t calypso_trf6151_apm_for_rf(int target_rf_dbm)
         bb_dbm = 0;
     }
     apm = bb_dbm * 64;
+    /* [2026-10-21 19:25] jamais 0 : un vrai DSP mesure toujours du bruit. a_pm = 0 compte comme une
+     * panne pour la L1 TI (l1_check_pm_error : 100 PM nuls -> l1_initialize_for_recovery, DSP relance
+     * toutes les ~173 trames en balayant des frequences vides). La L1 lit pm = a_pm >> 5
+     * (l1ddsp_meas_read) : plancher 64 (1 dB au-dessus de 0), pm = 2. */
+    if (apm < 64) {
+        apm = 64;
+    }
     if (apm > 0xFFFF) {
         apm = 0xFFFF;
     }

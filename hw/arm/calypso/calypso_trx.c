@@ -134,6 +134,7 @@ typedef struct CalypsoTRX {
     uint8_t dsp_page;
     bool bl_booted;
     unsigned bl_polls;
+    uint32_t bl_lu_fn;          /* trame de la derniere lecture de DOWNLOAD_STATUS par l'ARM (verrou ARM) */
     MemoryRegion tpu_iomem;
     MemoryRegion tpu_ram_iomem;
     uint16_t tpu_regs[CALYPSO_TPU_SIZE / 2];
@@ -490,6 +491,20 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
     return true;
 }
 
+static void pont_echange(CalypsoTRX *s);
+static void pont_boot_pas(CalypsoTRX *s);
+
+/* CALYPSO_PONT_BOOT_POLL (defaut 1) : voir api_read, attente de LEAD_READY */
+static bool pont_boot_poll(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("CALYPSO_PONT_BOOT_POLL");
+        v = (e && *e == '0') ? 0 : 1;
+    }
+    return v;
+}
+
 static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
 {
     CalypsoTRX *s = opaque;
@@ -536,6 +551,23 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
          * BL_CMD_STATUS commands itself. The emulation below, written for the
          * DSP-less shunt, would force IDLE after three reads, BEFORE the DSP
          * has seen the command, making it miss the startup COPY_BLOCK. */
+        /* [2026-10-21] TELECHARGEMENT DSP A TEMPS COMPTE EN TOURS DE BOUCLE. Le firmware TI
+         * (leadapi.c, LA_LoadPage) attend LEAD_READY dans DOWNLOAD_STATUS (= 0x0FFE) au plus
+         * LA_TIMEOUT = 10000 lectures : quelques ms sur le vrai Calypso, quelques us ici, alors
+         * que le DSP n'avance que d'une trame par echange du pont. Selon la course, le
+         * telechargement passait (DSP:3606h) ou partait en LA_ERR_TIMEOUT : DSP laisse dans son
+         * chargeur (« occupe boot »), version lue 4e2a, ni L1 ni audio (keybeep jamais fini).
+         * Avant le TDMA, une lecture de 0x0FFE sans LEAD_READY fait donc avancer le DSP d'une
+         * trame toutes les 32 lectures. CALYPSO_PONT_BOOT_POLL=0 coupe. */
+        if (off == API_BL_STATUS) {
+            s->bl_lu_fn = s->fn + 1;    /* +1 : 0 = jamais lu */
+        }
+        if (off == API_BL_STATUS && val != 1 && !s->tdma_running && pont_boot_poll()) {
+            if ((++s->bl_polls & 31) == 0) {
+                pont_boot_pas(s);
+                val = s->api_ram[API_BL_STATUS / 2];
+            }
+        }
         return val;
     }
     uint16_t rv;
@@ -659,6 +691,14 @@ void calypso_trx_dsp_reset_line(bool active)
          * parks at 0xb41c, ready for the ARM COPY_BLOCKs. This is the ONLY
          * point where the C54x is reset - never on a bootloader command, which
          * would destroy the pending command. */
+        /* [2026-10-21 18:20] Le reset part en asynchrone vers c54x_exe : le LEAD_READY (1) laisse
+         * dans 0x0FFE par le chargeur d'AVANT le reset etait lu tout de suite par l'ARM (Magnetite,
+         * l1_func.c dsp_power_on), qui y ecrivait son demarrage (2, adresse 0x7000) ; le chargeur
+         * relance ensuite par le reset reecrivait 1 (ROM b419) et le demarrage etait perdu : DSP
+         * pour toujours dans sa boucle 0xb41c. Sur le vrai Calypso le chargeur redemarre en
+         * quelques us, avant la lecture de l'ARM. On efface donc le mot : l'ARM attend le
+         * LEAD_READY du NOUVEAU chargeur (api_read fait avancer le DSP pendant cette attente). */
+        s->api_ram[API_BL_STATUS / 2] = 0;
         pont_send(s, PONT_RESET, 0, 0, 0);
         fprintf(stderr, "[trx] pont DSP : RESET_DSP relache par le firmware -> "
                 "PONT_RESET (fn=%u)\n", s->fn);
@@ -922,6 +962,17 @@ static void *wall_clock_loop(void *arg)
     return NULL;
 }
 
+/* [2026-10-21] CALYPSO_PONT_ARM_LOCK=1 : voir tdma_tick (attente de l'ARM sans GO force). */
+static bool pont_arm_lock(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("CALYPSO_PONT_ARM_LOCK");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v == 1;
+}
+
 /* TICK.b: d_dsp_page plus the one-shot DSP frame interrupt bit, consumed here. */
 static uint32_t pont_tick_b(CalypsoTRX *s)
 {
@@ -984,6 +1035,30 @@ static void pont_echange(CalypsoTRX *s)
     }
     if (libre && pont_send(s, PONT_TICK, s->fn, b, s->tpu_regs[TPU_OFFSET / 2])) {
         s->pont_pending = true;
+    }
+}
+
+/* [2026-10-21] une trame DSP pendant que l'ARM attend LEAD_READY (api_read) : comme
+ * pont_echange, mais en ATTENDANT le DONE (20 ms au plus), sinon la boucle de l'ARM
+ * repasse avant que le DSP ait fini sa trame et rien n'avance. */
+static void pont_boot_pas(CalypsoTRX *s)
+{
+    if (s->pont_fd < 0) {
+        return;
+    }
+    if (!s->pont_pending) {
+        pont_echange(s);                 /* envoie le TICK */
+    }
+    if (s->pont_pending) {
+        CalypsoPontMsg m;
+        if (pont_recv(s, &m, 20) && m.type == PONT_DONE) {
+            s->pont_pending = false;
+            s->pont_frames++;
+            if (m.a & PONT_DONE_API_IRQ) {
+                s->pont_api_irqs++;
+                qemu_irq_raise(s->irqs[CALYPSO_IRQ_API]);
+            }
+        }
     }
 }
 
@@ -1100,6 +1175,25 @@ static void tdma_tick(void *opaque)
             if (g_uart_irda) {
                 calypso_uart_poll_backend(g_uart_irda);
                 calypso_uart_kick_rx(g_uart_irda);
+            }
+            timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
+            return;
+        }
+        /* [2026-10-21] CALYPSO_PONT_ARM_LOCK=1 (Magnetite) : ne pas forcer le GO tant que l'ARM n'a pas
+         * fini l1_sync. Forcer fait arriver les trames plus vite que la L1 ne les traite : la file L1
+         * se remplit (9/9), « IRQ write attempt to L1 queue failed » -> os_SystemError (gel). */
+        /* [2026-10-21 18:10] borne : au demarrage (fn=3) l'ARM prend l'IT trame sans que l1_sync
+         * tourne encore (EOI 2/3) ; sans borne le pont attendait l'ARM et l'ARM le DSP, pour toujours.
+         * Au-dela de 64 x PONT_ATTENTES_MAX (~5 s) le GO part quand meme. */
+        /* [2026-10-21 19:15] pas d'attente non plus quand l'ARM sonde DOWNLOAD_STATUS (relance du DSP par
+         * le firmware, dsp_power_on) : l1_sync ne tourne pas, attendre ne faisait que figer l'instance
+         * (retards de 240 puis 586 trames sur le BTS, mesures). */
+        bool arm_relance_dsp = s->bl_lu_fn && (uint32_t)(s->fn + 1 - s->bl_lu_fn) <= 4;
+        if (!fini && pont_arm_lock() && !arm_relance_dsp && s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX * 64) {
+            if (++s->eoi_attentes == (unsigned)PONT_ATTENTES_MAX * 64) {
+                fprintf(stderr, "[trx] pont DSP : CALYPSO_PONT_ARM_LOCK, l1_sync toujours pas finie "
+                        "(fn=%u, EOI %" PRIu64 "/%" PRIu64 ") : GO force\n",
+                        s->fn, calypso_inth_frame_eoi(), s->eoi_cible);
             }
             timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
             return;
@@ -1244,6 +1338,13 @@ static void tdma_tick(void *opaque)
         s->tick_phase = 1;
         timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
         return;
+    }
+    /* [2026-10-21] Sans DSP externe (Magnetite : pas de pont), personne ne remet
+     * TPU_CTRL_DSP_EN a zero : le HISR de l1_sync voit « IT DSP en attente » a
+     * chaque trame et ecrit « MCU CPU overload » en boucle. Ici le DSP est
+     * considere fini des la trame : on acquitte le bit avant la trame suivante. */
+    if (s->pont_fd < 0) {
+        s->tpu_regs[TPU_CTRL / 2] &= (uint16_t)~TPU_CTRL_DSP_EN;
     }
     calypso_timer_lost_frame_tick(s->fn);
     qemu_irq_raise(s->irqs[CALYPSO_IRQ_TPU_FRAME]);

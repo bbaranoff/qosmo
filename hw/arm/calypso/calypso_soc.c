@@ -10,6 +10,8 @@
 #include "chardev/char.h"
 #include "exec/address-spaces.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/runstate.h"
+#include "hw/core/cpu.h"
 #include "hw/arm/calypso/calypso_soc.h"
 #include "hw/arm/calypso/calypso_trx.h"
 #include "hw/arm/calypso/calypso_uart.h"
@@ -109,6 +111,29 @@ static const MemoryRegionOps cntl_ops = {
     .write = cntl_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .impl = { .min_access_size = 2, .max_access_size = 2 },
+};
+
+/* [2026-10-21] Chien de garde : dar_reset() (seul appelant de WATCHDOG_TIM_MODE = 0xFFFFF804)
+ * ecrit 0x80F5 puis attend le reset materiel de l'ARM. Sans ce reset, le firmware boucle
+ * dans dar_reset (« gel »). On emule le reset : redemarrage de la machine (flash conservee). */
+static uint64_t wdt_read(void *opaque, hwaddr off, unsigned size)
+{
+    return 0;
+}
+
+static void wdt_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    if (off == 0x04 && (val & 0xffff) == 0x80F5) {
+        fprintf(stderr, "[wdt] chien de garde : 0x80F5 -> reset de l'ARM\n");
+        cpu_reset(first_cpu);   /* reset du CPU ARM : retour au vecteur de reset, boot repart */
+    }
+}
+
+static const MemoryRegionOps wdt_ops = {
+    .read = wdt_read,
+    .write = wdt_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
 };
 
 static void add_stub(MemoryRegion *sys, const char *name, hwaddr base,
@@ -242,6 +267,7 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
     add_stub(sysmem, "calypso.conf", 0xFFFEF000, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.dpll", 0xFFFF9800, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.mmio_f0xx", 0xFFFFF000, &stub16_ops, 0x100);
+    add_stub(sysmem, "calypso.wdt", 0xFFFFF800, &wdt_ops, 0x100);
     add_stub(sysmem, "calypso.rhea", 0xFFFFF900, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.clkm", 0xFFFFFB00, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.rhea_dma", CALYPSO_RHEA_DMA_BASE, &stub16_ops, 0x100);

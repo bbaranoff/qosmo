@@ -25,6 +25,14 @@ static void calypso_inth_update(CalypsoINTHState *s)
 
     if (best_irq >= 0) {
         s->ith_v = best_irq;
+        {
+            static int dbg = -1, nirq;
+            if (dbg < 0) { const char *e = getenv("CALYPSO_INTH_DEBUG"); dbg = (e && *e == '1'); }
+            if (dbg && (best_irq == 8 || nirq < 20) && (nirq++ < 2000 || nirq % 500 == 0)) {
+                fprintf(stderr, "[inth] IRQ %d levee (prio %d, mask 0x%08x, levels 0x%08x, n=%d)\n",
+                        best_irq, best_irq_prio, s->mask, s->levels, nirq);
+            }
+        }
         qemu_irq_raise(s->parent_irq);
     } else {
         if (best_fiq < 0) s->ith_v = 0;

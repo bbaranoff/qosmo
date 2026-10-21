@@ -41,6 +41,8 @@ int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick);
 int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page);   /* [2026-10-20] mode TRX : bits exacts du burst montant dans la page de resultat (pont.c, phase A) */   /* [2026-10-20] mode TRX : offset fn/tick depuis le SB emis (pont.c) */
 int  calypso_bsp_service(uint32_t current_fn);
 int  calypso_bsp_sb_retenter(void);
+int  calypso_bsp_nb_retenter(void);
+int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* [2026-10-21] fn appris au dernier SB */   /* [2026-10-21] NB garde en dedie TI */
 void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH pendant n ticks ([sbwin]) */     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
 
 /*
@@ -80,6 +82,7 @@ bool calypso_bsp_send_rach_ra(uint8_t ra, uint8_t bsic, uint32_t fn, uint8_t tn)
 
 uint16_t calypso_bsp_get_daram_addr(void);
 uint32_t calypso_bsp_get_last_fn(void);
+int calypso_bsp_fn_bts_du_tick(uint32_t tick, uint32_t *fn_bts);
 uint16_t calypso_bsp_get_daram_len(void);
 
 /* Reference probe: compares DARAM against the last bursts the BSP was handed;
@@ -111,6 +114,8 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ);
  * a_pm = calib_RF(20*log10(MAV/MAV_REF) + RF_REF). It stands in for the ABB
  * power register the DSP reads, which the emulated ADC does not provide. */
 uint16_t calypso_bsp_rssi_apm(void);
+/* [2026-10-21] la k-ieme mesure de la trame (fenetres de mesure dans l'ordre), voir calypso_bsp.c */
+uint16_t calypso_bsp_rssi_apm_k(int k);
 
 int calypso_bsp_fenetre_tn(void);
 #endif /* HW_ARM_CALYPSO_BSP_H */

@@ -105,9 +105,15 @@ static const char *armio_key_name(int bit)
     return "?";
 }
 
+/* [2026-10-21] Le firmware Magnetite (driver kpd, BOARD 41) masque la source par AI_MaskIT (bit
+ * ARMIO_MASKIT_KBD = 1 dans ARMIO_KBD_GPIO_MASKIT, 0x18) puis active un HISR qui lit la matrice.
+ * Sans ce masque, la ligne restait levee : le CPU reprenait l'IRQ en boucle (622 000 fois) et le
+ * HISR ne tournait jamais. La source est aussi reflétee dans ARMIO_GPIO_INT (0x16). */
 static void armio_update_irq(CalypsoArmioState *s)
 {
-    int level = (s->keys != 0) && ((s->kbc & 0x1f) == 0);
+    int active = (s->keys != 0) && ((s->kbc & 0x1f) == 0);
+    int level = active && !(s->gpio_maskit & 0x1);
+    s->gpio_int = active ? 0x1 : 0;
     qemu_set_irq(s->irq, level);
 }
 
@@ -284,6 +290,11 @@ static const QemuInputHandler armio_input_handler = {
 
 /* ---- registres ------------------------------------------------------------ */
 
+static uint32_t armio_guest_pc(void)
+{
+    return (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
+}
+
 static uint64_t armio_read(void *opaque, hwaddr offset, unsigned size)
 {
     CalypsoArmioState *s = opaque;
@@ -301,6 +312,13 @@ static uint64_t armio_read(void *opaque, hwaddr offset, unsigned size)
         for (col = 0; col < 5; col++) {
             if (!(s->kbc & (1u << col))) {
                 rows |= (s->keys >> (col * 5)) & 0x1f;
+            }
+        }
+        if (s->debug) {
+            static int nlec;
+            if (nlec++ < 40 || nlec % 2000 == 0) {
+                fprintf(stderr, "[armio] lecture KBR=0x%02x keys=0x%07x kbc=0x%02x (x%d) pc=0x%08x\n",
+                        (~rows) & 0x1f, s->keys, s->kbc, nlec, armio_guest_pc());
             }
         }
         return (~rows) & 0x1f;
@@ -328,6 +346,12 @@ static void armio_write(void *opaque, hwaddr offset, uint64_t value, unsigned si
         break;
     case ARMIO_KBC:
         s->kbc = value & 0xff;
+        if (s->debug) {
+            static int necr;
+            if (necr++ < 40 || necr % 2000 == 0) {
+                fprintf(stderr, "[armio] ecriture KBC=0x%02x (x%d) pc=0x%08x\n", s->kbc, necr, armio_guest_pc());
+            }
+        }
         armio_update_irq(s);
         break;
     case ARMIO_GPIO_INT:
@@ -335,6 +359,7 @@ static void armio_write(void *opaque, hwaddr offset, uint64_t value, unsigned si
         break;
     case ARMIO_GPIO_MASKIT:
         s->gpio_maskit = value;
+        armio_update_irq(s);
         break;
     default:
         break;

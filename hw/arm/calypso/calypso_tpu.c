@@ -81,6 +81,12 @@ static void seq_run(uint32_t fn)
     seq.active = false;
 }
 
+/* [2026-10-21] position courante du sequenceur dans la trame (calypso_tsp.c : faux air) */
+int calypso_tpu_qbit(void)
+{
+    return seq.qbit;
+}
+
 void calypso_tpu_run_scenario(uint16_t *tpu_ram, uint32_t fn, uint16_t *tpu_regs)
 {
     memcpy(seq.insns, tpu_ram, sizeof(seq.insns));

@@ -2,6 +2,37 @@
 #include "qemu/osdep.h"
 #include "hw/arm/calypso/calypso_trf6151.h"
 #include "hw/arm/calypso/calypso_tsp.h"
+#include "hw/arm/calypso/calypso_rf_arfcn.h"
+#include <sys/mman.h>
+#include <fcntl.h>
+
+
+/* [2026-10-21] FAUX AIR : chaque programmation du synthetiseur part vers c54x_exe
+ * (calypso_rf_arfcn.h). Ouvert a la premiere ecriture ; sans /dev/shm, rien. */
+static void rf_arfcn_publier(uint32_t fn)
+{
+    static CalypsoRfArfcnShm *m;
+    static int essaye;
+    if (!m && !essaye) {
+        essaye = 1;
+        int fd = open(CALYPSO_RF_ARFCN_SHM, O_RDWR | O_CREAT, 0644);
+        if (fd >= 0) {
+            if (ftruncate(fd, sizeof *m) == 0) {
+                void *p = mmap(NULL, sizeof *m, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                if (p != MAP_FAILED) { m = p; m->magic = CALYPSO_RF_ARFCN_MAGIC; m->widx = 0; }
+            }
+            close(fd);
+        }
+    }
+    if (!m) {
+        return;
+    }
+    CalypsoRfProg *e = &m->e[m->widx % CALYPSO_RF_ARFCN_N];
+    e->fn = fn;
+    e->qbit = (int16_t)calypso_tpu_qbit();
+    e->arfcn = (int16_t)calypso_trf6151_arfcn();
+    __atomic_store_n(&m->widx, m->widx + 1, __ATOMIC_RELEASE);
+}
 
 static struct {
     uint8_t tx[4];
@@ -47,6 +78,9 @@ void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn)
                        ((uint32_t)tsp.tx[2] << 8) | tsp.tx[3];
             }
             calypso_trf6151_tsp_write(dev_idx, dout);
+            if ((dev_idx == 1 || dev_idx == 2) && ((dout & 7) == 1 || (dout & 7) == 2)) {   /* TRF6151 PLL ou PWR (bande), TSPEN1 ou 2 */
+                rf_arfcn_publier(fn);
+            }
         }
         break;
     default:
