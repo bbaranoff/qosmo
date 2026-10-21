@@ -633,6 +633,18 @@ static int bsp_ts0_est_rach(const uint8_t *bits)
     for (int i = 0; i < 41; i++) if ((bits[8 + i] & 1) != (uint8_t)(sync[i] - '0')) return 0;
     return 1;
 }
+/* [2026-10-21] combien des 116 bits de la page ressemblent deja au burst exact (sans rien ecrire) :
+ * ~85-116 dans la page ou l'extcode vient de demoduler CE burst, ~58 (hasard) dans l'autre page. */
+static int trx_ul_compter(const uint16_t *d, const uint8_t *bits)
+{
+    int j = 0;
+    for (int i = 0; i < 116; i++) {
+        int pos = i < 57 ? 3 + i : i < 114 ? 88 + (i - 57) : i == 114 ? 87 : 60;
+        int sh = (3 - (i & 3)) << 2;
+        if (((d[5 + (i >> 2)] >> sh) & 8) == ((bits[pos] & 1) ? 8 : 0)) j++;
+    }
+    return j;
+}
 static void trx_ul_ecrire(uint16_t *d, const uint8_t *bits, int *justes)
 {
     /* d[] de l1s_bts_resp : toa, pm, -, energie, -, 116 bits par nibbles (bit 3) ; ordre des bits :
@@ -661,7 +673,26 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
      * la trame fn est celle d'index (fn + parite) & 1 ; la parite est VOTEE sur les detections d'energie
      * de l'extcode (d3 > 0x1000 dans une seule page, pour un burst joue de fn connu). Tant qu'elle n'est
      * pas connue, on ecrit les deux pages. */
-    static int parite = -1; static unsigned votes[2];
+    /* [2026-10-21 08:28] le vote par l'ENERGIE (d3 > 0x1000 dans une seule page) s'est trompe (5/1 pour la
+     * mauvaise parite : bits deja justes 63/116 = hasard, LU perdue). Vote principal PAR LES BITS : la page du
+     * DSP est celle dont la demod ressemble au burst exact (trx_ul_compter, ecart >= 20 bits), l'energie ne
+     * sert plus qu'en secours ; CALYPSO_BSP_TRX_PARITE=0|1 force ; et si, une fois calibre, la page ecrite reste
+     * au hasard sur 64 bursts, on bascule une fois (parite_flip). */
+    /* [2026-10-21 08:42] ... et a ce boot AUCUNE parite fixe ne tenait (LU ACCEPT tant que les deux pages etaient
+     * ecrites, puis echec des connexions avec la parite 0 comme avec la 1 : la relation page/fn bouge, un tick
+     * saute du DSP suffit a l'inverser). DEFAUT : ecrire les DEUX pages a chaque burst (le burst exact de fn est
+     * dans la page que l'ARM lira, quelle qu'elle soit ; l'autre page est reecrite au burst suivant avant que
+     * l'ARM ne la lise). CALYPSO_BSP_TRX_PARITE=auto : le vote ; 0|1 : forcee. */
+    static int parite = -1; static unsigned votes[2], votes_nrj[2];
+    static int parite_flip, mode_pages = -1; static unsigned n_post, j_post;
+    if (mode_pages < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_TRX_PARITE");
+        if (e && (*e == '0' || *e == '1')) { parite = *e - '0'; parite_flip = 1; mode_pages = 1;
+            printf("  [ts0] prothese : parite de page FORCEE = %d (CALYPSO_BSP_TRX_PARITE)\n", parite); }
+        else if (e && !strcmp(e, "auto")) { mode_pages = 0; printf("  [ts0] prothese : parite de page VOTEE (CALYPSO_BSP_TRX_PARITE=auto)\n"); }
+        else { mode_pages = 2; parite_flip = 1;
+            printf("  [ts0] prothese : burst exact ecrit dans LES DEUX pages (defaut depuis le 21/10 ; CALYPSO_BSP_TRX_PARITE=auto|0|1 pour une seule)\n"); }
+    }
     int fait = 0;
     static unsigned n_pas_valide, n_diff, n_appels;
     n_appels++;
@@ -672,18 +703,29 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
     /* TS0 : le burst joue par bsp_ts0_livrer au tick T = tick - 1 */
     if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) == 1) {
         if (parite < 0) {
-            int det = -1;
+            int det = -1, j[2] = { -1, -1 };
             for (int pg = 0; pg < 2; pg++) {
                 uint16_t *db = &dspdata[pg ? 0x2200 : 0x2000];
-                if (db[16] == 2 && db[34 + 32 + 3] > 0x1000) det = (det < 0) ? pg : -2;
+                if (db[16] != 2) continue;
+                j[pg] = trx_ul_compter(&db[34 + 32], g_trx_ul.bits);
+                if (db[34 + 32 + 3] > 0x1000) det = (det < 0) ? pg : -2;
             }
-            if (det >= 0) {
-                votes[(unsigned)(det ^ (g_trx_ul.fn & 1))]++;
-                if (votes[0] + votes[1] >= 6 && votes[0] != votes[1]) {
-                    parite = votes[1] > votes[0];
-                    printf("  [ts0] prothese : parite de page calibree = %d (votes %u/%u) : la trame fn ecrit dans la page (fn + %d) & 1\n", parite, votes[0], votes[1], parite);
-                }
+            if (j[0] >= 0 && j[1] >= 0 && (j[0] - j[1] >= 20 || j[1] - j[0] >= 20))
+                votes[(unsigned)((j[1] > j[0]) ^ (g_trx_ul.fn & 1))]++;
+            if (det >= 0) votes_nrj[(unsigned)(det ^ (g_trx_ul.fn & 1))]++;
+            if (mode_pages != 0) { /* deux pages : pas de decision, on ne garde que la mesure */ }
+            else if (votes[0] + votes[1] >= 4 && votes[0] != votes[1] && 3 * (votes[0] > votes[1] ? votes[1] : votes[0]) <= votes[0] + votes[1]) {
+                parite = votes[1] > votes[0];
+                printf("  [ts0] prothese : parite de page calibree = %d (votes bits %u/%u, energie %u/%u) : la trame fn ecrit dans la page (fn + %d) & 1\n",
+                       parite, votes[0], votes[1], votes_nrj[0], votes_nrj[1], parite);
+            } else if (n_ok >= 40 && votes_nrj[0] + votes_nrj[1] >= 6 && votes_nrj[0] != votes_nrj[1]) {
+                parite = votes_nrj[1] > votes_nrj[0];
+                printf("  [ts0] prothese : parite de page calibree EN SECOURS par l'energie = %d (votes bits %u/%u, energie %u/%u) : les bits ne tranchent pas (demod au hasard dans les deux pages ?)\n",
+                       parite, votes[0], votes[1], votes_nrj[0], votes_nrj[1]);
             }
+            if (n_ok < 5 || (n_ok % 10 == 0 && n_ok < 100) || n_ok % 500 == 0)
+                printf("  [ts0] prothese : bits justes page0=%d page1=%d (fn=%u, energie dans la page %d) votes bits %u/%u energie %u/%u\n",
+                       j[0], j[1], g_trx_ul.fn, det, votes[0], votes[1], votes_nrj[0], votes_nrj[1]);
         }
         for (int pg = 0; pg < 2; pg++) {
             if (parite >= 0 && pg != (int)((g_trx_ul.fn + parite) & 1)) continue;
@@ -692,6 +734,16 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
             int justes = 0;
             trx_ul_ecrire(&db[34 + 32], g_trx_ul.bits, &justes);
             n_justes += (unsigned)justes; n_pages++; fait = 1;
+            if (parite >= 0) { n_post++; j_post += (unsigned)justes; }
+        }
+        /* garde-fou : page ecrite toujours au hasard (< 70/116 sur 64 bursts) -> on avait la mauvaise parite */
+        if (parite >= 0 && !parite_flip && n_post >= 64) {
+            if (j_post < 70u * n_post) {
+                parite ^= 1; parite_flip = 1;
+                printf("  [ts0] prothese : la page ecrite restait au hasard (%.1f/116 sur %u bursts) -> parite basculee a %d\n", (double)j_post / n_post, n_post, parite);
+            } else if (n_post == 64)
+                printf("  [ts0] prothese : parite %d confirmee (%.1f/116 justes sur %u bursts)\n", parite, (double)j_post / n_post, n_post);
+            if (n_post >= 64 && j_post >= 70u * n_post) parite_flip = 1;   /* confirmee : plus de bascule */
         }
         if (fait) {
             n_ok++;
@@ -806,6 +858,10 @@ static int bsp_fenetre_tn(void)
     int d = ((g_bsp_tpu_offset - g_tpu_ref) % 5000 + 5000) % 5000;
     return ((d + 312) / 625) % 8;   /* 625 qbits par intervalle, arrondi */
 }
+/* [2026-10-21] pour montant.c : l'intervalle de la fenetre RX courante du TPU (-1 si inconnu). Le mobile
+ * s'en sert pour trouver SEUL le TS de son TCH quand personne ne lui a annonce l'ASSIGNMENT COMMAND
+ * (chiffre A5/1 sur le SDCCH : ni le pont ni l'air ne peuvent le lire). */
+int calypso_bsp_fenetre_tn(void) { return bsp_fenetre_tn(); }
 
 /* [2026-09-21] L'INTERVALLE DEDIE.
  *

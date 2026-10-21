@@ -112,4 +112,5 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ);
  * power register the DSP reads, which the emulated ADC does not provide. */
 uint16_t calypso_bsp_rssi_apm(void);
 
+int calypso_bsp_fenetre_tn(void);
 #endif /* HW_ARM_CALYPSO_BSP_H */
