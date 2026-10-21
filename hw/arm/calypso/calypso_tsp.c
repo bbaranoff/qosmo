@@ -31,6 +31,7 @@ static void rf_arfcn_publier(uint32_t fn)
     e->fn = fn;
     e->qbit = (int16_t)calypso_tpu_qbit();
     e->arfcn = (int16_t)calypso_trf6151_arfcn();
+    e->gain_db = (int16_t)calypso_trf6151_total_gain_db();
     __atomic_store_n(&m->widx, m->widx + 1, __ATOMIC_RELEASE);
 }
 
@@ -78,7 +79,8 @@ void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn)
                        ((uint32_t)tsp.tx[2] << 8) | tsp.tx[3];
             }
             calypso_trf6151_tsp_write(dev_idx, dout);
-            if ((dev_idx == 1 || dev_idx == 2) && ((dout & 7) == 1 || (dout & 7) == 2)) {   /* TRF6151 PLL ou PWR (bande), TSPEN1 ou 2 */
+            /* TRF6151 RX (gain, 2026-10-21), PLL ou PWR (bande), TSPEN1 ou 2 */
+            if ((dev_idx == 1 || dev_idx == 2) && ((dout & 7) == 0 || (dout & 7) == 1 || (dout & 7) == 2)) {
                 rf_arfcn_publier(fn);
             }
         }

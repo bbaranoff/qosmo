@@ -116,6 +116,9 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ);
 uint16_t calypso_bsp_rssi_apm(void);
 /* [2026-10-21] la k-ieme mesure de la trame (fenetres de mesure dans l'ordre), voir calypso_bsp.c */
 uint16_t calypso_bsp_rssi_apm_k(int k);
+int calypso_bsp_pm_mav_texte(char *buf, size_t n);
+int calypso_bsp_pm_mav_fort(void);
+uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav);
 
 int calypso_bsp_fenetre_tn(void);
 #endif /* HW_ARM_CALYPSO_BSP_H */

@@ -178,38 +178,81 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ)
  * l'entree en veille paging (run 23:43). On garde donc le MAV de chaque fenetre de mesure (one-shot,
  * < 150 echantillons) dans l'ordre de la trame ; la k-ieme PM prend le k-ieme. */
 #define BSP_PM_MAV_N 8
+static int faux_air_gain(uint32_t tick, int limite);   /* plus bas, avec faux_air_arfcn */
 static uint32_t g_tick_courant;        /* (definition anticipee, voir bsp_ts0_service) */
 static uint16_t g_pm_mav[BSP_PM_MAV_N], g_pm_mav_der[BSP_PM_MAV_N];
 static int g_pm_mav_n, g_pm_mav_der_n;
 static uint32_t g_pm_mav_tick;
+#define BSP_PM_FIFO_N 16
+static uint16_t g_pm_fifo[BSP_PM_FIFO_N];
+static int16_t g_pm_fifo_gain[BSP_PM_FIFO_N];   /* gain RX de la fenetre (faux_air_gain), -999 inconnu */
+static uint32_t g_pm_fifo_w, g_pm_fifo_r;
 static void bsp_pm_mav_noter(const int16_t *iq, int n)
 {
     if (g_pm_mav_tick != g_tick_courant) {
         if (g_pm_mav_n > 0) { memcpy(g_pm_mav_der, g_pm_mav, sizeof g_pm_mav); g_pm_mav_der_n = g_pm_mav_n; }
         g_pm_mav_tick = g_tick_courant; g_pm_mav_n = 0;
     }
-    if (g_pm_mav_n >= BSP_PM_MAV_N || n <= 0) return;
+    if (n <= 0) return;
     uint64_t acc = 0;
     for (int i = 0; i < n; i++) { int v = iq[i]; acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v; }
     uint32_t mav = (uint32_t)(acc / (uint32_t)n);
-    g_pm_mav[g_pm_mav_n++] = mav > 0xffff ? 0xffff : (uint16_t)mav;
+    uint16_t m16 = mav > 0xffff ? 0xffff : (uint16_t)mav;
+    if (g_pm_mav_n < BSP_PM_MAV_N) g_pm_mav[g_pm_mav_n++] = m16;
+    /* [2026-10-21 23:58] FILE PAR EVENEMENT. En veille la pompe sert les fenetres de mesure APRES le DONE
+     * (PONT_DONE_TOT) : le 0 que le DSP ecrit pour cette PM n'est vu par apm_jamais_nul qu'au DONE suivant,
+     * et l'association par trame lui donnait alors le MAV des fenetres de CETTE trame (bruit du voisin) --
+     * sonde [apm-fort] : 0000->1280 sur les trames du burst, mais la L1 relisait le plancher. Chaque fenetre
+     * livree empile son MAV ; chaque PM nulle trouvee dans une page R depile le plus ancien. */
+    g_pm_fifo_gain[g_pm_fifo_w % BSP_PM_FIFO_N] = (int16_t)faux_air_gain(g_tick_courant, 5000);
+    g_pm_fifo[g_pm_fifo_w++ % BSP_PM_FIFO_N] = m16;
+    if (g_pm_fifo_w - g_pm_fifo_r > BSP_PM_FIFO_N) g_pm_fifo_r = g_pm_fifo_w - BSP_PM_FIFO_N;
 }
-static uint16_t bsp_apm_de_mav(double mav);
+static uint16_t bsp_apm_de_mav(double mav, int gain_db);
+/* sonde [apm] (pont.c) : les MAV par fenetre de la trame en cours et de la precedente */
+int calypso_bsp_pm_mav_texte(char *buf, size_t n)
+{
+    int o = snprintf(buf, n, "tick %u:", g_pm_mav_tick);
+    for (int k = 0; k < g_pm_mav_n && o < (int)n; k++) o += snprintf(buf + o, n - o, " %u", g_pm_mav[k]);
+    if (o < (int)n) o += snprintf(buf + o, n - o, " | avant:");
+    for (int k = 0; k < g_pm_mav_der_n && o < (int)n; k++) o += snprintf(buf + o, n - o, " %u", g_pm_mav_der[k]);
+    if (o < (int)n) o += snprintf(buf + o, n - o, " | dernier=%u courant=%u", bsp_last_mav, g_tick_courant);
+    return o;
+}
+/* la trame en cours a-t-elle livre un vrai burst (MAV >= 5000) dans une fenetre de mesure ? (sonde [apm]) */
+int calypso_bsp_pm_mav_fort(void)
+{
+    if (g_pm_mav_tick != g_tick_courant) return 0;
+    for (int k = 0; k < g_pm_mav_n; k++) if (g_pm_mav[k] >= 5000) return 1;
+    return 0;
+}
+/* la PM nulle suivante (pont.c, apm_jamais_nul) : le MAV de la plus ancienne fenetre de mesure non consommee */
+uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav)
+{
+    if (g_pm_fifo_r != g_pm_fifo_w) {
+        int g = g_pm_fifo_gain[g_pm_fifo_r % BSP_PM_FIFO_N];
+        uint16_t m = g_pm_fifo[g_pm_fifo_r++ % BSP_PM_FIFO_N];
+        if (depile_mav) *depile_mav = m;
+        return bsp_apm_de_mav(m, g);
+    }
+    if (depile_mav) *depile_mav = -1;
+    return calypso_bsp_rssi_apm();
+}
 uint16_t calypso_bsp_rssi_apm_k(int k)
 {
-    if (g_pm_mav_tick == g_tick_courant && k < g_pm_mav_n) return bsp_apm_de_mav(g_pm_mav[k]);
+    if (g_pm_mav_tick == g_tick_courant && k < g_pm_mav_n) return bsp_apm_de_mav(g_pm_mav[k], -999);
     if (g_pm_mav_tick != g_tick_courant || g_pm_mav_n == 0) {
-        if (k < g_pm_mav_der_n) return bsp_apm_de_mav(g_pm_mav_der[k]);
+        if (k < g_pm_mav_der_n) return bsp_apm_de_mav(g_pm_mav_der[k], -999);
     }
     return calypso_bsp_rssi_apm();
 }
 
 uint16_t calypso_bsp_rssi_apm(void)
 {
-    return bsp_apm_de_mav((double)bsp_last_mav);
+    return bsp_apm_de_mav((double)bsp_last_mav, -999);
 }
 
-static uint16_t bsp_apm_de_mav(double mav)
+static uint16_t bsp_apm_de_mav(double mav, int gain_db)
 {
     static double mav_ref = 20929.0, rf_ref = -60.0;
     static int init;
@@ -238,6 +281,15 @@ static uint16_t bsp_apm_de_mav(double mav)
         rf = -30.0;
     }
     int rfi = (int)(rf >= 0 ? rf + 0.5 : rf - 0.5);
+    if (gain_db > -999) {
+        /* meme formule que calypso_trf6151_apm_for_rf, avec le gain que la L1 a programme pour la fenetre */
+        int bb = rfi + gain_db, apm;
+        if (bb < 0) bb = 0;
+        apm = bb * 64;
+        if (apm < 64) apm = 64;
+        if (apm > 0xFFFF) apm = 0xFFFF;
+        return (uint16_t)apm;
+    }
     return calypso_trf6151_apm_for_rf(rfi);
 }
 
@@ -722,6 +774,30 @@ static int faux_air_arfcn(uint32_t tick, int limite)
         if (d < 0 || (d == 0 && e->qbit <= limite)) return e->arfcn;
     }
     return -1;
+}
+/* gain RX programme pour la fenetre du tick (meme recherche que faux_air_arfcn), -999 si inconnu */
+static int faux_air_gain(uint32_t tick, int limite)
+{
+    static const CalypsoRfArfcnShm *m;
+    static uint32_t essai;
+    if (!m) {
+        if (essai++ % 216) return -999;
+        int fd = open(CALYPSO_RF_ARFCN_SHM, O_RDONLY);
+        if (fd < 0) return -999;
+        void *p = mmap(NULL, sizeof *m, PROT_READ, MAP_SHARED, fd, 0);
+        close(fd);
+        if (p == MAP_FAILED) return -999;
+        m = p;
+    }
+    if (m->magic != CALYPSO_RF_ARFCN_MAGIC) return -999;
+    uint32_t w = __atomic_load_n(&m->widx, __ATOMIC_ACQUIRE);
+    uint32_t n = w < CALYPSO_RF_ARFCN_N ? w : CALYPSO_RF_ARFCN_N - 4;
+    for (uint32_t k = 1; k <= n; k++) {
+        const CalypsoRfProg *e = &m->e[(w - k) % CALYPSO_RF_ARFCN_N];
+        int32_t d = (int32_t)(e->fn - tick);
+        if (d < 0 || (d == 0 && e->qbit <= limite)) return e->gain_db;
+    }
+    return -999;
 }
 static void faux_air_bruit(int16_t *iq, int n_ech)
 {
