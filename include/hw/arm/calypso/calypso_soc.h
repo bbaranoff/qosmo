@@ -37,6 +37,7 @@ struct CalypsoSoCState {
     bool iram_at_zero;
     MemoryRegion cntl_iomem;
     uint16_t extra_conf;
+    bool flash_boot;            /* [2026-10-21] vrai firmware en flash (nIBOOT, C1xx) : jamais d'IRAM a 0 */
     uint16_t cntl_rst;          /* CLKM CNTL_RST (0xFFFFFD04) : bit1 = RESET_DSP */
 
 };

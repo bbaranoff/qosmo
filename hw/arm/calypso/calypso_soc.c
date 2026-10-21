@@ -28,6 +28,7 @@ CalypsoUARTState *g_uart_irda;
 #define CALYPSO_SPI_BASE      0xFFFE3000
 #define CALYPSO_I2C_BASE      0xFFFE1800
 #define CALYPSO_KEYPAD_BASE   0xFFFE4800    /* ARMIO : GPIO + clavier (calypso_armio.c) */
+#define CALYPSO_UWIRE_BASE    0xFFFE4000    /* uWire : ecran couleur du C139 sur CS0 (calypso_uwire.c) */
 #define CALYPSO_I2C_CTRL_BASE 0xFFFE2800    /* le vrai I2C (calypso_i2c_ctrl.c) ; 0xFFFE1800 est la RTC */
 #define CALYPSO_IRQ_KEYPAD_GPIO 8
 #define CALYPSO_UART_IRDA     0xFFFF5000
@@ -84,6 +85,13 @@ static void cntl_write(void *opaque, hwaddr offset, uint64_t value, unsigned siz
     s->extra_conf = (uint16_t)value;
     bool bootrom_enabled = (value >> 8) & 3;
     MemoryRegion *sysmem = get_system_memory();
+    /* [2026-10-21] Sur un C1xx le boot ROM est hors circuit par cablage
+     * (nIBOOT) : la flash reste a 0 quoi que le firmware ecrive ici. Magnetite
+     * ecrit 0x40 dans CNTL_ARM_CLK au demarrage ; sans ce garde l'IRAM (zeros =
+     * NOP ARM) recouvrait la flash et le CPU glissait jusqu'a 0x40000. */
+    if (s->flash_boot) {
+        return;
+    }
     if (!bootrom_enabled && !s->iram_at_zero) {
         memory_region_init_alias(&s->iram_alias, OBJECT(s), "calypso.iram_at_zero",
                                  &s->iram, 0, CALYPSO_IRAM_SIZE);
@@ -216,7 +224,18 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
         DeviceState *i2cc = qdev_new("calypso-i2c-ctrl");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2cc), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2cc), 0, CALYPSO_I2C_CTRL_BASE);
-        i2c_slave_create_simple(I2C_BUS(qdev_get_child_bus(i2cc, "i2c")), "st7558", 0x3c);
+        /* [2026-10-21] CALYPSO_LCD=c139 : l'ecran couleur 96x64 du C139 sur
+         * uWire CS0 (FreeCalypso Magnetite, cible c139) a la place du ST7558 du
+         * C123 sur I2C. Le controleur uWire est la dans les deux cas. */
+        const char *lcd = getenv("CALYPSO_LCD");
+        bool c139 = lcd && !strcmp(lcd, "c139");
+        if (!c139) {
+            i2c_slave_create_simple(I2C_BUS(qdev_get_child_bus(i2cc, "i2c")), "st7558", 0x3c);
+        }
+        DeviceState *uwire = qdev_new("calypso-uwire");
+        qdev_prop_set_bit(uwire, "c139-lcd", c139);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(uwire), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(uwire), 0, CALYPSO_UWIRE_BASE);
     }
     /* [2026-10-20] plus de bouchon en 0xFFFE6800 : c'est TIMER2 (CALYPSO_TIMER2_BASE), mappe plus haut */
     add_stub(sysmem, "calypso.mmio_80xx", 0xFFFE8000, &stub8_ops, 0x100);

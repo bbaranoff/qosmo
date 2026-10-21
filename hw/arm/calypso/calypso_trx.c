@@ -716,6 +716,16 @@ static void tpu_write(void *o, hwaddr off, uint64_t val, unsigned sz)
     if (off == TPU_CTRL && (val & TPU_CTRL_EN)) {
         s->tpu_regs[TPU_CTRL / 2] &= ~(TPU_CTRL_EN | TPU_CTRL_IDLE);
         tpu_done(s);
+        /* [2026-10-21] La couche 1 TI (FreeCalypso Magnetite, tpudrv.c) ne
+         * touche jamais TPU_INT_CTRL : l'IT trame MCU est active au reset et
+         * le TDMA court des que le TPU est valide (TP_Enable). Sans ce depart
+         * Nucleus n'avait pas de tick (IQ_FrameHandler -> TMT_Timer_Interrupt)
+         * et les UART, pompees par tdma_tick, restaient muettes. osmocom-bb
+         * ecrit TPU_INT_CTRL avant, rien ne change pour lui. */
+        if (!s->tdma_running && !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_MCU_FRAME)) {
+            fprintf(stderr, "[trx] TPU valide (TP_Enable) sans ecriture de TPU_INT_CTRL : depart du TDMA\n");
+            tdma_start(s);
+        }
     }
     if (off == TPU_INT_CTRL && !(val & ICTRL_MCU_FRAME) && !s->tdma_running) {
         tdma_start(s);

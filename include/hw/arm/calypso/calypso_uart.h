@@ -41,6 +41,7 @@ typedef struct CalypsoUARTState {
     uint8_t xoff2;
     uint8_t scr;
     uint8_t ssr;
+    bool    wakeup_pending;   /* [2026-10-21] IT de reveil RX (SCR bit 4, SSR bit 1), driver UART TI */
 
     uint8_t rx_fifo[CALYPSO_UART_RX_FIFO_SIZE];
     uint16_t rx_head;
@@ -66,6 +67,7 @@ void calypso_uart_poll_backend(CalypsoUARTState *s);
 
 void calypso_uart_kick_tx(CalypsoUARTState *s);
 void calypso_uart_force_init(CalypsoUARTState *s);
+void calypso_uart_romload_passthrough(void);   /* [2026-10-21] firmware en flash : pas de stub romload */
 
 
 #endif

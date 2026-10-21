@@ -33,6 +33,7 @@
 #define CALYPSO_SIM_IT_TX             (1 << 3)
 #define CALYPSO_SIM_IT_RX             (1 << 4)
 
+#define CALYPSO_SIM_CONF1_SCLKEN      (1 << 3)      /* [2026-10-21] horloge carte (TI sim.h) */
 #define CALYPSO_SIM_CONF1_BYPASS      (1 << 8)
 #define CALYPSO_SIM_CONF1_SVCCLEV     (1 << 9)
 #define CALYPSO_SIM_CONF1_SRSTLEV     (1 << 10)

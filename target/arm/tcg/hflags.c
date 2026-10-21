@@ -46,6 +46,16 @@ static bool aprofile_require_alignment(CPUARMState *env, int el, uint64_t sctlr)
     }
 
     /*
+     * [2026-10-21 qosmo] ARMv4/v4T cores (ARM7TDMI of the TI Calypso, ti925t
+     * here) never raise alignment faults with SCTLR.A clear: a halfword store
+     * to an odd address silently goes to the aligned address. TI's TCS211
+     * flash driver relies on it (0x55 -> 0x5555 of the AMD unlock sequence).
+     */
+    if (!arm_feature(env, ARM_FEATURE_V5)) {
+        return false;
+    }
+
+    /*
      * With VMSA, if translation is disabled, then the default memory type
      * is Device(-nGnRnE) instead of Normal, which requires that alignment
      * be enforced.  Since this affects all ram, it is most efficient

@@ -21,6 +21,8 @@ struct CalypsoSPIState {
     uint16_t ctrl;
     uint16_t status;
     uint16_t tx_data;
+    uint16_t tx_lsb;
+    int      page;              /* page TWL3025 courante (PAGEREG) */
     uint16_t rx_data;
 
     uint16_t abb_regs[256];

@@ -14,6 +14,7 @@
 #include "elf.h"
 #include "target/arm/cpu.h"
 #include "hw/arm/calypso/calypso_soc.h"
+#include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/calypso_l1_ops.h"
 
 #define CALYPSO_XRAM_BASE     0x01000000
@@ -23,6 +24,7 @@
 #define CALYPSO_FLASH_SECTOR  (64 * 1024)
 #define FLASH_MFR_INTEL       0x0089
 #define FLASH_DEV_28F320J3    0x0018
+#define FLASH_DEV_28F320C3B   0x88C4      /* la flash des Mot C139 (Magnetite ffs/board/dev.c) */
 
 typedef struct CalypsoMachineState {
     MachineState parent;
@@ -63,10 +65,25 @@ static void calypso_machine_init(MachineState *machine)
     memory_region_add_subregion(sysmem, CALYPSO_XRAM_BASE, &s->xram);
 
     DriveInfo *dinfo = drive_get(IF_PFLASH, 0, 0);
+    /* [2026-10-21] Vrai firmware en flash (pas de -kernel) : le FFS de
+     * Magnetite (ffs/board/dev.c, table CONFIG_TARGET_COMPAL) reconnait la
+     * flash des Mot C139 a son identifiant Intel 0x88C4 (28F320C3B) et met
+     * son FFS en 0x3C0000, 3 x 64 KiB. */
+    bool flash_boot = !machine->kernel_filename && dinfo;
+    /* [2026-10-21] largeur 2 : la flash des C1xx est un composant 16 bits ; en
+     * 8 bits (osmocom-bb s'en moque) la lecture d'identifiant renvoyait
+     * 0x89c4 a l'offset 0 et 0 a l'offset 2, et le FFS de Magnetite
+     * (ffs/board/drv.c ffsdrv_device_id_read) ne reconnaissait pas la flash. */
     pflash_cfi01_register(CALYPSO_FLASH_BASE, "calypso.flash", CALYPSO_FLASH_SIZE,
                           dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
-                          CALYPSO_FLASH_SECTOR, 1, FLASH_MFR_INTEL, FLASH_DEV_28F320J3,
-                          0, 0, 0);
+                          CALYPSO_FLASH_SECTOR, flash_boot ? 2 : 1,
+                          /* sans « device-width », pflash_cfi01 rend ident0<<8|ident1 a
+                           * l'offset 0 et ident2<<8|ident3 a l'offset 2 : on y place
+                           * 0x0089 (Intel) et 0x88C4 (28F320C3B) tels que le lit drv.c */
+                          flash_boot ? 0x00 : FLASH_MFR_INTEL,
+                          flash_boot ? FLASH_MFR_INTEL : FLASH_DEV_28F320J3,
+                          flash_boot ? (FLASH_DEV_28F320C3B >> 8) : 0,
+                          flash_boot ? (FLASH_DEV_28F320C3B & 0xff) : 0, 0);
 
     uint32_t vectors[16];
     for (int i = 0; i < 8; i++) {
@@ -76,10 +93,21 @@ static void calypso_machine_init(MachineState *machine)
     for (int i = 9; i < 16; i++) {
         vectors[i] = 0x0080001C + 4 * (i - 9);
     }
-    memory_region_init_ram(&s->bootrom, NULL, "calypso.bootrom", sizeof(vectors),
-                           &error_fatal);
-    memory_region_add_subregion_overlap(sysmem, 0x00000000, &s->bootrom, 1);
-    memcpy(memory_region_get_ram_ptr(&s->bootrom), vectors, sizeof(vectors));
+    /* [2026-10-21] Sans -kernel mais avec une flash (-drive if=pflash,...),
+     * c'est un vrai firmware (FreeCalypso Magnetite : bootloader Compal en
+     * secteur 0, image a 0x10000) : pas de vecteurs factices vers l'IRAM, le
+     * CPU demarre a 0 dans la flash, comme sur un C1xx (nIBOOT, boot ROM
+     * desactive). */
+    if (!flash_boot) {
+        memory_region_init_ram(&s->bootrom, NULL, "calypso.bootrom", sizeof(vectors),
+                               &error_fatal);
+        memory_region_add_subregion_overlap(sysmem, 0x00000000, &s->bootrom, 1);
+        memcpy(memory_region_get_ram_ptr(&s->bootrom), vectors, sizeof(vectors));
+    } else {
+        s->soc.flash_boot = true;
+        calypso_uart_romload_passthrough();
+        fprintf(stderr, "[calypso] demarrage dans la flash a 0x00000000 (pas de -kernel)\n");
+    }
 
     if (machine->kernel_filename) {
         uint64_t entry;

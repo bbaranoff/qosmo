@@ -124,6 +124,15 @@ struct CalypsoSim {
     int         resp_len;
 
     bool        powered;
+    bool        atr_manual_done;   /* [2026-10-21] ATR deja livre pour ce reset (mode manuel TI) */
+    /* [2026-10-21] reponses de la carte differees d'un temps de transmission
+     * (le driver TI attend l'octet de procedure APRES avoir fini d'emettre et
+     * bascule SIO en reception ; une reponse synchrone dans l'ecriture de DTX
+     * arrivait trop tot et il recommencait la commande) */
+    bool        defer;
+    uint8_t     pend[APDU_MAX_LEN + 16];
+    int         pend_len;
+    QEMUTimer  *resp_timer;
 };
 
 G_GNUC_UNUSED
@@ -136,6 +145,12 @@ static int rx_count(CalypsoSim *s)
 
 static void rx_push(CalypsoSim *s, uint8_t b)
 {
+    if (s->defer) {
+        if (s->pend_len < (int)sizeof(s->pend)) {
+            s->pend[s->pend_len++] = b;
+        }
+        return;
+    }
     int next = (s->rx_head + 1) % RX_FIFO_SIZE;
     if (next == s->rx_tail) {
         SIM_LOG("RX FIFO overflow");
@@ -204,8 +219,31 @@ static void update_irq(CalypsoSim *s)
     else        qemu_irq_lower(s->irq);
 }
 
+#define RESP_DELAY_NS 1500000   /* ~1,5 ms : un octet a 9600 bauds + marge */
+
+static void resp_fire(void *opaque)
+{
+    CalypsoSim *s = opaque;
+    int i;
+    bool was = s->defer;
+    s->defer = false;
+    for (i = 0; i < s->pend_len; i++) {
+        rx_push(s, s->pend[i]);
+    }
+    if (s->pend_len) {
+        SIM_LOG("reponse carte : %d octet(s) livres", s->pend_len);
+    }
+    s->pend_len = 0;
+    s->defer = was && false;
+    update_irq(s);
+}
+
 static void raise_rx_irq(CalypsoSim *s)
 {
+    if (s->defer) {
+        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RESP_DELAY_NS);
+        return;
+    }
     update_irq(s);
 }
 
@@ -235,22 +273,25 @@ static int build_select_response(CalypsoSim *s, SimFile *f, uint8_t *out)
     out[p++] = (f->fid >> 8) & 0xFF;
     out[p++] =  f->fid       & 0xFF;
     if (f->structure == EF_DF || f->structure == EF_MF) {
-        out[p++] = (f->structure == EF_MF) ? 0x01 : 0x02;
-        out[p++] = 0x00;
-        out[p++] = 0x00; out[p++] = 0x00;
-        out[p++] = 0x00; out[p++] = 0x00;
-        out[p++] = 0x00; out[p++] = 0x00;
-        out[p++] = 0x00;
-        out[p++] = 0x09;
-        out[p++] = 0x91;
-        out[p++] = 0x00;
-        out[p++] = 0x00;
-        out[p++] = 0x04;
-        out[p++] = 0x00;
-        out[p++] = 0x83;
-        out[p++] = 0x83;
-        out[p++] = 0x83;
-        out[p++] = 0x83;
+        /* [2026-10-21] GSM 11.11 9.2.1, reponse a SELECT d'un MF/DF :
+         *  6 type (01 MF, 02 DF) ; 7-12 RFU ; 13 caracteristiques du fichier ;
+         *  14 nb de DF ; 15 nb d'EF ; 16 nb de CHV ; 17 RFU ; 18 etat CHV1 ;
+         *  19 UNBLOCK CHV1 ; 20 CHV2 ; 21 UNBLOCK CHV2.
+         * L'octet 13 valait 0 : « carte 5 V seulement » (b5 = 0) -> le driver
+         * SIM de TI (sim.c, test 27.17.1.5.2) coupait la carte et la rejetait.
+         * 0x11 = arret d'horloge permis, technologie 3 V. CHV1 initialise
+         * (0x83), 3 essais, de meme pour CHV2 et les codes de deblocage. */
+        out[p++] = (f->structure == EF_MF) ? 0x01 : 0x02;   /* 6 */
+        out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00;  /* 7-9 */
+        out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00;  /* 10-12 */
+        out[p++] = 0x91;                                    /* 13 : + b8 CHV1 desactive (pas de « Enter PIN1 ») */
+        out[p++] = 0x02;                                    /* 14 DFs */
+        out[p++] = 0x09;                                    /* 15 EFs */
+        out[p++] = 0x04;                                    /* 16 CHVs */
+        out[p++] = 0x00;                                    /* 17 */
+        out[p++] = 0x83; out[p++] = 0x8A;                   /* 18-19 */
+        out[p++] = 0x83; out[p++] = 0x8A;                   /* 20-21 */
+        out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00;  /* 22-24 */
     } else {
         out[p++] = 0x04;
         out[p++] = 0x00;
@@ -396,6 +437,17 @@ static void dispatch_apdu(CalypsoSim *s)
     SIM_LOG("APDU CLA=%02x INS=%02x P1=%02x P2=%02x P3=%02x dlen=%d",
             cla, ins, p1, p2, p3, dlen > 0 ? dlen : 0);
 
+    /* [2026-10-21] T=0 : une commande qui RENVOIE des donnees (GET RESPONSE,
+     * READ BINARY/RECORD, STATUS, FETCH) commence par l'octet de procedure
+     * (ACK = INS) avant les donnees puis SW1 SW2. Le driver TI (sim32.c,
+     * moderx 1) l'exige ; sans lui le premier octet de donnees passait pour un
+     * ACK invalide et SIM_GetResponse echouait. Les commandes sortantes ont deja
+     * recu leur ACK apres l'en-tete (apdu_tx_byte), les commandes sans donnees
+     * (moderx 5) attendent directement SW1 SW2. */
+    if (ins == 0xC0 || ins == 0xB0 || ins == 0xB2 || ins == 0xF2 || ins == 0x12) {
+        rx_push(s, ins);
+    }
+
     switch (ins) {
     case 0xA4: cmd_select(s, p1, p2, p3, data ? data : (const uint8_t *)""); break;
     case 0xB0: cmd_read_binary(s, p1, p2, p3); break;
@@ -413,7 +465,18 @@ static void dispatch_apdu(CalypsoSim *s)
 }
 
 G_GNUC_UNUSED
+static void apdu_tx_byte_inner(CalypsoSim *s, uint8_t b);
 static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
+{
+    s->defer = true;
+    apdu_tx_byte_inner(s, b);
+    s->defer = false;
+    if (s->pend_len) {
+        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RESP_DELAY_NS);
+    }
+}
+
+static void apdu_tx_byte_inner(CalypsoSim *s, uint8_t b)
 {
     if (s->apdu_pos < APDU_MAX_LEN) {
         s->apdu[s->apdu_pos++] = b;
@@ -463,7 +526,8 @@ uint16_t calypso_sim_reg_read(CalypsoSim *s, hwaddr off)
 
         uint16_t edge_seen = v & (CALYPSO_SIM_IT_NATR |
                                   CALYPSO_SIM_IT_WT   |
-                                  CALYPSO_SIM_IT_OV);
+                                  CALYPSO_SIM_IT_OV   |
+                                  CALYPSO_SIM_IT_TX);
 
         s->it &= ~edge_seen;
         update_irq(s);
@@ -509,6 +573,15 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
             SIM_LOG("CMDSTOP");
         }
         if (val & (CALYPSO_SIM_CMD_CARDRST | CALYPSO_SIM_CMD_IFRST)) {
+            /* [2026-10-21] Le driver SIM de TI (Magnetite, sim.c SIM_ManualStart)
+             * n'ecrit jamais START : CLKEN, STOP, puis SWRST en mode automatique
+             * et il attend l'ATR. Un reset avec l'horloge du module active
+             * alimente donc la carte et livre l'ATR (osmocom ecrit START avant,
+             * rien ne change pour lui). */
+            /* [2026-10-21 11:30] Livrer l'ATR ici (SWRST + CLKEN) cassait le
+             * driver TI : la carte repondait avant que SIM_ManualStart ait mis
+             * VCC, SIO et l'horloge, et la sequence ne finissait jamais. L'ATR
+             * du mode manuel part sur CONF1 (SCLKEN / SRSTLEV, ci-dessous). */
             SIM_LOG("RESET → ATR delivered (synchronous)");
             s->apdu_pos = 0;
             s->apdu_expected = 0;
@@ -521,14 +594,49 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
         }
         break;
     case CALYPSO_SIM_REG_STAT:    s->stat   = val; break;
-    case CALYPSO_SIM_REG_CONF1:   s->conf1  = val; break;
+    case CALYPSO_SIM_REG_CONF1: {
+        /* [2026-10-21] Mode manuel (BYPASS) du driver SIM de TI : il alimente
+         * la carte (SVCCLEV), lache SIO, lance l'horloge (SCLKEN) et attend
+         * l'ATR, puis leve SRSTLEV s'il ne vient pas. Sur silicium la carte
+         * repond a la sortie de reset : on livre l'ATR au front montant de
+         * SCLKEN ou de SRSTLEV, une fois par reset. */
+        uint16_t old = s->conf1;
+        s->conf1 = val;
+        if (val != old) {
+            SIM_LOG("CONF1 <- 0x%04x (powered=%d rx=%d)", val, s->powered, rx_count(s));
+        }
+        if (val & CALYPSO_SIM_CONF1_SVCCLEV) {
+            s->powered = true;
+        }
+        /* warm reset (SIM_WARMReset : SRSTLEV bas 400 ETU puis haut) : nouvel ATR */
+        if (!(val & CALYPSO_SIM_CONF1_SRSTLEV) && (old & CALYPSO_SIM_CONF1_SRSTLEV)) {
+            s->atr_manual_done = false;
+            s->rx_head = s->rx_tail = 0;
+            s->apdu_pos = 0;
+            s->apdu_expected = 0;
+        }
+        if ((val & CALYPSO_SIM_CONF1_BYPASS) && s->powered && !s->atr_manual_done &&
+            (((val & CALYPSO_SIM_CONF1_SCLKEN) && !(old & CALYPSO_SIM_CONF1_SCLKEN)) ||
+             ((val & CALYPSO_SIM_CONF1_SRSTLEV) && !(old & CALYPSO_SIM_CONF1_SRSTLEV)))) {
+            s->atr_manual_done = true;
+            SIM_LOG("mode manuel (TI) : ATR livre sur CONF1=0x%04x", val);
+            schedule_atr(s);
+        }
+        if (!(val & CALYPSO_SIM_CONF1_SVCCLEV) && (old & CALYPSO_SIM_CONF1_SVCCLEV)) {
+            s->atr_manual_done = false;
+        }
+        break;
+    }
     case CALYPSO_SIM_REG_CONF2:   s->conf2  = val; break;
     case CALYPSO_SIM_REG_IT:           break;
     case CALYPSO_SIM_REG_DRX:            break;
     case CALYPSO_SIM_REG_DTX:
+        SIM_LOG("DTX <- 0x%02x", (unsigned)(val & 0xff));
         apdu_tx_byte(s, (uint8_t)(val & 0xFF));
-
-        s->it &= ~CALYPSO_SIM_IT_TX;
+        /* [2026-10-21] Octet parti : IT TX (le driver TI, sim32.c, n'envoie
+         * l'octet suivant d'une commande que sur cette IT, STAT TXPAR a 1).
+         * Acquittee a la lecture de SIM_IT comme NATR/WT/OV. */
+        s->it |= CALYPSO_SIM_IT_TX;
         update_irq(s);
         break;
     case CALYPSO_SIM_REG_MASKIT: {
@@ -605,6 +713,7 @@ CalypsoSim *calypso_sim_new(qemu_irq sim_irq)
     CalypsoSim *s = g_new0(CalypsoSim, 1);
     s->irq = sim_irq;
     s->atr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, deliver_atr, s);
+    s->resp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, resp_fire, s);
     s->wt_timer  = timer_new_ns(QEMU_CLOCK_VIRTUAL, fire_wt,     s);
 
     s->selected_df = 0x3F00;

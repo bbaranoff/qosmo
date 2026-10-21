@@ -108,6 +108,13 @@ static void calypso_uart_update_irq(CalypsoUARTState *s)
         iir = IIR_TX_EMPTY;
         want = true;
     }
+    /* [2026-10-21] Reveil RX (driver UART TI, serialswitch_core.c) : en veille le
+     * firmware coupe ERBI et arme SCR[4] ; a la premiere activite RX l'UART leve
+     * l'IT avec SSR[1] (RX_CTS_WAKE_UP_STS), le firmware la desarme (SCR[4]) et
+     * reactive la reception. Sans ca, rien ne rentrait plus apres la mise en veille. */
+    if (s->wakeup_pending && (s->scr & 0x10)) {
+        want = true;
+    }
 
     s->iir = iir;
 
@@ -137,14 +144,30 @@ void calypso_uart_kick_tx(CalypsoUARTState *s)
     calypso_uart_update_irq(s);
 }
 
+static bool uart_debug(void)
+{
+    static int d = -1;
+    if (d < 0) { const char *e = getenv("CALYPSO_UART_DEBUG"); d = (e && *e && strcmp(e, "0")) ? 1 : 0; }
+    return d;
+}
+
 void calypso_uart_inject_raw(CalypsoUARTState *s, const uint8_t *buf, int len)
 {
     if (!s) return;
+    if (uart_debug()) {
+        fprintf(stderr, "[uart %s] rx %d octets (ier=0x%02x lsr=0x%02x lcr=0x%02x mdr1=0x%02x fifo=%d) :",
+                s->label ? s->label : "?", len, s->ier, s->lsr, s->lcr, s->mdr1, s->rx_count);
+        for (int i = 0; i < len && i < 16; i++) fprintf(stderr, " %02x", buf[i]);
+        fprintf(stderr, "\n");
+    }
     for (int i = 0; i < len; i++) {
         fifo_push(s, buf[i]);
     }
     if (s->rx_count > 0) {
         s->lsr |= LSR_DR;
+        if (s->scr & 0x10) {
+            s->wakeup_pending = true;
+        }
         calypso_uart_update_irq(s);
     }
 }
@@ -189,6 +212,14 @@ static struct {
     .state = ROM_IDLE,
     .payload_size = 1024,
 };
+
+/* [2026-10-21] Vrai firmware en flash (FreeCalypso Magnetite, calypso_mb.c sans
+ * -kernel) : pas de romload, le stub ne doit rien avaler. Sinon fc-fsio / fc-shell
+ * (ETM par rvinterf) parlaient dans le vide : ROM_IDLE mangeait tout. */
+void calypso_uart_romload_passthrough(void)
+{
+    romload.state = ROM_PASSTHROUGH;
+}
 
 static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 {
@@ -402,6 +433,9 @@ static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
 
     case REG_SSR:
         val = s->ssr & ~SSR_TX_FIFO_FULL;
+        if (s->wakeup_pending && (s->scr & 0x10)) {
+            val |= 0x02;                       /* RX_CTS_WAKE_UP_STS */
+        }
         break;
 
     default:
@@ -443,6 +477,10 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
             s->dlh = value;
         } else {
             uint8_t old = s->ier;
+            if (uart_debug()) {
+                fprintf(stderr, "[uart %s] IER <- 0x%02x (scr=0x%02x fifo=%d)\n", s->label ? s->label : "?",
+                        (unsigned)value, s->scr, s->rx_count);
+            }
             s->ier = value & 0x0F;
 
 
@@ -513,7 +551,15 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
         break;
 
     case REG_SCR:
+        if (uart_debug()) {
+            fprintf(stderr, "[uart %s] SCR <- 0x%02x (ier=0x%02x fifo=%d)\n", s->label ? s->label : "?",
+                    (unsigned)value, s->ier, s->rx_count);
+        }
         s->scr = value;
+        if (!(value & 0x10)) {
+            s->wakeup_pending = false;         /* DISABLE_WAKE_UP_INTERRUPT */
+        }
+        calypso_uart_update_irq(s);
         break;
 
     case REG_SSR:

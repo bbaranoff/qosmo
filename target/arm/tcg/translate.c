@@ -757,7 +757,23 @@ void gen_update_pc(DisasContext *s, target_long diff)
 static inline void gen_bx(DisasContext *s, TCGv_i32 var)
 {
     s->base.is_jmp = DISAS_JUMP;
-    tcg_gen_andi_i32(cpu_R[15], var, ~1);
+    if (!arm_dc_feature(s, ARM_FEATURE_V5)) {
+        /*
+         * [2026-10-21 qosmo] ARMv4T (ARM7TDMI du Calypso) : un BX vers l'etat
+         * ARM ignore le bit 1 de l'adresse (le PC ARM n'a pas de bits [1:0]).
+         * TI s'en sert (int.s : « bx pc » en Thumb a une adresse 2 mod 4 pour
+         * passer en ARM, cible attendue (pc+4) & ~3) ; sans ca QEMU prenait un
+         * prefetch abort d'alignement a 0x102c6 dans INT_DisableIRQ et le
+         * HISR timer de Nucleus ne tournait plus jamais.
+         */
+        TCGv_i32 mask = tcg_temp_new_i32();
+        tcg_gen_andi_i32(mask, var, 1);          /* 1 si Thumb */
+        tcg_gen_shli_i32(mask, mask, 1);         /* 2 si Thumb, 0 si ARM */
+        tcg_gen_ori_i32(mask, mask, ~3);         /* ~1 si Thumb, ~3 si ARM */
+        tcg_gen_and_i32(cpu_R[15], var, mask);
+    } else {
+        tcg_gen_andi_i32(cpu_R[15], var, ~1);
+    }
     tcg_gen_andi_i32(var, var, 1);
     store_cpu_field(var, thumb);
     s->pc_save = -1;

@@ -19,6 +19,8 @@ arm_ss.add(when: 'CONFIG_CALYPSO', if_true: files(
   'calypso_armio.c',
   'calypso_i2c_ctrl.c',
   'calypso_st7558.c',
+  # [2026-10-21] uWire + ecran couleur du C139 (FreeCalypso Magnetite c139).
+  'calypso_uwire.c',
   # [2026-10-19] Moniteur de la boite aux lettres ARM<->DSP (CALYPSO_MAILBOX=1),
   # branche sur la fenetre API de calypso_trx.c : un DIAGNOSTIC, pas une couche 1,
   # il ne decode rien. Il vit sous l1-dsp/ parce que c54x_exe le compile aussi
