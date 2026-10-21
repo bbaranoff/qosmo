@@ -119,6 +119,7 @@ uint16_t calypso_bsp_rssi_apm_k(int k);
 int calypso_bsp_pm_mav_texte(char *buf, size_t n);
 int calypso_bsp_pm_mav_fort(void);
 uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav);
+int calypso_apm_trace_on(void);
 
 int calypso_bsp_fenetre_tn(void);
 #endif /* HW_ARM_CALYPSO_BSP_H */

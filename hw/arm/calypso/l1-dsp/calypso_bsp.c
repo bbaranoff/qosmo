@@ -184,9 +184,31 @@ static uint16_t g_pm_mav[BSP_PM_MAV_N], g_pm_mav_der[BSP_PM_MAV_N];
 static int g_pm_mav_n, g_pm_mav_der_n;
 static uint32_t g_pm_mav_tick;
 #define BSP_PM_FIFO_N 16
+static uint16_t g_pm_mav_cellule = 14000;
+static unsigned g_pm_dette;
+/* [2026-10-22 00:20] LA PM QUE LE DSP ECRIT. c54x_mem.c remplace chaque ecriture du DSP dans a_pm (page R,
+ * 0x834-836 / 0x848-84A) par calypso_bsp_rssi_apm(). Celle-ci partait de bsp_last_mav, que seul l'ancien
+ * chemin UDP (bsp_iq_publish) alimente : avec pont.c il restait sur du bruit (118) et la PM ecrite par le DSP
+ * retombait au plancher 0x0980 apres chaque mesure, meme fenetre pleine de la cellule (trace [apmT]/[apmL] du
+ * 22/10 00:13 : R1 1280 -> 0980 entre le DONE et le tick suivant). On prend la DERNIERE fenetre de mesure
+ * livree (le DSP ecrit sa PM juste apres l'avoir traitee) avec le gain programme pour elle. */
+static uint16_t g_pm_der_mav; static int g_pm_der_gain = -999, g_pm_der_ok;                   /* PM predites : leurs fenetres, livrees ensuite, ne vont pas en file */     /* MAV d'un burst de la cellule (voir calypso_bsp_rssi_apm_suivante) */
+static int faux_air_arfcn(uint32_t tick, int limite);
+static int faux_air_cellule(void);
 static uint16_t g_pm_fifo[BSP_PM_FIFO_N];
 static int16_t g_pm_fifo_gain[BSP_PM_FIFO_N];   /* gain RX de la fenetre (faux_air_gain), -999 inconnu */
 static uint32_t g_pm_fifo_w, g_pm_fifo_r;
+/* [2026-10-22 00:20] TRACE A CHAUD : `touch /dev/shm/apm_trace` -> chaque trame (pont.c [apmT]) et chaque
+ * livraison en fenetre de mesure ([apmL]) sont tracees, 4000 lignes au plus ; `rm` pour arreter. Sert a
+ * etablir QUAND le DSP ecrit a_pm / d_task_md et quand la file des MAV les sert (perte d'antenne en veille). */
+int calypso_apm_trace_on(void)
+{
+    static unsigned n_appels, n_lignes; static int on;
+    if (n_appels++ % 108 == 0) on = (access("/dev/shm/apm_trace", F_OK) == 0);
+    if (!on || n_lignes >= 4000) return 0;
+    n_lignes++;
+    return 1;
+}
 static void bsp_pm_mav_noter(const int16_t *iq, int n)
 {
     if (g_pm_mav_tick != g_tick_courant) {
@@ -198,6 +220,12 @@ static void bsp_pm_mav_noter(const int16_t *iq, int n)
     for (int i = 0; i < n; i++) { int v = iq[i]; acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v; }
     uint32_t mav = (uint32_t)(acc / (uint32_t)n);
     uint16_t m16 = mav > 0xffff ? 0xffff : (uint16_t)mav;
+    if (m16 >= 5000) g_pm_mav_cellule = m16;   /* dernier vrai burst vu dans une fenetre de mesure */
+    g_pm_der_mav = m16; g_pm_der_gain = faux_air_gain(g_tick_courant, 5000); g_pm_der_ok = 1;
+    if (calypso_apm_trace_on())
+        printf("  [apmL] tick=%u fenetre=%d mav=%u arfcn=%d gain=%d file=%u\n", g_tick_courant,
+               calypso_rhea_dma_get_len_words() / 2, m16, faux_air_arfcn(g_tick_courant, 5000),
+               faux_air_gain(g_tick_courant, 5000), g_pm_fifo_w - g_pm_fifo_r);
     if (g_pm_mav_n < BSP_PM_MAV_N) g_pm_mav[g_pm_mav_n++] = m16;
     /* [2026-10-21 23:58] FILE PAR EVENEMENT. En veille la pompe sert les fenetres de mesure APRES le DONE
      * (PONT_DONE_TOT) : le 0 que le DSP ecrit pour cette PM n'est vu par apm_jamais_nul qu'au DONE suivant,
@@ -249,6 +277,7 @@ uint16_t calypso_bsp_rssi_apm_k(int k)
 
 uint16_t calypso_bsp_rssi_apm(void)
 {
+    if (g_pm_der_ok) return bsp_apm_de_mav((double)g_pm_der_mav, g_pm_der_gain);
     return bsp_apm_de_mav((double)bsp_last_mav, -999);
 }
 
