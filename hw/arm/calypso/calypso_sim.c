@@ -107,6 +107,47 @@ static SimFile sim_files[] = {
       { 0xFF, 0xFF } },
     { 0x6F48, 0x7F20, EF_TRANSPARENT, 2, 0,
       { 0xFF, 0xFF } },
+    /* [2026-10-22 14:55] EF que Magnetite demande et qui manquaient (« file not found » dans qemu.log) : apres
+     * chaque SMS recu le telephone lit EF_ACM (6F39) ; puis tout le menu SMS (lire, etat memoire) reste sur
+     * « Please wait » sans plus aucun echange SIM. Contenus neutres (GSM 11.11) : compteurs a zero, tarif
+     * absent, repertoires vides (enregistrements libres = FF). */
+    { 0x6F39, 0x7F20, EF_CYCLIC, 9, 3,          /* EF_ACM : 3 enregistrements de 3 octets, 0 */
+      { 0 } },
+    { 0x6F37, 0x7F20, EF_TRANSPARENT, 3, 0,     /* EF_ACMmax : 0 = pas de limite */
+      { 0x00, 0x00, 0x00 } },
+    { 0x6F41, 0x7F20, EF_TRANSPARENT, 5, 0,     /* EF_PUCT : devise et prix absents */
+      { 0xFF, 0xFF, 0xFF, 0x00, 0x00 } },
+    { 0x6F3E, 0x7F20, EF_TRANSPARENT, 1, 0,     /* EF_GID1 */
+      { 0xFF } },
+    { 0x6F3F, 0x7F20, EF_TRANSPARENT, 1, 0,     /* EF_GID2 */
+      { 0xFF } },
+    { 0x6F3A, 0x7F10, EF_LINEAR_FIXED, 280, 28, /* EF_ADN : 10 entrees libres */
+      { 0xFF } },
+    { 0x6F3B, 0x7F10, EF_LINEAR_FIXED, 28, 28,  /* EF_FDN : 1 entree libre */
+      { 0xFF } },
+    { 0x6F40, 0x7F10, EF_LINEAR_FIXED, 28, 28,  /* EF_MSISDN */
+      { 0xFF } },
+    { 0x6F44, 0x7F10, EF_CYCLIC, 140, 28,       /* EF_LND : 5 derniers numeros */
+      { 0xFF } },
+    { 0x6F4A, 0x7F10, EF_LINEAR_FIXED, 13, 13,  /* EF_EXT1 */
+      { 0xFF } },
+    { 0x6F4B, 0x7F10, EF_LINEAR_FIXED, 13, 13,  /* EF_EXT2 */
+      { 0xFF } },
+    /* [2026-10-22 15:05] CPHS (firmware construit avec FF_CPHS) : 6F11/6F13/6F14/6F16 « file not found » et le
+     * menu Messages (qui porte la messagerie vocale CPHS) reste sur « Please wait ». CPHS info (6F16) : phase 2,
+     * aucun service alloue ; indicateurs vides (0x55 = pas de message / pas de renvoi), nom d'operateur absent. */
+    { 0x6F16, 0x7F20, EF_TRANSPARENT, 3, 0,     /* CPHS info : phase 2, services 00 00 */
+      { 0x02, 0x00, 0x00 } },
+    { 0x6F11, 0x7F20, EF_TRANSPARENT, 2, 0,     /* CPHS voice message waiting */
+      { 0x55, 0x55 } },
+    { 0x6F13, 0x7F20, EF_TRANSPARENT, 2, 0,     /* CPHS call forward flags */
+      { 0x55, 0x55 } },
+    { 0x6F14, 0x7F20, EF_TRANSPARENT, 10, 0,    /* CPHS operator name string */
+      { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
+    { 0x6F15, 0x7F20, EF_TRANSPARENT, 2, 0,     /* CPHS customer service profile */
+      { 0xFF, 0xFF } },
+    { 0x6F17, 0x7F20, EF_LINEAR_FIXED, 28, 28,  /* CPHS mailbox numbers : 1 entree libre */
+      { 0xFF } },
 };
 #define SIM_FILE_COUNT (sizeof(sim_files) / sizeof(sim_files[0]))
 
@@ -228,6 +269,9 @@ static void fire_wt(void *opaque)
 {
     CalypsoSim *s = opaque;
     if (rx_count(s) > 0) return;
+    /* [2026-10-22 15:15] reponse en cours d'emission (delai proportionnel, resp_delai_ns) : la carte « parle »,
+     * le temps d'attente est relance a chaque octet sur une vraie carte -> on ne declare pas de WT. */
+    if (s->pend_len > 0) { timer_mod_ns(s->wt_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WT_DELAY_NS); return; }
     s->it |= CALYPSO_SIM_IT_WT;
     SIM_LOG("WT timeout fired (RX FIFO empty)");
     update_irq(s);
@@ -266,6 +310,18 @@ static void update_irq(CalypsoSim *s)
 }
 
 #define RESP_DELAY_NS 1500000   /* ~1,5 ms : un octet a 9600 bauds + marge */
+/* [2026-10-22 15:15] DELAI PROPORTIONNEL A LA REPONSE. 1,5 ms par reponse quelle que soit sa taille : toute
+ * l'initialisation SMS de Magnetite (4 x 176 octets d'EF_SMS, SMSP, CBMI) finissait avant que l'ecran de veille
+ * ne s'abonne a E_SMS_READY (smsidle_start, fin de mise sous tension) : evenement perdu, sms_initialised reste
+ * FALSE, le menu Messages reste sur « Please wait » (SmsRead_R_exec_cb). Une vraie carte a 9600 bauds rend
+ * ~1,04 ms par octet. CALYPSO_SIM_US_OCTET (defaut 1040, 0 = ancien delai fixe). */
+static int64_t resp_delai_ns(int n)
+{
+    static long us = -1;
+    if (us < 0) { const char *e = getenv("CALYPSO_SIM_US_OCTET"); us = (e && *e) ? atol(e) : 1040; }
+    int64_t d = (int64_t)n * us * 1000;
+    return d > RESP_DELAY_NS ? d : RESP_DELAY_NS;
+}
 
 static void resp_fire(void *opaque)
 {
@@ -287,7 +343,7 @@ static void resp_fire(void *opaque)
 static void raise_rx_irq(CalypsoSim *s)
 {
     if (s->defer) {
-        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RESP_DELAY_NS);
+        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + resp_delai_ns(s->pend_len));
         return;
     }
     update_irq(s);
@@ -424,10 +480,60 @@ static void cmd_get_response(CalypsoSim *s, uint8_t le)
     s->resp_len = 0;
 }
 
+/* [2026-10-22 14:35] ENREGISTREMENTS GARDES. Les lectures rendaient 0xFF partout, EF_SMS compris : un enregistrement
+ * SMS libre commence par l'octet d'etat 0x00 (GSM 11.11 10.5.3), 0xFF n'en est pas un. La pile SMS de Magnetite ne
+ * trouvait donc aucune place (« [cmhSMS_checkAccess]: Wrong SIM status », « Messages: full ») et repondait RP-ERROR
+ * a chaque SMS entrant (MSC : « Sending SMS ... failed »). Et UPDATE RECORD n'etait pas garde. Un tampon par fichier
+ * a enregistrements, initialise libre (EF_SMS : 00 puis FF ; les autres : FF), lu et ecrit par record. */
+#define SIM_REC_MAX 1024
+/* [2026-10-22] CENTRE SMS. EF_SMSP restait libre (FF) : en SMS MO le C139 demandait « Cent. » a la main et le
+ * firmware a fini dans dar_reset (boucle de resets du chien de garde). On pose le centre du banc dans
+ * l'enregistrement 1 (GSM 11.11 10.5.6) : indicateurs E1 = adresse SC, PID, DCS et VP presents, TP-DA absent.
+ * Le numero vient de « sms-service-center » de CALYPSO_SIM_CFG (mobile.cfg), sinon celui du banc. */
+static char g_sim_smsc[24] = "+3366612340001";
+static void smsp_remplir(uint8_t *r)          /* r : enregistrement de 28 octets, deja a FF */
+{
+    const char *d = g_sim_smsc;
+    uint8_t ton = 0x81;
+    if (*d == '+') { ton = 0x91; d++; }
+    int n = 0;
+    uint8_t bcd[10];
+    memset(bcd, 0xFF, sizeof bcd);
+    for (; *d && n < 20; d++) {
+        if (*d < '0' || *d > '9') continue;
+        uint8_t v = (uint8_t)(*d - '0');
+        bcd[n / 2] = (n & 1) ? (uint8_t)((bcd[n / 2] & 0x0F) | (v << 4)) : (uint8_t)(0xF0 | v);
+        n++;
+    }
+    if (!n) return;
+    r[0] = 0xE1;
+    r[13] = (uint8_t)(1 + (n + 1) / 2);       /* longueur : TON/NPI + chiffres */
+    r[14] = ton;
+    memcpy(&r[15], bcd, (n + 1) / 2);
+    r[25] = 0x00;                             /* TP-PID */
+    r[26] = 0x00;                             /* TP-DCS */
+    r[27] = 0xA7;                             /* TP-VP : 24 h */
+}
+static uint8_t *rec_store(SimFile *f)
+{
+    static uint8_t *store[SIM_FILE_COUNT];
+    size_t i = (size_t)(f - sim_files);
+    if (i >= SIM_FILE_COUNT || f->rec_len == 0 || f->size > SIM_REC_MAX) return NULL;
+    if (!store[i]) {
+        store[i] = g_malloc(f->size);
+        memset(store[i], 0xFF, f->size);
+        if (f->fid == 0x6F3C)
+            for (int r = 0; r < f->size / f->rec_len; r++) store[i][r * f->rec_len] = 0x00;
+        if (f->fid == 0x6F39) memset(store[i], 0x00, f->size);   /* EF_ACM : compteur a zero */
+        if (f->fid == 0x6F42 && f->rec_len == 28) smsp_remplir(store[i]);   /* EF_SMSP : centre SMS */
+    }
+    return store[i];
+}
+
 static void cmd_read_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t le)
 {
     SimFile *f = find_file(s->selected_ef, 0);
-    if (!f || f->structure != EF_LINEAR_FIXED) {
+    if (!f || (f->structure != EF_LINEAR_FIXED && f->structure != EF_CYCLIC)) {
         respond_sw(s, 0x94, 0x00);
         return;
     }
@@ -448,8 +554,10 @@ static void cmd_read_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t le
     int n = (le == 0) ? f->rec_len : le;
     if (n > f->rec_len) n = f->rec_len;
     memset(buf, 0xFF, n);
+    { uint8_t *st = rec_store(f); if (st) memcpy(buf, st + (rec - 1) * f->rec_len, n); }
     rx_push_n(s, buf, n);
-    SIM_LOG("READ_RECORD EF=0x%04x rec=%d len=%d", s->selected_ef, rec, n);
+    SIM_LOG("READ_RECORD EF=0x%04x rec=%d len=%d : %02x %02x %02x %02x %02x %02x %02x %02x ...", s->selected_ef, rec, n,
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
     respond_sw(s, 0x90, 0x00);
 }
 
@@ -485,12 +593,17 @@ static void cmd_update_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t lc,
     respond_sw(s, 0x90, 0x00);
 }
 
-static void cmd_update_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t lc)
+static void cmd_update_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t lc, const uint8_t *data)
 {
     SimFile *f = find_file(s->selected_ef, 0);
-    if (!f || f->structure != EF_LINEAR_FIXED) { respond_sw(s, 0x94, 0x08); return; }
+    if (!f || (f->structure != EF_LINEAR_FIXED && f->structure != EF_CYCLIC)) { respond_sw(s, 0x94, 0x08); return; }
     if (lc != f->rec_len) { respond_sw(s, 0x67, 0x00); return; }
-    SIM_LOG("UPDATE_RECORD EF=0x%04x rec=%d mode=%d len=%d (non garde)", s->selected_ef, rec, mode, lc);
+    int nrec = f->size / f->rec_len;
+    if (mode == 0x04 && (rec < 1 || rec > nrec)) { respond_sw(s, 0x94, 0x02); return; }
+    if (mode == 0x04) { uint8_t *st = rec_store(f); if (st && data) memcpy(st + (rec - 1) * f->rec_len, data, lc); }
+    SIM_LOG("UPDATE_RECORD EF=0x%04x rec=%d mode=%d len=%d : %02x %02x %02x %02x %02x %02x %02x %02x ...", s->selected_ef, rec, mode, lc,
+            data ? data[0] : 0, data ? data[1] : 0, data ? data[2] : 0, data ? data[3] : 0,
+            data ? data[4] : 0, data ? data[5] : 0, data ? data[6] : 0, data ? data[7] : 0);
     respond_sw(s, 0x90, 0x00);
 }
 
@@ -565,7 +678,7 @@ static void dispatch_apdu(CalypsoSim *s)
     case 0xB0: cmd_read_binary(s, p1, p2, p3); break;
     case 0xB2: cmd_read_record(s, p1, p2, p3); break;
     case 0xD6: cmd_update_binary(s, p1, p2, p3, data ? data : (const uint8_t *)""); break;
-    case 0xDC: cmd_update_record(s, p1, p2, p3); break;
+    case 0xDC: cmd_update_record(s, p1, p2, p3, data); break;
     case 0xC0: cmd_get_response(s, p3); break;
     case 0xF2: cmd_status(s, p3); break;
     case 0x20: cmd_verify_chv(s, p2, p3, data ? data : (const uint8_t *)""); break;
@@ -587,7 +700,7 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
     apdu_tx_byte_inner(s, b);
     s->defer = false;
     if (s->pend_len) {
-        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RESP_DELAY_NS);
+        timer_mod_ns(s->resp_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + resp_delai_ns(s->pend_len));
     }
 }
 
@@ -784,6 +897,11 @@ static void load_config_from_file(CalypsoSim *s, const char *path)
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "test-sim", 8) == 0) {
             in_test_sim = true;
+            continue;
+        }
+        if (strncmp(p, "sms-service-center ", 19) == 0) {   /* [2026-10-22] -> EF_SMSP, voir rec_store */
+            sscanf(p + 19, "%23s", g_sim_smsc);
+            SIM_LOG("centre SMS (EF_SMSP) depuis %s : %s", path, g_sim_smsc);
             continue;
         }
         if (!in_test_sim) continue;

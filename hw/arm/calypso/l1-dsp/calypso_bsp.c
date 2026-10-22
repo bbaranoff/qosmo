@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>   /* calypso_reglage */
 #include <poll.h>
 #include "qemu/timer.h"
 #include "calypso_bsp.h"
@@ -742,6 +743,34 @@ uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 #define BSP_FN_MAX   2715648u
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
 static uint32_t g_ts0_next; static int g_ts0_any;
+
+/* [2026-10-22] REGLAGES A CHAUD (calypso_bsp.h). Le calage du TCH Magnetite (CALYPSO_BSP_TCH_DECAL,
+ * PONT_TCH_DEPOT_IDLE, CALYPSO_TI_SYNC_DL) se cherchait en relancant tout le banc ou par gdb sur c54x_exe
+ * vivant (reseau perdu) : ecrire « NOM=valeur » dans /dev/shm/calypso_reglages suffit, relu au plus tous
+ * les 50 appels quand sa date change. */
+int calypso_reglage(const char *nom, int defaut)
+{
+    static char texte[4096]; static struct timespec mtime; static unsigned n_appels;
+    if (n_appels++ % 50 == 0) {
+        struct stat st;
+        if (stat("/dev/shm/calypso_reglages", &st) == 0) {
+            if (st.st_mtim.tv_sec != mtime.tv_sec || st.st_mtim.tv_nsec != mtime.tv_nsec) {
+                FILE *f = fopen("/dev/shm/calypso_reglages", "r");
+                if (f) {
+                    size_t n = fread(texte, 1, sizeof texte - 1, f); texte[n] = 0; fclose(f);
+                    mtime = st.st_mtim;
+                    printf("  [reglages] /dev/shm/calypso_reglages relu : %s\n", texte);
+                    fflush(stdout);
+                }
+            }
+        } else texte[0] = 0;
+    }
+    size_t l = strlen(nom);
+    for (const char *p = texte; (p = strstr(p, nom)); p += l)
+        if ((p == texte || p[-1] == '\n' || p[-1] == ' ') && p[l] == '=') return atoi(p + l + 1);
+    const char *e = calypso_getenv(nom);
+    return (e && *e) ? atoi(e) : defaut;
+}
 static int64_t g_ts0_offset = INT64_MIN;
 /* [2026-10-21 23:15] FN DU MOBILE : fn - tick du dernier SCH livre dans une VRAIE fenetre SB, c'est-a-dire ce que
  * la L1 TI vient d'apprendre ; elle compte ensuite une trame par tick jusqu'au SB suivant. L'offset du BSP
@@ -786,6 +815,36 @@ void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
  * emis son RACH. fn % 42432 seulement (la trace) : on garde le multiple de 42432 de l'offset courant. Le decalage
  * du mobile derive (501 -> 503 en 9000 ticks) pendant que celui de la BTS (SB, BCCH) recule (501 -> 495) : les
  * estimations venues de la BTS datent les RACH a -1..-3 et livrent les mauvaises trames en dedie. */
+/* [2026-10-22 14:15] LE FN DU MOBILE PAR d_fn. Run de 14:06 : RA_C - tick = 761/762 avant le LU, 759 apres ; le
+ * fn du mobile glisse par rapport au tick pendant le dedie (charge), l'offset du BSP reste, toutes les lectures
+ * BCCH/paging en erreur (BS_I/NP_I 1), perte de la cellule. La page W porte d_fn = fn_report | (fn%104) << 8 :
+ * la trame que le mobile croit lire au tick suivant. (tick + 1 + offset) % 104 doit lui etre egal ; ecart d
+ * (|d| <= 6) trois fois de suite -> offset + d (et l'offset du mobile pour dater les RACH). Appele par montant.c
+ * a chaque page avec tache. CALYPSO_BSP_DFN=0 coupe, CALYPSO_BSP_DFN_K decale la reference. */
+void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d)
+{
+    static int on = -1, k = 0, d_prec = 99, n_meme; static unsigned n_log;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DFN"); on = !(e && *e == '0');
+                  e = calypso_getenv("CALYPSO_BSP_DFN_K"); k = (e && *e) ? atoi(e) : 0; }
+    if (!on || dfn == 0 || !(task_d & 0x7fff) || g_ts0_offset == INT64_MIN) return;
+    unsigned f104 = (unsigned)(dfn >> 8);
+    if (f104 >= 104) return;
+    int64_t w = ((int64_t)tick + 1 + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
+    int d = ((int)f104 + k - (int)(w % 104) + 2 * 104) % 104;
+    if (d >= 52) d -= 104;
+    if (n_log < 60 || (d && n_log % 50 == 0)) {
+        n_log++;
+        printf("  [dfn] tick=%u tache=%u d_fn%%104=%u livre%%104=%u ecart %+d (offset %lld)\n",
+               tick, task_d & 0x7fff, f104, (unsigned)(w % 104), d, (long long)g_ts0_offset);
+    } else n_log++;
+    if (d == 0 || d < -6 || d > 6) { d_prec = 99; n_meme = 0; return; }
+    n_meme = (d == d_prec) ? n_meme + 1 : 1; d_prec = d;
+    if (n_meme < 3) return;
+    g_ts0_offset = (g_ts0_offset + d + BSP_FN_MAX) % BSP_FN_MAX;
+    if (g_off_mobile != INT64_MIN) g_off_mobile += d;
+    printf("  [dfn] tick=%u : fn du mobile %+d trame(s) -> offset %lld\n", tick, d, (long long)g_ts0_offset);
+    d_prec = 99; n_meme = 0;
+}
 void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
 {
     int64_t ref = g_off_mobile != INT64_MIN ? g_off_mobile : (g_ts0_offset != INT64_MIN ? g_ts0_offset : 0);
@@ -797,6 +856,19 @@ void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
         printf("  [off-mobile] RA_C fn%%42432=%u tick=%u : offset du mobile %lld -> %lld\n", fn42432, tick,
                g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
         g_off_mobile = off;
+    }
+    /* [2026-10-22 14:15] RA_C = le fn exact du mobile : l'offset de livraison le suit (run de 14:10 : RA_C - tick = 768
+     * sur quatre RACH, livraison CCCH encore a 767 -> IMM ASS du bon RACH manquee). Ecart <= 6 seulement. */
+    /* 14:20 : COUPE PAR DEFAUT. Run de 14:18 : livraison 770 -> 771 par RA_C, puis tous les NP_I en erreur, 8 RACH,
+     * perte de la cellule ; RA_C - tick vaut l'offset de livraison OU +1 selon l'acces. CALYPSO_BSP_RAC_LIVRAISON=1. */
+    static int rac_liv = -1;
+    if (rac_liv < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RAC_LIVRAISON"); rac_liv = (e && *e == '1'); }
+    if (rac_liv && g_ts0_offset != INT64_MIN && off != g_ts0_offset) {
+        int64_t e = off - g_ts0_offset;
+        if (e >= -6 && e <= 6) {
+            printf("  [off-mobile] offset de livraison %lld -> %lld (RA_C)\n", (long long)g_ts0_offset, (long long)off);
+            g_ts0_offset = (off + BSP_FN_MAX) % BSP_FN_MAX;
+        }
     }
 }
 /* [2026-10-21] firmware TI en mode dedie (taches ALLC vues par montant.c) : voir CALYPSO_BSP_DEDIE_DECAL */
@@ -1262,6 +1334,26 @@ static int g_dedie_tn = -1, g_dedie_ss;
 #define BSP_DEDIE_PDCH 4
 static int g_dedie_genre = 1;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
+
+/* [2026-10-22] DERNIERS BURSTS DU TCH LIVRES AU DSP, pour la prothese FACCH descendante de montant.c : sous la
+ * L1 TI (Magnetite) la ROM decode la FACCH/F avec ses deux derniers bursts absents (« 01 8b 01 2b » au lieu de
+ * l'UA « 01 73 01 2b »), alors que les bursts livres portent l'UA intact. */
+#define TCH_ANNEAU 64u
+static struct { uint32_t fn; uint8_t bits[148]; int ok; } g_tch_anneau[TCH_ANNEAU];
+static uint32_t g_tch_dernier_fn; static int g_tch_dernier_ok;
+int calypso_bsp_tch_dernier_fn(uint32_t *fn)
+{
+    if (!g_tch_dernier_ok || g_dedie_genre != BSP_DEDIE_TCH || g_dedie_tn <= 0) return 0;
+    *fn = g_tch_dernier_fn;
+    return 1;
+}
+int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148])
+{
+    unsigned k = fn % TCH_ANNEAU;
+    if (!g_tch_anneau[k].ok || g_tch_anneau[k].fn != fn) return 0;
+    memcpy(bits, g_tch_anneau[k].bits, 148);
+    return 1;
+}
 /* [2026-09-22] g_dedie_perdues : les trames dediees que bsp_ts0_service() saute
  * ENTIEREMENT, faute de burst du BTS pour la trame reclamee. Elle repart par un
  * `return` avant bsp_ts0_livrer(), donc ni `joues` ni `manques` ne les voient :
@@ -1302,6 +1394,17 @@ static bool bsp_dedie_trame(uint32_t fn)
         static int tout = -1;
         if (tout < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SDCCH8_TOUT"); tout = !(e && *e == '0'); }
         if (tout) return true;
+    }
+    /* [2026-10-22 14:30] ET AVANT, RIEN. Run de 14:25 : des la 1re IMM ASS annoncee par le pont (SS0, p51 0..3),
+     * les trames du SS remplacaient TS0 alors que le mobile n'avait encore rien accepte : BCCH (2..5) en erreur
+     * (BS_I 1 a partir de 13164), blocs CCCH 6..9 / 12..15 ecrases par SS1 / SS3 -> l'IMM ASS de son RACH (pourtant
+     * bien date) jamais lue, nouveau RACH, SDCCH en Timeout a la BSC. Firmware TI (MS_MAGNETITE) : TS0 intact
+     * jusqu'a l'entree en dedie (g_dedie_ti). CALYPSO_BSP_SDCCH_TS0_ATTENTE=0 : ancien comportement. */
+    if (g_dedie_genre == 1 && !g_dedie_ti) {
+        static int attente = -1;
+        if (attente < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SDCCH_TS0_ATTENTE");
+                           attente = e && *e ? (*e != '0') : (calypso_getenv("MS_MAGNETITE") != NULL); }
+        if (attente) return false;
     }
     unsigned p51 = fn % 51u;
     unsigned ss = (unsigned)g_dedie_ss & 7u;
@@ -1639,8 +1742,17 @@ static int nb_retenter_on(void)
      * IL 59), compteur DSC epuise, reselection de cellule toutes les ~8 s (BS_S, BAND_R, RXL_R, CEL_R : les
      * barres d'antenne apparaissent 5 s puis disparaissent), et aucun paging recu (pas de SMS/appel entrant).
      * CALYPSO_BSP_NB_RETENTER=0 pour couper, =2 : dedie seul. */
+    /* [2026-10-22 21:10] DEFAUT SELON LE FIRMWARE. La garde en veille sert la L1 TI (MS_MAGNETITE) : sans elle,
+     * NP_I tous en erreur, aucun appel entrant (run de 21:01 en =2). Le firmware osmocom n'en a jamais eu besoin et
+     * elle lui vidait la recherche FB (FBSB result=255, voir continue_fb dans bsp_ts0_livrer) : 2 (dedie seul) par
+     * defaut sans MS_MAGNETITE. CALYPSO_BSP_NB_RETENTER force la valeur dans les deux cas. */
     static int on = -1;
-    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER"); on = (e && *e) ? atoi(e) : 1; }
+    if (on < 0) {
+        const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER");
+        on = (e && *e) ? atoi(e) : (calypso_getenv("MS_MAGNETITE") ? 1 : 2);
+        BSP_LOG("NB_RETENTER=%d (%s) : garde NB %s", on, (e && *e) ? "force" : "defaut du firmware",
+                on == 1 ? "en veille et en dedie" : on == 2 ? "en dedie seulement" : "coupee");
+    }
     return on == 1 || (on == 2 && g_dedie_ti);
 }
 static int pm_sur_cellule(void);   /* la mesure vise-t-elle la frequence de la cellule ? (faux air) */
@@ -1778,7 +1890,23 @@ int calypso_bsp_nb_retenter(void)
     {
         static int sur_tch = -1;
         if (sur_tch < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER_TCH"); sur_tch = (e && *e == '1'); }
-        if (!sur_tch && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) return 0;
+        /* [2026-10-22 13:40] MAIS LA FENETRE DE MESURE, OUI. Enregistrement de l'appel de 13:20 (rejeu, 'B') :
+         * apres la NB du TCH, la ROM arme dans la meme trame une fenetre PM de 64 (voisins) ; personne ne la
+         * servait, elle restait armee au tick suivant et le burst TS2 de cette trame y tombait (64 echantillons,
+         * fn 19663, 19665... jamais livres en NB). Une NB sur deux : parole « bourrage » encore decodee (bits
+         * nuls), UA de la FACCH (fn 19789) et SACCH 38/90 perdus -> Assignment Failure. On sert la mesure
+         * (pas de NB relivree), une par tick, jamais sur une IT DMA en attente. CALYPSO_BSP_PM_TCH=0 coupe. */
+        if (!sur_tch && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
+            static int pm_tch = -1; static uint32_t t_pm = 0xffffffffu;
+            if (pm_tch < 0) { const char *e = calypso_getenv("CALYPSO_BSP_PM_TCH"); pm_tch = !(e && *e == '0'); }
+            if (!pm_tch || t_pm == g_tick_courant) return 0;
+            if (!calypso_rhea_dma_rx_armed() || !calypso_rhea_dma_one_shot()) return 0;
+            int nw = calypso_rhea_dma_get_len_words() / 2;
+            if (nw <= 0 || nw >= 150) return 0;
+            if (bsp.dsp && (bsp.dsp->ifr & (1u << 14))) return 0;
+            t_pm = g_tick_courant;
+            return pm_servir(nw);
+        }
     }
     /* [2026-10-22 11:50] [nb-etat] 0 NB relivre sur tous les runs (milliers d'expires) : l'etat DMA vu ici. */
     if (g_dedie_ti) {
@@ -1865,6 +1993,7 @@ static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
         if (tard >= 2 || tot >= 2) {
             int d = tard >= 2 ? -1 : +1;
             g_ts0_offset = (g_ts0_offset + d + BSP_FN_MAX) % BSP_FN_MAX;
+            if (g_off_mobile != INT64_MIN) g_off_mobile += d;   /* [2026-10-22 14:20] le datage des RACH suit */
             printf("  [bcch] tick=%u fenetres NB sur p51 %s : offset %+d -> %lld\n",
                    tick, d < 0 ? "3..6 (flux en avance)" : "1..4 (flux en retard)", d, (long long)g_ts0_offset);
             tard = tot = 0;
@@ -1875,6 +2004,40 @@ static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
         g_bcch_verrou = 0;
         printf("  [bcch] tick=%u plus de lecture BCCH depuis %u trames : offset deverrouille\n", tick, tick - g_bcch_vu_tick);
     }
+}
+/* [2026-10-22 14:00] LE MEME CALAGE SUR LES BLOCS CCCH (paging). En veille la L1 ne relit presque plus la
+ * BCCH : apres un dedie (LU, appel) l'offset restait faux de quelques trames (761 avant le LU de 13:51,
+ * 758 au recalage SB qui a suivi), chaque NP_I en erreur, aucune page vue (MT SMS, appel entrant) jusqu'a
+ * la perte de la cellule. Une serie de fenetres NB doit commencer sur un debut de bloc CCCH (6, 12, 16, 22,
+ * 26, 32, 36, 42, 46) ; decalee de d (|d| <= 3) deux fois de suite -> offset - d. La BCCH (2..5) reste a
+ * bsp_bcch_calage(). Hors dedie, offset non verrouille par la BCCH. CALYPSO_BSP_CCCH_CALAGE=0 coupe. */
+static void bsp_ccch_calage(uint32_t tick, unsigned p, bool nb)
+{
+    static const unsigned debuts[] = { 6, 12, 16, 22, 26, 32, 36, 42, 46 };
+    static int on = -1, prec_p = -1, debut = -1, d_prec = 99, d_n;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_CCCH_CALAGE"); on = !(e && *e == '0'); }
+    if (!on) return;
+    if (nb && debut >= 0 && (int)p == prec_p + 1) { prec_p = (int)p; return; }   /* la serie continue */
+    if (debut >= 0 && prec_p - debut + 1 >= 4 && !g_bcch_verrou) {               /* une serie vient de finir */
+        int d = 99;
+        for (unsigned k = 0; k < sizeof debuts / sizeof debuts[0]; k++) {
+            int e = debut - (int)debuts[k];
+            if (e >= -3 && e <= 3 && (d == 99 || abs(e) < abs(d))) d = e;
+        }
+        if (d == 0) d_n = 0, d_prec = 0;
+        else if (d != 99) {
+            d_n = (d == d_prec) ? d_n + 1 : 1; d_prec = d;
+            if (d_n >= 2) {
+                g_ts0_offset = (g_ts0_offset - d + BSP_FN_MAX) % BSP_FN_MAX;
+                if (g_off_mobile != INT64_MIN) g_off_mobile -= d;   /* le datage des RACH suit */
+                printf("  [ccch] tick=%u fenetres NB sur p51 %d.. au lieu de %d.. : offset %+d -> %lld\n",
+                       tick, debut, debut - d, -d, (long long)g_ts0_offset);
+                d_n = 0; d_prec = 99;
+            }
+        }
+    }
+    debut = nb ? (int)p : -1;
+    prec_p = nb ? (int)p : -1;
 }
 static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
 {
@@ -1980,6 +2143,11 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 n_tch = 0;
             }
             tick_prec = tick_fn;
+            {   /* [2026-10-22] pour la prothese FACCH descendante (montant.c) */
+                unsigned k = g_ts0[i].fn % TCH_ANNEAU;
+                g_tch_anneau[k].fn = g_ts0[i].fn; memcpy(g_tch_anneau[k].bits, d, 148); g_tch_anneau[k].ok = 1;
+                g_tch_dernier_fn = g_ts0[i].fn; g_tch_dernier_ok = 1;
+            }
             if (f_tch && n_tch < 20000) {
                 uint8_t h[8] = { tick_fn >> 24, tick_fn >> 16, tick_fn >> 8, tick_fn,
                                  g_ts0[i].fn >> 24, g_ts0[i].fn >> 16, g_ts0[i].fn >> 8, g_ts0[i].fn };
@@ -2063,7 +2231,13 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
      * le burst va dans l'anneau de garde, et une fenetre de mesure armee recoit du remplissage a sa place */
     dma_trace("depot");
     bool devie = false;
-    if (!sb && !fcch && !hors_freq && nb_retenter_on() && !(one_shot && nwin >= 150 && nwin < 190)) {
+    /* [2026-10-22 20:40] JAMAIS EN DMA CONTINUE (recherche FB). Depuis le 21/10 23:46 (garde en veille aussi), chaque
+     * NB de la recherche FB partait dans l'anneau sans rien livrer, ni TS0 ni les sept intervalles de bourrage : la
+     * ROM ne comptait plus que les ticks FCCH/SCH, TOA FB ~1255 au lieu de ~8 trames, le firmware osmocom posait sa
+     * fenetre SB 7 trames trop tot (FBSB result=255 en boucle, le mobile ne se cale plus). Voir la trame complete
+     * plus bas. */
+    const bool continue_fb = armee && !one_shot;
+    if (!sb && !fcch && !hors_freq && !continue_fb && nb_retenter_on() && !(one_shot && nwin >= 150 && nwin < 190)) {
         nb_garde_poser(g_ts0[i].fn, tick_fn, bits);
         if (one_shot && nwin > 0 && nwin < 150) pm_servir(nwin);
         devie = true;
@@ -2126,6 +2300,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
        * DMA la ROM avait armee quand le burst est arrive. */
       if (sb_fin_trame() && g_dedie_tn <= 0)
           bsp_bcch_calage(tick_fn, g_ts0[i].fn % 51u, nwin >= 150 && nwin < 190);
+      if (sb_fin_trame() && g_dedie_tn <= 0 && !g_dedie_ti)
+          bsp_ccch_calage(tick_fn, g_ts0[i].fn % 51u, nwin >= 150 && nwin < 190);
       { static unsigned nbcch;
         const unsigned p = g_ts0[i].fn % 51u;
         if (p >= 2 && p <= 5 && nbcch < 400) { trace = true; nbcch++; } }
@@ -2365,8 +2541,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
          * tombe sur le burst livre (+1 structurel, [a5] « ecart +1 ») ; en TCH « ecart +2 » : une trame de trop,
          * FACCH descendant (UA) en Fire KO, RR Assignment Failure. */
         {
-            static int tch_decal = 99;
-            if (tch_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_TCH_DECAL"); tch_decal = (e && *e) ? atoi(e) : 0; }
+            int tch_decal = calypso_reglage("CALYPSO_BSP_TCH_DECAL", 0);   /* [2026-10-22] a chaud */
             if (tch_decal && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
                 w = (w + tch_decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
             }
@@ -2379,7 +2554,10 @@ static void bsp_ts0_service(uint32_t tick_fn)
          * CALYPSO_BSP_DEDIE_A5FN=0 pour revenir a l'offset BCCH. */
         {
             static int a5fn_on = -1;
-            if (a5fn_on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_A5FN"); a5fn_on = !(e && *e == '0'); }
+            /* [2026-10-22 13:05] COUPE PAR DEFAUT : le calage BCCH donne deja la trame du mobile en dedie (SDCCH 100 %,
+             * d_fn du TCH aligne) ; cet alignement sautait de +7 trames (offset RA_C bruite) et laissait la veille
+             * dereglee apres le dedie (NP_I tous en erreur, appel entrant jamais pagine). CALYPSO_BSP_DEDIE_A5FN=1. */
+            if (a5fn_on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_A5FN"); a5fn_on = (e && *e == '1'); }
             if (a5fn_on && g_dedie_ti && g_a5fn_vu && g_off_mobile != INT64_MIN &&
                 (uint32_t)(tick_fn - g_a5fn_tick) < 3000) {
                 /* [2026-10-22 12:25] RA_C rapporte la trame SUIVANT l'emission : en dedie le mobile ouvre ses

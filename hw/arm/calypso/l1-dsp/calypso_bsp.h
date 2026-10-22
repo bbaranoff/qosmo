@@ -44,6 +44,12 @@ int  calypso_bsp_sb_retenter(void);
 int  calypso_bsp_nb_retenter(void);
 void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn);
 unsigned calypso_bsp_dedie_entrees(void);
+void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d);   /* [2026-10-22] fn du mobile (d_fn) */
+/* [2026-10-22] reglage modifiable a chaud : NOM=valeur dans /dev/shm/calypso_reglages (relu quand il change),
+ * sinon la variable d'environnement NOM, sinon defaut. */
+int calypso_reglage(const char *nom, int defaut);
+int calypso_bsp_tch_dernier_fn(uint32_t *fn);              /* [2026-10-22] dernier burst TCH livre (0 hors TCH) */
+int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148]); /* [2026-10-22] ses bits, 64 trames d'historique */
 void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432);   /* [2026-10-22] RA_C de la trace L1 */   /* [2026-10-22] compteur d'entrees en dedie TI */   /* [2026-10-22] fn exact du dedie */
 int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* [2026-10-21] fn appris au dernier SB */   /* [2026-10-21] NB garde en dedie TI */
 void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH pendant n ticks ([sbwin]) */     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */

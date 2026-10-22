@@ -1060,8 +1060,31 @@ void scratchwr_note(C54xState *s, uint16_t a, uint16_t v, const char *espace)
 int g_toa_grille = -1, g_toa_valeur = 0;
 unsigned g_toa_seq = 0;
 
+uint16_t g_piege_pile_sp; int g_piege_pile_on;   /* [2026-10-22 22:30] voir data_write */
 void data_write(C54xState *s, uint16_t addr, uint16_t val)
 {
+    /* [2026-10-22 22:30] PIEGE PILE : appel au 600 / entrant de 22:05 (Magnetite, vocodeur ROM), `ret` en PROM1
+     * 0x1e9bd lit 0 a l'adresse de retour (SP=0x5abb) juste apres une IT : PC -> 0x0000, DSP perdu. Entre
+     * l'entree d'une IT et son RETE, toute ecriture dans les 4 mots au-dessus du SP du code interrompu (ou il
+     * range ses adresses de retour) est tracee, avec l'anneau. g_piege_pile_on : calypso_c54x.c (entree d'IT),
+     * c54x_exec.c (RETE). CALYPSO_C54X_PIEGE_PILE=0 coupe. */
+    {
+        extern uint16_t g_piege_pile_sp; extern int g_piege_pile_on;
+        static int on = -1;
+        if (on < 0) on = calypso_gate("CALYPSO_C54X_PIEGE_PILE", 1);
+        if (on && g_piege_pile_on && (uint16_t)(addr - g_piege_pile_sp) < 4u && s->insn_count > 3000000) {
+            static unsigned n;
+            if (n++ < 12) {
+                printf("  [piege-pile] data[0x%04x] %04x -> %04x pendant l'IT (SP interrompu 0x%04x) pc=0x%04x xpc=%u op=0x%04x "
+                       "SP=%04x DP=%03x ST1=%04x AR0..7=%04x %04x %04x %04x %04x %04x %04x %04x insn=%u [%u]\n",
+                       addr, s->data[addr], val, g_piege_pile_sp, s->pc, s->xpc, s->prog[s->pc], s->sp, s->st0 & 0x1ff,
+                       s->st1, s->ar[0], s->ar[1], s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->ar[6], s->ar[7],
+                       s->insn_count, n);
+                if (n <= 2) { extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
+                              c54x_anneau_vider_stdout("piege-pile", 200); }
+            }
+        }
+    }
     /* [2026-09-23] GARDE 0x3d89 : pointeur d'ecriture du tampon circulaire de
      * 232 mots en 0x4d00 (init 0x90c0, avance en 0x9173, copie 28 mots du
      * tampon DMA 0x0cce a chaque trame TCH). Sur le banc il est retrouve en
@@ -3059,6 +3082,24 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                            s->ar[2], s->insn_count);
                 }
             }
+            /* [2026-10-22 21:20] GARDE IMR DU CODEC FR. Appel au 600 de 21:17 (Magnetite, vocodeur ROM) : juste apres
+             * une FACCH montante, le codeur FR de la PDROM (appele en 0xe3fc, retour 0xe3fe) ecrit A par
+             * « STL A,*AR3+% » (0xe7ad, op 0x81d3) avec AR3 ~ 0 : IMR 0x7012 -> 0, toutes les IT du DSP masquees,
+             * port voix arrete (rint 0), trames a 27 ms, puis « >!PM 202 » en boucle et la cellule perdue. Le codec
+             * n'ecrit jamais l'IMR : c'est un pointeur corrompu (bug d'emulation a trouver, AR3 trace ci-dessous).
+             * Ecriture ignoree si elle vient de la PDROM du codec (0xe000..0xefff, XPC 0). CALYPSO_C54X_GARDE_IMR=0
+             * la laisse passer. */
+            {
+                static int garde = -1;
+                if (garde < 0) garde = calypso_gate("CALYPSO_C54X_GARDE_IMR", 1);
+                if (garde && s->xpc == 0 && s->pc >= 0xe000 && s->pc <= 0xefff && s->insn_count > 1000000) {
+                    static unsigned ng;
+                    if (ng++ < 40)
+                        printf("  [garde-imr] IMR 0x%04x -> 0x%04x IGNORE (codec PDROM pc=0x%04x op=0x%04x AR3=%04x BK=%04x insn=%u) [%u]\n",
+                               s->imr, (uint16_t)val, s->pc, s->prog[s->pc], s->ar[3], s->bk, s->insn_count, ng);
+                    return;
+                }
+            }
             if (val == 0 && s->imr != 0) {
                 static unsigned n0;
                 if (n0++ < 40)
@@ -3160,6 +3201,22 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                         "(API mailbox); keeping 0x%04x PC=0x%04x\n",
                         val, s->sp, s->pc);
                 return;
+            }
+            /* [2026-10-22 21:55] GARDE SP DU CODEC. Appel de 21:47 (Magnetite, vocodeur ROM) : PDROM 0xf15c
+             * `st #0x001f, *(0x18)` en adressage DIRECT avec DP=0 -> SP=0x001f (et 0xf152 `st #0x20, *(0x16)` -> AR6),
+             * DSP parti en 0x00c0 pour toujours, trames a 28 ms, synchro perdue. Ces ST visent une page de variables
+             * du codec : c'est DP qui est faux (a trouver, DP trace ici). Une pile sous 0x0060 (MMR, scratch) n'a pas
+             * de sens : ecriture ignoree depuis la PDROM (0xe000..0xffff, XPC 0). CALYPSO_C54X_GARDE_SP=0 coupe. */
+            {
+                static int garde_sp = -1;
+                if (garde_sp < 0) garde_sp = calypso_gate("CALYPSO_C54X_GARDE_SP", 1);
+                if (garde_sp && val < 0x0060 && s->xpc == 0 && s->pc >= 0xe000 && s->insn_count > 1000000) {
+                    static unsigned ngs;
+                    if (ngs++ < 40)
+                        printf("  [garde-sp] SP 0x%04x -> 0x%04x IGNORE (PDROM pc=0x%04x op=0x%04x DP=0x%03x AR6=%04x insn=%u) [%u]\n",
+                               s->sp, val, s->pc, s->prog[s->pc], s->st0 & 0x1ff, s->ar[6], s->insn_count, ngs);
+                    return;
+                }
             }
             sp_abs_track(s, val, 0);  /* site 0: MMR_SP via STL/STM/STLM */
             s->sp = val;

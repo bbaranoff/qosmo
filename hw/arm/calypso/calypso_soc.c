@@ -124,6 +124,18 @@ static uint64_t wdt_read(void *opaque, hwaddr off, unsigned size)
 static void wdt_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 {
     if (off == 0x04 && (val & 0xffff) == 0x80F5) {
+        /* [2026-10-22] cpu_reset seul pouvait boucler : 4628 resets de suite apres un dar_reset de Magnetite
+         * (SMS efface), l'ARM repartait sur des peripheriques dans leur etat d'avant et y retombait. Au-dela de
+         * 3 resets en 2 s, reset complet de la machine (qemu_system_reset_request). */
+        static int64_t t0; static int n;
+        int64_t t = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        if (t - t0 > 2000) { t0 = t; n = 0; }
+        if (++n > 3) {
+            fprintf(stderr, "[wdt] chien de garde : resets en boucle -> reset complet de la machine\n");
+            n = 0; t0 = t;
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            return;
+        }
         fprintf(stderr, "[wdt] chien de garde : 0x80F5 -> reset de l'ARM\n");
         cpu_reset(first_cpu);   /* reset du CPU ARM : retour au vecteur de reset, boot repart */
     }

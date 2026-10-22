@@ -147,7 +147,11 @@ static void a5_calculer(C54xState *s, unsigned algo)
         uint32_t ft;
         if (dl_bsp && calypso_bsp_fn_bts_du_tick(calypso_trx_get_fn(), &ft)) {
             int32_t d = (int32_t)ft - (int32_t)fn;
-            if (d >= -3 && d <= 3 && d != 0) { fn_dl = ft; a5.n_dl_bsp++; }
+            /* CALYPSO_A5_DL_DECAL : decalage ajoute au fn du BSP quand a_a5fn en differe (cas du TCH ; en SDCCH
+             * a_a5fn == fn du BSP et rien ne change). */
+            static int dl_decal = 99;
+            if (dl_decal == 99) { const char *e = getenv("CALYPSO_A5_DL_DECAL"); dl_decal = (e && *e) ? atoi(e) : 0; }
+            if (d >= -3 && d <= 3 && d != 0) { fn_dl = (uint32_t)((int32_t)ft + dl_decal); a5.n_dl_bsp++; }
             extern unsigned calypso_daram_last_fn;
             static unsigned n_sd;
             if (n_sd < 400 && ft != fn) {

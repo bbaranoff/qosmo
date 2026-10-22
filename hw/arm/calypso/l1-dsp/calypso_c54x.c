@@ -43,7 +43,7 @@ void c54x_sondes_resoudre(void)
 unsigned g_c54x_it_prises = 0;
 typedef struct {
     uint32_t insn;
-    uint16_t pc, op, sp, sp_apres, ar2, ar5, rpt_count;
+    uint16_t pc, op, sp, sp_apres, ar2, ar5, rpt_count, st0, ar3, ar4, brc;   /* st0 : [2026-10-22 22:10] DP dans le chemin */
     uint8_t  xpc, rpt, intm, it;
     uint16_t it_n;
 } C54xAnneauExec;
@@ -63,8 +63,9 @@ void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max)
         if (e->pc == pc_prec) { rep++; continue; }
         if (rep) printf("  [%s]        (x%u)\n", etiquette, rep + 1);
         rep = 0; pc_prec = e->pc;
-        printf("  [%s] -%03u insn=%u xpc=%u pc=0x%04x op=0x%04x sp=%04x ar2=%04x ar5=%04x intm=%u it=%u\n",
-               etiquette, k, e->insn, e->xpc, e->pc, e->op, e->sp, e->ar2, e->ar5, e->intm, e->it);
+        printf("  [%s] -%03u insn=%u xpc=%u pc=0x%04x op=0x%04x sp=%04x ar2=%04x ar3=%04x ar4=%04x ar5=%04x brc=%04x dp=%03x intm=%u it=%u\n",
+               etiquette, k, e->insn, e->xpc, e->pc, e->op, e->sp, e->ar2, e->ar3, e->ar4, e->ar5, e->brc,
+               e->st0 & 0x1ff, e->intm, e->it);
     }
     if (rep) printf("  [%s]        (x%u)\n", etiquette, rep + 1);
 }
@@ -1681,7 +1682,7 @@ int c54x_run(C54xState *s, int n_insns)
                 /* Set g_last_intr_* here too, otherwise the HIGHVEC and DISP
                  * probes miss replayed interrupts. fg_pc is captured BEFORE
                  * s->pc is overwritten by the vector. */
-                g_last_intr_insn = s->insn_count; g_last_intr_vec = vec;
+                g_last_intr_insn = s->insn_count; g_last_intr_vec = vec; { extern uint16_t g_piege_pile_sp; extern int g_piege_pile_on; if (!g_piege_pile_on) { g_piege_pile_sp = (uint16_t)(s->sp + 2); g_piege_pile_on = 1; } }
                 g_last_intr_fg_pc = (uint16_t)s->pc; g_last_intr_fg_dp = dp(s);
                 g_c54x_it_prises++;   /* [2026-09-23] diagnostic ANNEAU-EXEC */
                 s->xpc = 0;
@@ -2846,7 +2847,7 @@ int c54x_run(C54xState *s, int n_insns)
         C54xAnneauExec *ev_anneau = &g_anneau_exec[g_anneau_exec_idx++ % C54X_ANNEAU_N];
         ev_anneau->insn = s->insn_count; ev_anneau->pc = exec_pc; ev_anneau->op = exec_op;
         ev_anneau->xpc = (uint8_t)s->xpc; ev_anneau->sp = s->sp; ev_anneau->sp_apres = s->sp;
-        ev_anneau->ar2 = s->ar[2]; ev_anneau->ar5 = s->ar[5];
+        ev_anneau->ar2 = s->ar[2]; ev_anneau->ar5 = s->ar[5]; ev_anneau->st0 = s->st0; ev_anneau->ar3 = s->ar[3]; ev_anneau->ar4 = s->ar[4]; ev_anneau->brc = s->brc;
         ev_anneau->rpt = s->rpt_active; ev_anneau->rpt_count = s->rpt_count;
         ev_anneau->intm = !!(s->st1 & ST1_INTM);
         ev_anneau->it = 0; ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
@@ -2873,7 +2874,7 @@ int c54x_run(C54xState *s, int n_insns)
                 printf("  [trou-prog] entree dans la memoire vide pc=0x%04x depuis pc=0x%04x xpc=%u pmst=%04x SP=%04x pile=%04x %04x %04x insn=%u\n",
                        exec_pc, pp, s->xpc, s->pmst, s->sp, s->data[s->sp], s->data[(uint16_t)(s->sp + 1)],
                        s->data[(uint16_t)(s->sp + 2)], s->insn_count);
-                c54x_anneau_vider_stdout("trou-prog", 120);
+                c54x_anneau_vider_stdout("trou-prog", 512);   /* [2026-10-22 22:20] 120 -> 512 : remonter jusqu a l IT */
             }
             (void)pc_prec_trou;
         }
@@ -7290,7 +7291,7 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
             g_sp_ledger.net_words += 2;  /* PC and XPC pushed here, outside the exec ring */
             s->st1 |= ST1_INTM;
             /* Capture the preempted context; the foreground DP is unchanged. */
-            g_last_intr_insn = s->insn_count; g_last_intr_vec = vec;
+            g_last_intr_insn = s->insn_count; g_last_intr_vec = vec; { extern uint16_t g_piege_pile_sp; extern int g_piege_pile_on; if (!g_piege_pile_on) { g_piege_pile_sp = (uint16_t)(s->sp + 2); g_piege_pile_on = 1; } }
             g_last_intr_fg_pc = (uint16_t)(s->pc + 1); g_last_intr_fg_dp = dp(s);
             s->xpc = 0;                            /* fetch the vector from page 0 */
             uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
@@ -7353,7 +7354,7 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
         g_sp_ledger.net_words += 2;  /* PC and XPC pushed here, outside the exec ring */
         s->st1 |= ST1_INTM;
         /* Capture the preempted context; the foreground DP is unchanged. */
-        g_last_intr_insn = s->insn_count; g_last_intr_vec = vec;
+        g_last_intr_insn = s->insn_count; g_last_intr_vec = vec; { extern uint16_t g_piege_pile_sp; extern int g_piege_pile_on; if (!g_piege_pile_on) { g_piege_pile_sp = (uint16_t)(s->sp + 2); g_piege_pile_on = 1; } }
         g_last_intr_fg_pc = (uint16_t)s->pc; g_last_intr_fg_dp = dp(s);
         s->xpc = 0;                                /* fetch the vector from page 0 */
         uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
@@ -7535,8 +7536,10 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
                 double r = sigma * sqrt(-2.0 * log(u1));
                 double vi = (int16_t)s->bsp_buf[k]     + r * cos(2 * M_PI * u2);
                 double vq = (int16_t)s->bsp_buf[k + 1] + r * sin(2 * M_PI * u2);
-                if (vi > 32767) vi = 32767; if (vi < -32768) vi = -32768;
-                if (vq > 32767) vq = 32767; if (vq < -32768) vq = -32768;
+                if (vi > 32767) vi = 32767;
+                if (vi < -32768) vi = -32768;
+                if (vq > 32767) vq = 32767;
+                if (vq < -32768) vq = -32768;
                 s->bsp_buf[k] = (uint16_t)(int16_t)lrint(vi);
                 s->bsp_buf[k + 1] = (uint16_t)(int16_t)lrint(vq);
             }

@@ -541,6 +541,23 @@ int c54x_exec_one(C54xState *s)
         return 1;   /* per-instruction IRQ vectoring consumed this step */
     }
     uint16_t op = prog_fetch(s, s->pc);
+    /* [2026-10-22 22:10] [fft-dp] la FFT du codec (PDROM 0xf0d0..0xf19c, appelee par 0xc13c `ld #112,dp` ->
+     * fcall 0xf0c1 -> 0xf439 -> call 0xf0d0) range ses variables en DP+0x0b/0x16/0x17/0x18 et attend DP=0x70.
+     * Appel de 21:47 : DP=0 en 0xf15c -> SP=0x001f, DSP perdu. A l'entree et a l'endroit de la panne, si DP
+     * n'est pas 0x70 : DP, SP, la pile et le chemin (une fois chacun). */
+    if (s->xpc == 0 && (s->pc == 0xf0d0 || s->pc == 0xf150) && (s->st0 & 0x1ff) != 0x70) {
+        static unsigned n_e, n_m;
+        unsigned *n = (s->pc == 0xf0d0) ? &n_e : &n_m;
+        if ((*n)++ < 3) {
+            extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
+            printf("  [fft-dp] pc=0x%04x DP=0x%03x (attendu 0x070) ST1=%04x SP=%04x pile=%04x %04x %04x %04x %04x %04x "
+                   "IMR=%04x IFR=%04x insn=%u\n", s->pc, s->st0 & 0x1ff, s->st1, s->sp,
+                   s->data[s->sp], s->data[(uint16_t)(s->sp + 1)], s->data[(uint16_t)(s->sp + 2)],
+                   s->data[(uint16_t)(s->sp + 3)], s->data[(uint16_t)(s->sp + 4)], s->data[(uint16_t)(s->sp + 5)],
+                   s->imr, s->ifr, s->insn_count);
+            if (s->pc == 0xf0d0 || *n == 1) c54x_anneau_vider_stdout("fft-dp", 512);
+        }
+    }
     /* B1 probe (CALYPSO_B1): at the MAC kernel 0xa076, dump the correlator
      * reference table data[0x2c00..0x2c0f] plus a checksum, which tells whether
      * the boot copy 0x76f8 -> 0x2c00 ran or the table is still zero.
@@ -1892,6 +1909,24 @@ int c54x_exec_one(C54xState *s)
                         c54x_anneau_vider_stdout("liste-hors", 512);
                     }
                 }
+                /* [2026-10-22 21:35] GARDE : FIN DE LISTE SUR UNE ENTREE HORS ROM. Run de 21:21 (Magnetite, appel
+                 * entrant) : a chaque fin de TCH, 0xb456 remet l'etat TCH data[0x3fba] a -1 et le dispatcher tourne
+                 * encore une fois sur base + (-1)*12 : entrees 0x1b04, 0x5213 puis 0x01f6 (`bacc a` sur soi-meme,
+                 * [bacc-soi]) -> DSP occupe pour toujours, 25 ms par trame, 1000+ trames de retard (raccroche vu
+                 * avec 5 s de retard, puis cellule perdue). Une routine de tache est toujours en ROM : une entree
+                 * hors ROM est traitee comme le 0 qui termine la liste (sortie du `bc pmad,aeq` de 0xbc32, pmad en
+                 * 0xbc33). CALYPSO_C54X_GARDE_LISTE=0 coupe. */
+                static int garde_liste = -1;
+                if (garde_liste < 0) garde_liste = calypso_gate("CALYPSO_C54X_GARDE_LISTE", 1);
+                if (garde_liste && hors_rom) {
+                    static unsigned n_gl;
+                    uint16_t sortie = s->prog[0xbc33];
+                    if (n_gl++ < 40 || n_gl % 1000 == 0)
+                        printf("  [garde-liste] entree 0x%04x hors ROM (3fba=%u) : fin de liste -> 0x%04x insn=%u [%u]\n",
+                               tgt, s->data[0x3fba], sortie, s->insn_count, n_gl);
+                    s->pc = sortie;
+                    return 0;
+                }
             }
             if (!is_call && tgt == src_pc) {
                 static unsigned n_soi;
@@ -2131,6 +2166,7 @@ int c54x_exec_one(C54xState *s)
             }
             uint16_t ra = data_read(s, s->sp); s->sp++;   /* pop PC */
             s->st1 &= ~ST1_INTM;
+            { extern int g_piege_pile_on; g_piege_pile_on = 0; }   /* [2026-10-22 22:30] piege pile (c54x_mem.c) */
 
             /* RETE-AUDIT (CALYPSO_RETE_AUDIT=1, default 0).
              *
