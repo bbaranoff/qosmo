@@ -47,8 +47,27 @@ typedef struct {
     uint8_t  xpc, rpt, intm, it;
     uint16_t it_n;
 } C54xAnneauExec;
-static C54xAnneauExec g_anneau_exec[64];
+#define C54X_ANNEAU_N 512   /* [2026-10-22] 64 -> 512 : remonter toute une routine (sonde [imr0]) */
+static C54xAnneauExec g_anneau_exec[C54X_ANNEAU_N];
 static unsigned g_anneau_exec_idx = 0;
+
+/* [2026-10-22] sonde [imr0] (c54x_mem.c) : le chemin d'execution qui mene a l'ecriture de l'IMR, sur stdout,
+ * une ligne par instruction distincte (les iterations de RPT/boucle repliees). */
+void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max)
+{
+    unsigned n = g_anneau_exec_idx < C54X_ANNEAU_N ? g_anneau_exec_idx : C54X_ANNEAU_N;
+    if (n > n_max) n = n_max;
+    uint16_t pc_prec = 0xffff; unsigned rep = 0;
+    for (unsigned k = n; k >= 1; k--) {
+        const C54xAnneauExec *e = &g_anneau_exec[(g_anneau_exec_idx - k) % C54X_ANNEAU_N];
+        if (e->pc == pc_prec) { rep++; continue; }
+        if (rep) printf("  [%s]        (x%u)\n", etiquette, rep + 1);
+        rep = 0; pc_prec = e->pc;
+        printf("  [%s] -%03u insn=%u xpc=%u pc=0x%04x op=0x%04x sp=%04x ar2=%04x ar5=%04x intm=%u it=%u\n",
+               etiquette, k, e->insn, e->xpc, e->pc, e->op, e->sp, e->ar2, e->ar5, e->intm, e->it);
+    }
+    if (rep) printf("  [%s]        (x%u)\n", etiquette, rep + 1);
+}
 
 static void __attribute__((noinline, cold))
 sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_courante)
@@ -68,9 +87,9 @@ sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_cour
             (unsigned)s->xpc, s->pmst, (unsigned)s->brc, s->rsa, s->rea,
             (int)s->rptb_active, (int)s->rpt_active, (unsigned)s->rpt_count,
             (unsigned)s->delay_slots);
-    unsigned n = g_anneau_exec_idx < 64 ? g_anneau_exec_idx : 64;
+    unsigned n = g_anneau_exec_idx < 64 ? g_anneau_exec_idx : 64;   /* le vidage SP-CORRUPT garde ses 64 */
     for (unsigned k = n; k >= 1; k--) {
-        const C54xAnneauExec *e = &g_anneau_exec[(g_anneau_exec_idx - k) & 63];
+        const C54xAnneauExec *e = &g_anneau_exec[(g_anneau_exec_idx - k) % C54X_ANNEAU_N];
         fprintf(stderr, "[c54x] SP-CORRUPT-ANNEAU[-%02u] insn=%u pc=0x%04x op=0x%04x "
                 "xpc=%u sp=%04x->%04x ar2=%04x ar5=%04x rpt=%u/%u intm=%u it=%u(n=%u)%s\n",
                 k, e->insn, e->pc, e->op, e->xpc, e->sp, e->sp_apres, e->ar2, e->ar5,
@@ -2824,7 +2843,7 @@ int c54x_run(C54xState *s, int n_insns)
         /* [2026-09-23] ANNEAU-EXEC : etat AVANT l'instruction (voir
          * sp_corrupt_vidage). Evalue a chaque passage, donc a chaque iteration
          * de RPT, comme AR5-BAS juste au-dessus. */
-        C54xAnneauExec *ev_anneau = &g_anneau_exec[g_anneau_exec_idx++ & 63];
+        C54xAnneauExec *ev_anneau = &g_anneau_exec[g_anneau_exec_idx++ % C54X_ANNEAU_N];
         ev_anneau->insn = s->insn_count; ev_anneau->pc = exec_pc; ev_anneau->op = exec_op;
         ev_anneau->xpc = (uint8_t)s->xpc; ev_anneau->sp = s->sp; ev_anneau->sp_apres = s->sp;
         ev_anneau->ar2 = s->ar[2]; ev_anneau->ar5 = s->ar[5];

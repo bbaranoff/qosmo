@@ -196,7 +196,8 @@ static uint16_t g_pm_der_mav; static int g_pm_der_gain = -999, g_pm_der_ok;     
 static int faux_air_arfcn(uint32_t tick, int limite);
 static int faux_air_cellule(void);
 static uint16_t g_pm_fifo[BSP_PM_FIFO_N];
-static int16_t g_pm_fifo_gain[BSP_PM_FIFO_N];   /* gain RX de la fenetre (faux_air_gain), -999 inconnu */
+static int16_t g_pm_fifo_gain[BSP_PM_FIFO_N];
+static uint32_t g_pm_fifo_tick[BSP_PM_FIFO_N];  /* tick de livraison : au-dela de 3 trames l'entree est perimee */   /* gain RX de la fenetre (faux_air_gain), -999 inconnu */
 static uint32_t g_pm_fifo_w, g_pm_fifo_r;
 /* [2026-10-22 00:20] TRACE A CHAUD : `touch /dev/shm/apm_trace` -> chaque trame (pont.c [apmT]) et chaque
  * livraison en fenetre de mesure ([apmL]) sont tracees, 4000 lignes au plus ; `rm` pour arreter. Sert a
@@ -209,6 +210,20 @@ int calypso_apm_trace_on(void)
     n_lignes++;
     return 1;
 }
+/* [2026-10-22 00:25] RANG DE LA FENETRE DE MESURE DANS LA TRAME. En veille la L1 TI mesure deux frequences par
+ * trame (paires (1, 277) de IBA_I) : la 1re fenetre utilise la programmation du synthe faite en FIN de trame
+ * precedente (qbit 4851..4983), la 2e celle du DEBUT de la trame (qbit 323/671) -- releve du shm du 21/10 :
+ * trame N 323 -> 1, 4861 -> 614. La recherche « derniere programmation avant le qbit 5000 » rendait la meme
+ * pour les deux : les fenetres du voisin recevaient un burst de la cellule, 277 remontait a 30-42, la L1
+ * lancait une synchro voisine (tache 28, PM lues a 0) et finissait en RECOVERY. */
+static int pm_rang_fenetre(void)
+{
+    return g_pm_mav_tick == g_tick_courant ? g_pm_mav_n : 0;
+}
+static int pm_limite_qbit(int rang)
+{
+    return rang == 0 ? -1 : 2500;    /* -1 : seulement les trames precedentes */
+}
 static void bsp_pm_mav_noter(const int16_t *iq, int n)
 {
     if (g_pm_mav_tick != g_tick_courant) {
@@ -216,23 +231,25 @@ static void bsp_pm_mav_noter(const int16_t *iq, int n)
         g_pm_mav_tick = g_tick_courant; g_pm_mav_n = 0;
     }
     if (n <= 0) return;
+    int lim = pm_limite_qbit(g_pm_mav_n);      /* rang de cette fenetre dans la trame (avant ajout) */
     uint64_t acc = 0;
     for (int i = 0; i < n; i++) { int v = iq[i]; acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v; }
     uint32_t mav = (uint32_t)(acc / (uint32_t)n);
     uint16_t m16 = mav > 0xffff ? 0xffff : (uint16_t)mav;
     if (m16 >= 5000) g_pm_mav_cellule = m16;   /* dernier vrai burst vu dans une fenetre de mesure */
-    g_pm_der_mav = m16; g_pm_der_gain = faux_air_gain(g_tick_courant, 5000); g_pm_der_ok = 1;
+    g_pm_der_mav = m16; g_pm_der_gain = faux_air_gain(g_tick_courant, lim); g_pm_der_ok = 1;
     if (calypso_apm_trace_on())
-        printf("  [apmL] tick=%u fenetre=%d mav=%u arfcn=%d gain=%d file=%u\n", g_tick_courant,
-               calypso_rhea_dma_get_len_words() / 2, m16, faux_air_arfcn(g_tick_courant, 5000),
-               faux_air_gain(g_tick_courant, 5000), g_pm_fifo_w - g_pm_fifo_r);
+        printf("  [apmL] tick=%u fenetre=%d rang=%d mav=%u arfcn=%d gain=%d file=%u\n", g_tick_courant,
+               calypso_rhea_dma_get_len_words() / 2, g_pm_mav_n - 1, m16, faux_air_arfcn(g_tick_courant, lim),
+               faux_air_gain(g_tick_courant, lim), g_pm_fifo_w - g_pm_fifo_r);
     if (g_pm_mav_n < BSP_PM_MAV_N) g_pm_mav[g_pm_mav_n++] = m16;
     /* [2026-10-21 23:58] FILE PAR EVENEMENT. En veille la pompe sert les fenetres de mesure APRES le DONE
      * (PONT_DONE_TOT) : le 0 que le DSP ecrit pour cette PM n'est vu par apm_jamais_nul qu'au DONE suivant,
      * et l'association par trame lui donnait alors le MAV des fenetres de CETTE trame (bruit du voisin) --
      * sonde [apm-fort] : 0000->1280 sur les trames du burst, mais la L1 relisait le plancher. Chaque fenetre
      * livree empile son MAV ; chaque PM nulle trouvee dans une page R depile le plus ancien. */
-    g_pm_fifo_gain[g_pm_fifo_w % BSP_PM_FIFO_N] = (int16_t)faux_air_gain(g_tick_courant, 5000);
+    g_pm_fifo_gain[g_pm_fifo_w % BSP_PM_FIFO_N] = (int16_t)faux_air_gain(g_tick_courant, lim);
+    g_pm_fifo_tick[g_pm_fifo_w % BSP_PM_FIFO_N] = g_tick_courant;
     g_pm_fifo[g_pm_fifo_w++ % BSP_PM_FIFO_N] = m16;
     if (g_pm_fifo_w - g_pm_fifo_r > BSP_PM_FIFO_N) g_pm_fifo_r = g_pm_fifo_w - BSP_PM_FIFO_N;
 }
@@ -257,10 +274,15 @@ int calypso_bsp_pm_mav_fort(void)
 /* la PM nulle suivante (pont.c, apm_jamais_nul) : le MAV de la plus ancienne fenetre de mesure non consommee */
 uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav)
 {
+    while (g_pm_fifo_r != g_pm_fifo_w && (uint32_t)(g_tick_courant - g_pm_fifo_tick[g_pm_fifo_r % BSP_PM_FIFO_N]) > 3)
+        g_pm_fifo_r++;                       /* fenetre jamais mesuree : on ne la garde pas pour la suivante */
     if (g_pm_fifo_r != g_pm_fifo_w) {
         int g = g_pm_fifo_gain[g_pm_fifo_r % BSP_PM_FIFO_N];
         uint16_t m = g_pm_fifo[g_pm_fifo_r++ % BSP_PM_FIFO_N];
         if (depile_mav) *depile_mav = m;
+        if (calypso_apm_trace_on())
+            printf("  [apmS] tick=%u PM servie : mav=%u gain=%d (livree au tick %u), reste %u en file\n", g_tick_courant,
+                   m, g, g_pm_fifo_tick[(g_pm_fifo_r - 1) % BSP_PM_FIFO_N], g_pm_fifo_w - g_pm_fifo_r);
         return bsp_apm_de_mav(m, g);
     }
     if (depile_mav) *depile_mav = -1;
@@ -799,6 +821,11 @@ static int faux_air_arfcn(uint32_t tick, int limite)
     uint32_t n = w < CALYPSO_RF_ARFCN_N ? w : CALYPSO_RF_ARFCN_N - 4;   /* les plus vieilles peuvent etre reecrites */
     for (uint32_t k = 1; k <= n; k++) {
         const CalypsoRfProg *e = &m->e[(w - k) % CALYPSO_RF_ARFCN_N];
+        /* [2026-10-22 00:30] arfcn -1 = ecriture PWR de debut de trame (qbit 323/671, 0x003a : changement de
+         * mode, pas de reglage) decodee avec une PLL d'une autre bande. Le synthe n'est regle qu'en FIN de
+         * trame precedente (PLL 4851, bande 4861/4983, trace [tsp]) : on remonte jusqu'a ce reglage. Avant,
+         * « inconnu » valait « cellule » et les fenetres du voisin 614 recevaient le burst de l'ARFCN 1. */
+        if (e->arfcn < 0) continue;
         int32_t d = (int32_t)(e->fn - tick);
         if (d < 0 || (d == 0 && e->qbit <= limite)) return e->arfcn;
     }
@@ -1565,12 +1592,43 @@ static void nb_garde_poser(uint32_t fn, uint32_t tick, const uint8_t *bits)
     g_nb_garde[k].fn = fn; g_nb_garde[k].tick = tick; g_nb_garde[k].valide = 1;
     memcpy(g_nb_garde[k].bits, bits, 148);
 }
-static void nb_moduler(const uint8_t *bits, int16_t *iq, int marge)
+/* [2026-10-22 10:30] L'AGC SUR LES BURSTS NORMAUX. La L1 TI tire l'IL de la cellule de a_serv_demod[D_PM], que le
+ * DSP mesure sur les echantillons de la fenetre NB (l1ctl_pagc : IL = -(pm - agc programme ...)). Le banc les
+ * modulait a 30000 quel que soit le gain TRF6151 programme : pm fige a 169, la boucle PAGC tournait a vide (gain
+ * 112/124/136, IL 59/19, s_rxlev 69/101 > 63) et l'icone d'antenne disparaissait (rxlev*5/64 >= 5, iconsShowSignal).
+ * L'amplitude suit maintenant le gain de la fenetre : 30000 au gain de reference CALYPSO_BSP_NB_GAIN_REF (dB, ancre
+ * du niveau vu par le mobile : +1 dB -> rxlev -1 ; 124 : gain plancher 92, IL 83, s_rxlev 63/69 ; 148 : gain
+ * 112..124, IL 131, s_rxlev 45 = le voisin ARFCN 1 mesure par a_pm, runs du 22/10 10:15 et 10:21),
+ * CALYPSO_BSP_NB_AGC=0 pour revenir a 30000 fixe. Seulement les
+ * fenetres NB : les fenetres de mesure passent par le modele a_pm, qui ajoute deja le gain (bsp_apm_de_mav). */
+static int nb_amp(uint32_t tick)
+{
+    static int on = -1; static double ref;
+    static unsigned long n, n_ecrete; static int g_min = 999, g_max = -999;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_AGC"); on = !(e && *e == '0');
+                  e = calypso_getenv("CALYPSO_BSP_NB_GAIN_REF"); ref = (e && *e) ? atof(e) : 148.0; }
+    if (!on) return 30000;
+    int g = faux_air_gain(tick, 1250);
+    if (g == -999) return 30000;
+    double a = 30000.0 * pow(10.0, (g - ref) / 20.0);
+    if (a > 32000.0) { a = 32000.0; n_ecrete++; }
+    if (a < 30.0) a = 30.0;
+    n++; if (g < g_min) g_min = g; if (g > g_max) g_max = g;
+    if (n <= 10 || n % 2000 == 0)
+        printf("  [nb-agc] tick=%u gain=%d ref=%.0f -> amplitude %d [%lu NB, gain %d..%d, %lu ecretees]\n",
+               tick, g, ref, (int)a, n, g_min, g_max, n_ecrete);
+    return (int)a;
+}
+static void nb_moduler_amp(const uint8_t *bits, int16_t *iq, int marge, int amp)
 {
     static double sym = -2;
     if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }
-    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    gmsk_moduler(bits, 148, amp, 0.0, 0.5, iq + 2 * marge);
     gmsk_elargir(iq + 2 * marge, 148, sym);
+}
+static void nb_moduler(const uint8_t *bits, int16_t *iq, int marge)
+{
+    nb_moduler_amp(bits, iq, marge, 30000);
 }
 static int nb_marge_ti(void)
 {
@@ -1623,7 +1681,7 @@ static int pm_sur_cellule(void)
 {
     int cell = faux_air_cellule();
     if (cell < 0) return 1;
-    int a = faux_air_arfcn(g_tick_courant, 5000);
+    int a = faux_air_arfcn(g_tick_courant, pm_limite_qbit(pm_rang_fenetre()));   /* voir pm_rang_fenetre() */
     return a < 0 || a == cell;
 }
 static void dma_trace(const char *ou)
@@ -1674,7 +1732,7 @@ int calypso_bsp_nb_retenter(void)
     int total = nwin > marge + 148 ? nwin : marge + 148;
     if (total > 256) total = 256;
     memset(iq, 0, sizeof iq);
-    nb_moduler(g_nb_garde[k_min].bits, iq, marge);
+    nb_moduler_amp(g_nb_garde[k_min].bits, iq, marge, nb_amp(g_tick_courant));
     calypso_rif_flush();
     calypso_bsp_rx_burst(0, g_nb_garde[k_min].fn, iq, 2 * total);
     bsp.bursts_written++;
@@ -1925,7 +1983,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     if (hors_freq) faux_air_bruit(iq + 2 * marge, 148);
     else if (sb) sb_moduler(bits, iq + 2 * marge, g_ts0[i].fn);   /* [2026-09-30] voir sb_moduler() */
-    else    gmsk_moduler(bits, 148, 30000, 0.0, 0.5, iq + 2 * marge);
+    else    gmsk_moduler(bits, 148, (one_shot && nwin >= 150 && nwin < 190) ? nb_amp(tick_fn) : 30000,
+                         0.0, 0.5, iq + 2 * marge);
     if (!sb && !fcch && !hors_freq) {
         static double sym = -2;
         if (sym == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym = (e && *e) ? atof(e) : 0.3; }

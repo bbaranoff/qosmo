@@ -6,6 +6,7 @@
  */
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
+#include "calypso_bsp.h"
 
 static uint16_t data_read_locked(C54xState *s, uint16_t addr);
 /* DEMODIO: forward declaration - the helper is defined further down, but its
@@ -1082,7 +1083,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         static int rssi_on = -1;
         if (rssi_on < 0) rssi_on = calypso_gate("CALYPSO_PM_RSSI", 1);
         if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) || (addr >= 0x0848 && addr <= 0x084A)))
-            val = calypso_bsp_rssi_apm();
+            val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
         /* [2026-10-19] moniteur mailbox aussi sur le chemin rapide (voir data_read) */
         calypso_mbx(MBX_DSP_WR, addr, val, s->data[addr], s->pc, 0, s->insn_count);
         data_write_locked(s, addr, val);
@@ -1285,7 +1286,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                  * a_serv_demod, not a_pm. */
                 if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) ||
                             (addr >= 0x0848 && addr <= 0x084A))) {
-                    val = calypso_bsp_rssi_apm();
+                    val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
                 }
             }
         }
@@ -3007,6 +3008,39 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                  * (KEEP-IMR in calypso_c54x.c), which restores bit5 only when it
                  * drops. */
             }
+            /* [2026-10-22 00:45] [imr0] (stdout, 40 lignes ; les traces [c54x] de stderr sont filtrees par
+             * verbosite.c) : Magnetite sur TCH, une trame puis IMR=0000 + IDLE pour toujours (piege de la ROM ?).
+             * Qui met l'IMR a zero, depuis ou, avec quelle pile de retour. */
+            /* [2026-10-22 00:50] [imrW] : TOUTES les ecritures de l'IMR hors boot (60 lignes), avec DP et les
+             * mots de la page DP que la routine 1:e4d1 (sauvegarde / restauration de l'IMR ?) lit et ecrit. */
+            if (s->insn_count > 1000000 && (uint16_t)val != s->imr) {
+                static unsigned nw;
+                if (nw++ < 60) {
+                    uint16_t dpb = (uint16_t)((s->st0 & 0x1ff) << 7);
+                    printf("  [imrW] IMR 0x%04x -> 0x%04x PC=%u:0x%04x op=0x%04x DP=0x%03x d[+05]=%04x d[+12]=%04x "
+                           "d[+30]=%04x d[+50]=%04x A=%010llx B=%010llx AR2=%04x insn=%u\n",
+                           s->imr, (uint16_t)val, s->xpc, s->pc, s->prog[s->pc], s->st0 & 0x1ff,
+                           s->data[(uint16_t)(dpb | 0x05)], s->data[(uint16_t)(dpb | 0x12)],
+                           s->data[(uint16_t)(dpb | 0x30)], s->data[(uint16_t)(dpb | 0x50)],
+                           (unsigned long long)(s->a & 0xFFFFFFFFFFULL), (unsigned long long)(s->b & 0xFFFFFFFFFFULL),
+                           s->ar[2], s->insn_count);
+                }
+            }
+            if (val == 0 && s->imr != 0) {
+                static unsigned n0;
+                if (n0++ < 40)
+                    printf("  [imr0] IMR 0x%04x -> 0 PC=0x%04x op=0x%04x XPC=%d SP=0x%04x ret=%04x %04x %04x %04x "
+                           "AR0..3=%04x %04x %04x %04x A=%010llx B=%010llx insn=%u\n",
+                           s->imr, s->pc, s->prog[s->pc], s->xpc, s->sp,
+                           s->data[s->sp], s->data[(uint16_t)(s->sp + 1)], s->data[(uint16_t)(s->sp + 2)],
+                           s->data[(uint16_t)(s->sp + 3)], s->ar[0], s->ar[1], s->ar[2], s->ar[3],
+                           (unsigned long long)(s->a & 0xFFFFFFFFFFULL), (unsigned long long)(s->b & 0xFFFFFFFFFFULL),
+                           s->insn_count);
+                if (n0 <= 6 && s->insn_count > 1000000) {   /* hors boot : le chemin qui y mene */
+                    extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
+                    c54x_anneau_vider_stdout("imr0-chemin", 512);
+                }
+            }
             s->imr = val; return;
         case MMR_IFR: {
             /* IFR-CLEAR-W (unconditional, capped): does the go-live code write
@@ -3671,10 +3705,27 @@ inline uint32_t c54x_prog_xlate(const C54xState *s, uint16_t addr16)
      * fetch prog[0x3ee00], past the 8K of PROM3, which reads as empty (op=0x0000)
      * and sends the post-correlator FB stage running away. High ROM must ignore
      * XPC. */
-    if (addr16 >= 0x8000 && addr16 < 0xE000) {
+    /* [2026-10-22 10:45] SAUF EN PAGES 1 ET 2 : PROM1 (0x18000) et PROM2 (0x28000) font 32K et couvrent leur
+     * 0xE000-0xFFFF, qui n'a rien a voir avec PDROM (15886 octets differents sur 16384). Magnetite sur TCH :
+     * 1:bc82 `call 0xe4d1` (routine PROM1 « ld #150,dp ») executait PDROM 0xe4d1, le milieu du depaquetage du
+     * codec FR, avec AR5=0xffff -> `stl b,*ar5+` puis `andm #0x1f8,*ar5` sur l'IMR (MMR 0) : IMR=0, DSP muet,
+     * PM=0 sur chaque trame TCH, RECOVERY de la L1 et perte du reseau en appel. PROM3 (8K) garde le repli
+     * page 0. CALYPSO_XPC_HAUT=0 : ancien comportement. */
+    if (addr16 >= 0x8000 && (addr16 < 0xE000 || c54x_xpc_haut_banque(s->xpc))) {
         return (((uint32_t)s->xpc << 16) | addr16) & (C54X_PROG_SIZE - 1);
     }
-    return addr16;   /* 0x0000-0x7FFF on-chip + 0xE000-0xFFFF PROM1 ROM (XPC-independent) */
+    return addr16;   /* 0x0000-0x7FFF on-chip + 0xE000-0xFFFF PDROM en page 0 (et 3) */
+}
+
+int g_c54x_xpc_haut = -1;
+int c54x_xpc_haut_init(void)
+{
+    if (g_c54x_xpc_haut < 0) {
+        g_c54x_xpc_haut = calypso_gate("CALYPSO_XPC_HAUT", 1);
+        fprintf(stderr, "[c54x] XPC-HAUT %s : 0xE000-0xFFFF %s\n", g_c54x_xpc_haut ? "ACTIF" : "INACTIF",
+                g_c54x_xpc_haut ? "banque par XPC en pages 1 et 2 (PROM1/PROM2)" : "toujours en page 0");
+    }
+    return g_c54x_xpc_haut;
 }
 
 /* [2026-09-23] Definition hors ligne, gardee pour les appelants externes

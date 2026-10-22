@@ -5,6 +5,7 @@
 #include "hw/arm/calypso/calypso_rf_arfcn.h"
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 
 /* [2026-10-21] FAUX AIR : chaque programmation du synthetiseur part vers c54x_exe
@@ -79,6 +80,19 @@ void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn)
                        ((uint32_t)tsp.tx[2] << 8) | tsp.tx[3];
             }
             calypso_trf6151_tsp_write(dev_idx, dout);
+            /* [2026-10-22] TRACE A CHAUD (`touch /dev/shm/tsp_trace`, 6000 lignes) : toutes les ecritures TSP.
+             * En veille Magnetite, aucune programmation vers le voisin de la liste BA (277 cote L1 TI) n'est
+             * vue par le decodage TRF6151 : ses fenetres de mesure sont classees « cellule » par le faux air. */
+            {
+                static unsigned n_appels, n_lignes; static int on;
+                if (n_appels++ % 256 == 0) on = (access("/dev/shm/tsp_trace", F_OK) == 0);
+                if (on && n_lignes < 6000) {
+                    n_lignes++;
+                    fprintf(stderr, "[tsp] fn=%u qbit=%d dev=%u bits=%u dout=0x%08x reg=%u -> arfcn=%d gain=%d\n",
+                            fn, calypso_tpu_qbit(), dev_idx, bitlen, dout, dout & 7,
+                            calypso_trf6151_arfcn(), calypso_trf6151_total_gain_db());
+                }
+            }
             /* TRF6151 RX (gain, 2026-10-21), PLL ou PWR (bande), TSPEN1 ou 2 */
             if ((dev_idx == 1 || dev_idx == 2) && ((dout & 7) == 0 || (dout & 7) == 1 || (dout & 7) == 2)) {
                 rf_arfcn_publier(fn);

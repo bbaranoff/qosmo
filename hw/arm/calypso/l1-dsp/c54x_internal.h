@@ -449,6 +449,14 @@ uint16_t c54x_ovly_bas(void);
  * fonction prog_fetch reste exportee (pont.c l'appelle) ; c54x_mem.c la definit
  * apres un #undef. */
 extern uint16_t g_c54x_ovly_bas;   /* 0 = pas encore resolu */
+/* [2026-10-22] 0xE000-0xFFFF banque en pages 1 et 2 (PROM1/PROM2 de 32K), voir c54x_prog_xlate */
+extern int g_c54x_xpc_haut;        /* -1 = pas encore resolu */
+int c54x_xpc_haut_init(void);
+static inline int c54x_xpc_haut_banque(uint16_t xpc)
+{
+    if ((xpc & 0x7f) != 1 && (xpc & 0x7f) != 2) return 0;
+    return __builtin_expect(g_c54x_xpc_haut >= 0, 1) ? g_c54x_xpc_haut : c54x_xpc_haut_init();
+}
 static inline uint16_t c54x_prog_fetch_vite(C54xState *s, uint16_t pc)
 {
     if (s->pmst & PMST_OVLY) {
@@ -457,7 +465,7 @@ static inline uint16_t c54x_prog_fetch_vite(C54xState *s, uint16_t pc)
         if (pc >= bas && pc < 0x2800)
             return s->data[pc];
     }
-    if (pc >= 0x8000 && pc < 0xE000)
+    if (pc >= 0x8000 && (pc < 0xE000 || c54x_xpc_haut_banque(s->xpc)))
         return s->prog[(((uint32_t)s->xpc << 16) | pc) & (C54X_PROG_SIZE - 1)];
     return s->prog[pc];
 }
