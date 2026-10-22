@@ -42,7 +42,8 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page);  
 int  calypso_bsp_service(uint32_t current_fn);
 int  calypso_bsp_sb_retenter(void);
 int  calypso_bsp_nb_retenter(void);
-void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn);   /* [2026-10-22] fn exact du dedie */
+void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn);
+unsigned calypso_bsp_dedie_entrees(void);   /* [2026-10-22] compteur d'entrees en dedie TI */   /* [2026-10-22] fn exact du dedie */
 int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* [2026-10-21] fn appris au dernier SB */   /* [2026-10-21] NB garde en dedie TI */
 void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH pendant n ticks ([sbwin]) */     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
 

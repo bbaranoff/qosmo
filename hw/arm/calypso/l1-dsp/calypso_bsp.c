@@ -780,8 +780,11 @@ void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
 /* [2026-10-21] firmware TI en mode dedie (taches ALLC vues par montant.c) : voir CALYPSO_BSP_DEDIE_DECAL */
 static int g_dedie_ti;
 extern unsigned long calypso_bsp_routeur_bilan(char *buf, size_t n);
+static unsigned g_dedie_entrees;   /* [2026-10-22] entrees en dedie TI (pont.c : un RACH a-t-il abouti ?) */
+unsigned calypso_bsp_dedie_entrees(void) { return g_dedie_entrees; }
 void calypso_bsp_set_dedie_ti(int actif)
 {
+    if (actif && !g_dedie_ti) g_dedie_entrees++;
     char b[160] = "";
     if (actif != g_dedie_ti) {
         if (!actif) calypso_bsp_routeur_bilan(b, sizeof b);
