@@ -2862,10 +2862,13 @@ int c54x_run(C54xState *s, int n_insns)
                        a2, s->data[(uint16_t)(a2 + 9)], s->data[0x3fc1], s->data[0x0809], s->data[0x081d],
                        (int16_t)s->data[0x3fba], s->data[0x4364], s->xpc, s->insn_count);
         }
-        if (exec_pc >= 0x2800 && exec_pc < 0x7000 && s->insn_count > 3000000) {
+        /* [2026-10-22 11:45] + la zone des registres (pc < 0x60) : saut en 0x0000 xpc=1 puis ret en boucle,
+         * SP-CORRUPT (appel au 600 de 11:40). */
+        if (((exec_pc >= 0x2800 && exec_pc < 0x7000) || exec_pc < 0x0060) && s->insn_count > 3000000) {
             static unsigned n_trou; static uint16_t pc_prec_trou;
             uint16_t pp = g_anneau_exec[(g_anneau_exec_idx - 2) % C54X_ANNEAU_N].pc;
-            if (!(pp >= 0x2800 && pp < 0x7000) && n_trou < 3) {
+            bool pp_trou = (pp >= 0x2800 && pp < 0x7000) || pp < 0x0060;
+            if (!pp_trou && n_trou < 4) {
                 n_trou++;
                 printf("  [trou-prog] entree dans la memoire vide pc=0x%04x depuis pc=0x%04x xpc=%u pmst=%04x SP=%04x pile=%04x %04x %04x insn=%u\n",
                        exec_pc, pp, s->xpc, s->pmst, s->sp, s->data[s->sp], s->data[(uint16_t)(s->sp + 1)],

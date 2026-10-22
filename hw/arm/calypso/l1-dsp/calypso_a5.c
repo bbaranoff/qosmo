@@ -53,6 +53,7 @@ static struct {
     uint16_t flux[A5_N_FLUX];
     unsigned long n_calculs;
     unsigned long n_recales;   /* COUNT recales sur dernier depot + 1 */
+    unsigned long n_dl_bsp;    /* [2026-10-22] flux descendant pris au fn du BSP */
     uint32_t dernier_fn;       /* [2026-10-15] fn du dernier flux A5/1-2 calcule (couverture) */
     unsigned dernier_algo;
 } a5;
@@ -131,10 +132,36 @@ static void a5_calculer(C54xState *s, unsigned algo)
         }
     }
 
-    ubit_t dl[114], ul[114];
+    /* [2026-10-22 12:55] FLUX DESCENDANT : LE FN DU BURST QUE LE BSP DEPOSE A CE TICK. La course decrite plus haut
+     * laisse a_a5fn une ou deux trames devant le burst selon les runs : SDCCH a « ecart +1 » (juste), TCH a
+     * « ecart +2 » (22/10 12:46) -> FACCH descendant (UA) en Fire KO, RR Assignment Failure. Le calage du BSP
+     * (calypso_bsp_fn_bts_du_tick) est exact pour la trame jouee au tick courant ; on le prend pour le flux
+     * descendant s'il est a 3 trames au plus. Le flux montant garde le COUNT du firmware (le montant marche).
+     * CALYPSO_A5_DL_BSP=0 : ancien comportement. */
+    uint32_t fn_dl = fn;
+    {
+        static int dl_bsp = -1;
+        if (dl_bsp < 0) { const char *e = getenv("CALYPSO_A5_DL_BSP"); dl_bsp = !(e && *e == '0'); }
+        extern uint32_t calypso_trx_get_fn(void);
+        extern int calypso_bsp_fn_bts_du_tick(uint32_t tick, uint32_t *fn);
+        uint32_t ft;
+        if (dl_bsp && calypso_bsp_fn_bts_du_tick(calypso_trx_get_fn(), &ft)) {
+            int32_t d = (int32_t)ft - (int32_t)fn;
+            if (d >= -3 && d <= 3 && d != 0) { fn_dl = ft; a5.n_dl_bsp++; }
+            extern unsigned calypso_daram_last_fn;
+            static unsigned n_sd;
+            if (n_sd < 400 && ft != fn) {
+                n_sd++;
+                if (n_sd <= 400) printf("  [a5-dl] tick=%u a5fn=%u bsp=%u dernier_depot=%u -> flux DL %u (p26 %u)\n",
+                                        calypso_trx_get_fn(), fn, ft, calypso_daram_last_fn, fn_dl, fn_dl % 26u);
+            }
+        }
+    }
+    ubit_t dl[114], ul[114], dl2[114];
     if (osmo_a5((int)algo, key, fn, dl, ul) < 0) {
         memset(a5.flux, 0, sizeof a5.flux);
     } else {
+        if (fn_dl != fn && osmo_a5((int)algo, key, fn_dl, dl2, NULL) == 0) memcpy(dl, dl2, sizeof dl);
         empaqueter(dl, &a5.flux[0]);
         empaqueter(ul, &a5.flux[8]);
         a5.dernier_fn = fn;

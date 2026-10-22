@@ -319,6 +319,15 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
              * The write is inert here only because ENABLE is already 0. Count
              * those passes instead of repeating them, and log everything that
              * CHANGES the state or sets ENABLE/DMA_START. */
+            /* [2026-10-22 12:20] [dma-arm] chaque armement/desarmement du canal RX en dedie TI (CALYPSO_BSP_DMA_TRACE=1) :
+             * quand la ROM ouvre la fenetre NB (151) ou de mesure (64) par rapport au depot du banc. */
+            if (n == 1 && ((v ^ before) & (CTRL_ENABLE | CTRL_ONE_SHOT))) {
+                extern int calypso_bsp_dma_trace_on(void); extern uint32_t calypso_trx_get_fn(void);
+                if (calypso_bsp_dma_trace_on())
+                    printf("  [dma-arm] tick=%u insn=%u pc=0x%04x %s one_shot=%d fenetre=%u\n", calypso_trx_get_fn(),
+                           rd_dsp ? rd_dsp->insn_count : 0, rd_dsp ? (rd_dsp->pc & 0xffff) : 0,
+                           (v & CTRL_ENABLE) ? "ARME" : "desarme", !!(v & CTRL_ONE_SHOT), rd.ch[n].algth / 4);
+            }
             if (n == 1 && (v & CTRL_ENABLE) && !(before & CTRL_ENABLE) && !(v & CTRL_ONE_SHOT))
                 rd_skip_pending = arm_skip_words();      /* FB search armed: set the TOA origin */
             bool inerte = (rd.ch[n].ctrl == before) && !(v & CTRL_DMA_START);

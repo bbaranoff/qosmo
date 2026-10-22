@@ -749,6 +749,7 @@ static int64_t g_ts0_offset = INT64_MIN;
  * plus rapide que la BTS) : un RACH date par lui tombait a fn-1 ou fn+1 de ce que le mobile attend (RA_C 7797,
  * publie 7796), IMM ASS ignorees. calypso_bsp_fn_mobile_du_tick() sert a dater le RACH (pont.c tx_tsp_fn). */
 static int64_t g_off_mobile = INT64_MIN;
+static int g_off_rac_vu;   /* [2026-10-22] l'offset vient d'un RA_C : les SB livres ne le remplacent plus */
 int calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn)
 {
     if (g_off_mobile == INT64_MIN) return 0;
@@ -764,16 +765,37 @@ int calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn)
 static uint32_t g_a5fn_tick; static int g_a5fn_vu;   /* derniere trame ou a_a5fn a donne le fn du mobile */
 void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
 {
+    /* [2026-10-22 12:15] PAR DEFAUT, a_a5fn ne fixe PLUS l'offset : il oscille de +-1 (766/767 quand RA_C dit 767,
+     * selon la page W lue au tick) et le premier RACH de l'acces suivant partait faux d'une trame -> un SDCCH en
+     * trop, « lchan allocation failed ... Timeout ». RA_C (calypso_bsp_off_mobile_rac) fait foi ; a_a5fn garde
+     * seulement l'alignement dedie actif. CALYPSO_BSP_OFF_A5FN=1 : ancien comportement. */
     static int on = -1;
-    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_OFF_A5FN"); on = !(e && *e == '0'); }
-    if (!on) return;
-    int64_t off = (int64_t)fn - (int64_t)tick;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_OFF_A5FN"); on = (e && *e == '1'); }
     g_a5fn_tick = tick; g_a5fn_vu = 1;
+    if (!on && g_off_mobile != INT64_MIN) return;
+    int64_t off = (int64_t)fn - (int64_t)tick;
     if (off != g_off_mobile) {
         static unsigned n;
         if (n++ < 30)
             printf("  [off-mobile] a_a5fn fn=%u tick=%u : offset %lld -> %lld\n", fn, tick,
                    g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
+        g_off_mobile = off;
+    }
+}
+/* [2026-10-22 12:10] ... et la VERITE du mobile : RA_C (trace L1 TI dans rvinterf.log) donne le fn auquel IL a
+ * emis son RACH. fn % 42432 seulement (la trace) : on garde le multiple de 42432 de l'offset courant. Le decalage
+ * du mobile derive (501 -> 503 en 9000 ticks) pendant que celui de la BTS (SB, BCCH) recule (501 -> 495) : les
+ * estimations venues de la BTS datent les RACH a -1..-3 et livrent les mauvaises trames en dedie. */
+void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
+{
+    int64_t ref = g_off_mobile != INT64_MIN ? g_off_mobile : (g_ts0_offset != INT64_MIN ? g_ts0_offset : 0);
+    int64_t m = ((int64_t)fn42432 - (int64_t)(tick % 42432u)) % 42432; if (m < 0) m += 42432;
+    int64_t d = (m - (ref % 42432 + 42432) % 42432) % 42432; if (d < 0) d += 42432; if (d > 21216) d -= 42432;
+    int64_t off = ref + d;
+    g_a5fn_tick = tick; g_a5fn_vu = 1; g_off_rac_vu = 1;
+    if (off != g_off_mobile) {
+        printf("  [off-mobile] RA_C fn%%42432=%u tick=%u : offset du mobile %lld -> %lld\n", fn42432, tick,
+               g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
         g_off_mobile = off;
     }
 }
@@ -1269,6 +1291,18 @@ static bool bsp_dedie_trame(uint32_t fn)
     if (g_dedie_genre == BSP_DEDIE_TCH || g_dedie_genre == BSP_DEDIE_PDCH) {
         return true;    /* TCH, PDCH : tout l'intervalle est a la connexion */
     }
+    /* [2026-10-22] FIRMWARE TI EN DEDIE SUR UN SDCCH/8 : TOUTES LES TRAMES DE L'INTERVALLE. Le banc ne sait pas
+     * quel sous-canal le mobile a accepte : la BSC repond a chaque RACH par un SDCCH/8 different (SS1, SS2...) et
+     * le pont annonce la derniere IMM ASS ; le mobile, lui, prend celle de SA reference. Mauvais sous-canal ->
+     * SABM sans UA, « lchan allocation failed ... WAIT_RLL_RTP_ESTABLISH: Timeout » (22/10 11:59). Une fois le
+     * firmware en dedie (g_dedie_ti : taches montantes postees, IMM ASS acceptee), il ne lit plus TS0 : on lui
+     * donne tout TS1, il y prend son sous-canal. AVANT (attente de l'IMM ASS), le SS seul : il a besoin de TS0.
+     * CALYPSO_BSP_SDCCH8_TOUT=0 pour revenir au sous-canal annonce. */
+    if (g_dedie_genre == 1 && g_dedie_ti) {
+        static int tout = -1;
+        if (tout < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SDCCH8_TOUT"); tout = !(e && *e == '0'); }
+        if (tout) return true;
+    }
     unsigned p51 = fn % 51u;
     unsigned ss = (unsigned)g_dedie_ss & 7u;
     if (p51 >= 4u * ss && p51 <= 4u * ss + 3u) {
@@ -1574,7 +1608,9 @@ int calypso_bsp_sb_retenter(void)
     /* Le SCH est livre a ce tick-ci : c'est lui qui fixe l'offset ARM-tick,
      * exactement comme la livraison native en fenetre SB (bsp_ts0_livrer). */
     int64_t off = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant - sb_fin_trame();
-    g_off_mobile = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant;   /* ce que le mobile vient d'apprendre */
+    /* [2026-10-22] plus apres un RA_C : le mobile ne recale pas son fn sur ces SB (offset RA_C 752, SB 758 au
+     * meme moment, 22/10 12:20) ; les SDCCH etaient livres six trames a cote (a_cd FIRE KO 184/250). */
+    if (!g_off_rac_vu) g_off_mobile = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant;   /* ce que le mobile vient d'apprendre */
     int recale = (off != g_ts0_offset);
     if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
     if (g_sb_relivres <= 100 || g_sb_relivres % 100 == 0)
@@ -1718,6 +1754,13 @@ static void dma_trace(const char *ou)
     printf("  [dma] tick=%u %s : armee=%d one_shot=%d fenetre=%d rif=%d\n", g_tick_courant, ou, armee, os, len, calypso_rif_level());
 }
 void calypso_bsp_dma_trace(const char *ou) { dma_trace(ou); }
+/* [2026-10-22] trace des armements et depots en dedie TI (calypso_rhea_dma.c [dma-arm], rx_burst [dma-dep]) */
+int calypso_bsp_dma_trace_on(void)
+{
+    static int on = -1; static unsigned n;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DMA_TRACE"); on = (e && *e == '1'); }
+    return on && g_dedie_ti && n++ < 20000;
+}
 unsigned long calypso_bsp_routeur_bilan(char *buf, size_t n)
 {
     snprintf(buf, n, " (routeur : %lu NB relivres, %lu expires, %lu mesures servies)", g_nb_relivres, g_nb_expires, g_pm_servies);
@@ -1737,9 +1780,30 @@ int calypso_bsp_nb_retenter(void)
         if (sur_tch < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER_TCH"); sur_tch = (e && *e == '1'); }
         if (!sur_tch && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) return 0;
     }
+    /* [2026-10-22 11:50] [nb-etat] 0 NB relivre sur tous les runs (milliers d'expires) : l'etat DMA vu ici. */
+    if (g_dedie_ti) {
+        static unsigned n_et; static uint32_t t_et;
+        int ng = 0; for (int k = 0; k < NB_GARDE_N; k++) ng += g_nb_garde[k].valide;
+        if (ng && (n_et < 300 || g_tick_courant - t_et > 500)) {
+            n_et++; t_et = g_tick_courant;
+            printf("  [nb-etat] tick=%u armee=%d one_shot=%d nwin=%d garde=%d genre=%d tn=%d\n", g_tick_courant,
+                   (int)calypso_rhea_dma_rx_armed(), (int)calypso_rhea_dma_one_shot(),
+                   calypso_rhea_dma_get_len_words() / 2, ng, (int)g_dedie_genre, g_dedie_tn);
+        }
+    }
     if (!calypso_rhea_dma_rx_armed() || !calypso_rhea_dma_one_shot()) return 0;
     int nwin = calypso_rhea_dma_get_len_words() / 2;
     if (nwin <= 0) return 0;
+    /* [2026-10-22 12:00] SUR LE TCH : UNE LIVRAISON PAR TICK, JAMAIS SUR UNE IT DMA EN ATTENTE. Le plantage du
+     * 21/10 23:34 (deux NB gardes relivres dans le meme tick, IFR bit 14 pendant, ROM a pc=0) se reproduit
+     * avec CALYPSO_BSP_NB_RETENTER_TCH=1 (22/10 11:43, 11:56 : saut hors ROM depuis 1:e9bd). Sans relivraison,
+     * 70 % des fenetres NB du TCH restent vides (TOA=0, SNR=0) : FACCH descendant (UA) jamais decode. */
+    if (g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
+        static uint32_t t_livre = 0xffffffffu;
+        if (t_livre == g_tick_courant) return 0;
+        if (bsp.dsp && (bsp.dsp->ifr & (1u << 14))) return 0;
+        if (nwin >= 150 && nwin < 190) t_livre = g_tick_courant;
+    }
     if (nwin < 150) return pm_servir(nwin);
     if (nwin >= 190) return 0;                                  /* fenetre SB : calypso_bsp_sb_retenter */
     /* la NB est armee : le plus ancien burst garde encore frais (2 ticks) */
@@ -2036,7 +2100,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     if (sb && one_shot && nwin >= 190) {
         int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn - sb_fin_trame();
-        g_off_mobile = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;
+        if (!g_off_rac_vu) g_off_mobile = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;   /* [2026-10-22] voir sb_retenter */
         if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
                                         g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
         if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
@@ -2297,6 +2361,16 @@ static void bsp_ts0_service(uint32_t tick_fn)
                                  if (decal) printf("  [ts0] decalage en dedie TI : %+d trame(s)\n", decal); }
             if (decal && g_dedie_ti) { w = (w + decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX; }
         }
+        /* [2026-10-22 12:50] TCH SEUL : CALYPSO_BSP_TCH_DECAL=<n> trames sur le calage BCCH. En SDCCH le A5 du DSP
+         * tombe sur le burst livre (+1 structurel, [a5] « ecart +1 ») ; en TCH « ecart +2 » : une trame de trop,
+         * FACCH descendant (UA) en Fire KO, RR Assignment Failure. */
+        {
+            static int tch_decal = 99;
+            if (tch_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_TCH_DECAL"); tch_decal = (e && *e) ? atoi(e) : 0; }
+            if (tch_decal && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
+                w = (w + tch_decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
+            }
+        }
         /* [2026-10-22] EN DEDIE TI, LA TRAME DU MOBILE. La L1 TI ecrit a_a5fn = le fn qu'elle traite (pont.c ->
          * g_off_mobile) ; l'offset du BSP, cale sur le BCCH, avait 1 a 2 trames de retard sur lui en TCH
          * ([a5] fn=25548, dernier depot BSP fn=25547) : desentrelacement FACCH/TCH decale, A5 au mauvais fn ->
@@ -2307,8 +2381,18 @@ static void bsp_ts0_service(uint32_t tick_fn)
             static int a5fn_on = -1;
             if (a5fn_on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_A5FN"); a5fn_on = !(e && *e == '0'); }
             if (a5fn_on && g_dedie_ti && g_a5fn_vu && g_off_mobile != INT64_MIN &&
-                (uint32_t)(tick_fn - g_a5fn_tick) < 200) {
-                int64_t wm = ((int64_t)tick_fn + g_off_mobile) % (int64_t)BSP_FN_MAX; if (wm < 0) wm += BSP_FN_MAX;
+                (uint32_t)(tick_fn - g_a5fn_tick) < 3000) {
+                /* [2026-10-22 12:25] RA_C rapporte la trame SUIVANT l'emission : en dedie le mobile ouvre ses
+                 * fenetres SDCCH/8 SS3 a (tick + offset RA_C) % 51 = 13..16 / 45..48 au lieu de 12..15 / 44..47 ->
+                 * une trame de moins pour la reception (CALYPSO_BSP_DEDIE_DL_DECAL, defaut -1). */
+                static int dl_decal = 99;
+                if (dl_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_DL_DECAL"); dl_decal = (e && *e) ? atoi(e) : -1; }
+                /* [2026-10-22 12:30] le TCH a son propre reglage (CALYPSO_BSP_TCH_DL_DECAL, defaut = celui du SDCCH) :
+                 * [a5] du TCH : fn dechiffre = dernier depot + 2 avec -1 */
+                static int tch_decal = 99;
+                if (tch_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_TCH_DL_DECAL"); tch_decal = (e && *e) ? atoi(e) : dl_decal; }
+                int dec = g_dedie_genre == BSP_DEDIE_TCH ? tch_decal : dl_decal;
+                int64_t wm = ((int64_t)tick_fn + g_off_mobile + (g_off_rac_vu ? dec : 0)) % (int64_t)BSP_FN_MAX; if (wm < 0) wm += BSP_FN_MAX;
                 static unsigned n_dm;
                 if (wm != w && (n_dm++ < 20 || n_dm % 2000 == 0))
                     printf("  [dedie-a5fn] tick=%u trame BCCH %lld -> trame du mobile %lld (%+lld) [%u]\n", tick_fn,
@@ -3627,6 +3711,10 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         return;
     }
     if (n_int16 <= 0 || iq == NULL) return;
+    if (calypso_bsp_dma_trace_on())
+        printf("  [dma-dep] tick=%u insn=%u fn=%u tn=%u n=%d armee=%d one_shot=%d fenetre=%d\n", g_tick_courant,
+               bsp.dsp->insn_count, (unsigned)fn, (unsigned)tn, n_int16 / 2, (int)calypso_rhea_dma_rx_armed(),
+               (int)calypso_rhea_dma_one_shot(), calypso_rhea_dma_get_len_words() / 2);
     if (calypso_rhea_dma_one_shot() && calypso_rhea_dma_get_len_words() / 2 > 0 &&
         calypso_rhea_dma_get_len_words() / 2 < 150)
         bsp_pm_mav_noter(iq, n_int16);    /* fenetre de mesure : voir calypso_bsp_rssi_apm_k() */
