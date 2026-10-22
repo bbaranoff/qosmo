@@ -1077,6 +1077,39 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                     val, s->data[0x3d89], s->pc & 0xffff, s->st0 & 0x1ff, s->st0, s->st1, s->sp,
                     s->imr, s->ifr, s->ar[2], s->bk, s->insn_count), fflush(stdout);
     }
+    /* [2026-10-22 11:10] [etat-tch] data[0x3fba] : etat de la machine TCH de PROM0 (be3e : liste = 0xde27 +
+     * etat*12 + (fn%26)/2). -1 (init : b456, c442, c8e1, PDROM e210) puis le dispatcher sans st #0 -> liste hors
+     * table, entree 0x01f6, DSP fige (Magnetite, 1er appel). Qui l'ecrit, depuis ou, avec d_ctrl_tch/d_task_d. */
+    if (addr == 0x3fba && val != s->data[0x3fba] && s->insn_count > 3000000) {
+        static unsigned n;
+        if (n++ < 80) {
+            const uint16_t *w0 = &s->data[0x0800], *w1 = &s->data[0x0814];
+            printf("  [etat-tch] 3fba %d -> %d PC=0x%04x xpc=%u | W0 task_d=%u ctrl_tch=%04x d_fn=%04x | W1 task_d=%u ctrl_tch=%04x d_fn=%04x | 4364=%u 3fb8=%04x insn=%u\n",
+                   (int16_t)s->data[0x3fba], (int16_t)val, s->pc & 0xffff, s->xpc, w0[0], w0[9], w0[8], w1[0], w1[9], w1[8],
+                   s->data[0x4364], s->data[0x3fb8], s->insn_count);
+        }
+    }
+    /* [2026-10-22 11:30] [base-tch] base de la table d'etats TCH (b928 : 0xde57 si data[0x3fab] bit8, sinon 0xde27
+     * en b930). 0xde57 + etat 4 -> liste 0xbc5a (hors table). Qui pose 0xde57 et avec quelle page (0x3fc1, mot 9 =
+     * d_ctrl_tch, bit15 = B_SUBCHANNEL -> b829 orm #256,*(0x3fab)). */
+    if (addr == 0x4366 && val == 0xde57 && s->insn_count > 3000000) {
+        static unsigned n;
+        if (n++ < 40) {
+            uint16_t pg = s->data[0x3fc1];
+            printf("  [base-tch] 4366 <- de57 PC=0x%04x 3fab=%04x 3fc1=%04x mot9=%04x mot0=%04x 3fba=%d 4364=%u insn=%u\n",
+                   s->pc & 0xffff, s->data[0x3fab], pg, s->data[(uint16_t)(pg + 9)], s->data[pg],
+                   (int16_t)s->data[0x3fba], s->data[0x4364], s->insn_count);
+        }
+    }
+    if (addr == 0x3fab && (val & 0x100) && !(s->data[0x3fab] & 0x100) && s->insn_count > 3000000) {
+        static unsigned n;
+        if (n++ < 40) {
+            uint16_t pg = s->data[0x3fc1];
+            printf("  [base-tch] 3fab bit8 <- 1 (%04x) PC=0x%04x 3fc1=%04x mot9=%04x mot0=%04x 3fba=%d 4364=%u insn=%u\n",
+                   val, s->pc & 0xffff, pg, s->data[(uint16_t)(pg + 9)], s->data[pg], (int16_t)s->data[0x3fba],
+                   s->data[0x4364], s->insn_count);
+        }
+    }
     if (c54x_rapide) {                     /* see calypso_c54x.h */
         /* the one functional substitution of the slow path: a_pm from the
          * measured downlink magnitude (CALYPSO_PM_RSSI, default 1) */

@@ -1853,6 +1853,41 @@ int c54x_exec_one(C54xState *s)
             int is_call = (op & 1) != 0;
             uint16_t tgt = (uint16_t)((is_b ? s->b : s->a) & 0xFFFF);
             uint16_t src_pc = s->pc;
+            /* [2026-10-22 10:50] [bacc-soi] Magnetite apres le 1er TCH : DSP fige en 0x01f6 (copie DARAM de
+             * PROM0 0x71f6, `bacc a` avec A=0x01f6), occupe 120000 insn/trame. Le chemin qui y mene, une fois. */
+            /* [2026-10-22 11:00] [liste-tache] le dispatcher PROM0 0xbc2e..0xbc36 appelle une liste de routines
+             * terminee par 0 ; la liste vient de be3e : base (0xde27/0xde57, b928) + data[0x3fba]*12 + data[0x4365]/2.
+             * Au 1er TCH Magnetite la liste lue sortait de la table (entree 0x01f6 = coefficients DROM). Chaque
+             * appel hors ROM, et les 40 premiers apres l'entree en dedie. */
+            if (is_call && src_pc == 0xbc36) {
+                static unsigned n_lt;
+                uint16_t ent = (uint16_t)(s->ar[1] - 1);
+                bool hors_rom = tgt < 0x7000;
+                if (hors_rom || (s->insn_count > 3000000 && n_lt < 40)) {
+                    n_lt++;
+                    printf("  [liste-tache] entree data[0x%04x]=0x%04x%s liste=0x%04x base=? 3fba=%u 4364=%u 4365=%u 3fab=%04x insn=%u\n",
+                           ent, tgt, hors_rom ? " HORS ROM" : "", s->data[0x4356], s->data[0x3fba],
+                           s->data[0x4364], s->data[0x4365], s->data[0x3fab], s->insn_count);
+                    /* [2026-10-22 11:20] le 1er appel hors ROM : base 0xde57 + etat 4 -> liste = 0xbc5a ; d'ou vient la base */
+                    static unsigned n_hr;
+                    if (hors_rom && n_hr++ == 0) {
+                        extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
+                        c54x_anneau_vider_stdout("liste-hors", 512);
+                    }
+                }
+            }
+            if (!is_call && tgt == src_pc) {
+                static unsigned n_soi;
+                if (n_soi++ == 0) {
+                    extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
+                    printf("  [bacc-soi] BACC sur soi-meme pc=0x%04x xpc=%u A=%010llx B=%010llx SP=0x%04x pile=%04x %04x %04x %04x insn=%u\n",
+                           src_pc, s->xpc, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
+                           (unsigned long long)(s->b & 0xFFFFFFFFFFULL), s->sp, s->data[s->sp],
+                           s->data[(uint16_t)(s->sp + 1)], s->data[(uint16_t)(s->sp + 2)],
+                           s->data[(uint16_t)(s->sp + 3)], s->insn_count);
+                    c54x_anneau_vider_stdout("bacc-soi", 512);
+                }
+            }
             /* FB-ENERGY reroute: the live FB dispatch (CALA at 0xb01e) resolves to
              * the SYMBOL correlator 0x8d00 / stub 0xab38, which never touches the
              * IQ buffer 0x2a00 nor the 0xa076 kernel. The CALA is redirected to
