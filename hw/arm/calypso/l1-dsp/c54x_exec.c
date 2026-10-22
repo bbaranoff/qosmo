@@ -29,6 +29,23 @@ static void bctc_sonde_note(uint16_t pc, uint16_t prev, bool diverge)
     bctc_sites[i].n++;
     if (diverge) bctc_sites[i].divergent++;
 }
+/* [2026-10-22] TC FIABLE A TRAVERS UNE ECRITURE MEMOIRE. CMPM/BITF (0x60/0x61) posent TC ; ANDM/ORM/XORM/ADDM
+ * #lk (0x68..0x6B) et ST/STM #k (0x76/0x77) n'y touchent pas (SPRU172C). Un bc/bcd tc|ntc juste apres une de ces
+ * ecritures, elle-meme juste apres le CMPM/BITF, teste donc le vrai TC. PROM0 0xb81e `bitf *ar2(9),#8000h`
+ * (d_ctrl_tch B_SUBCHANNEL) ; 0xb821 `andm #-17,*(0x3fbf)` ; 0xb824 `bc 0xb82f,ntc` : l'heuristique ACC (A=0 ->
+ * pas de saut) executait `orm #256,*(0x3fab)` a chaque trame TCH/F -> table d'etats du sous-canal TCH/H
+ * (0xde57), sortie de table au 1er multitrame (liste 0xbc5a, appel 0x3f8c), reset du DSP, Assignment Failure
+ * (Magnetite, appel au 600, 22/10). CALYPSO_C54X_BCTC_RMW=0 pour revenir a l'heuristique. */
+/* Une seule ecriture intercalee ne suffisait pas : PROM0 0xb925 `bitf *(0x3fab),#256` ; `st #de57,*(0x4366)` ;
+ * `st #decd,*(0x4367)` ; 0xb92e `bc 0xb936,tc` -- l'heuristique (tc : saute si A == 0, A = fn%26) gardait la
+ * base 0xde57 a chaque fn%26 = 0 : meme sortie de table. g_tc_fiable suit la chaine (calypso_c54x.c). */
+int g_tc_fiable;
+static int c54x_tc_par_rmw(void)
+{
+    static int on = -1;
+    if (on < 0) on = calypso_gate("CALYPSO_C54X_BCTC_RMW", 1);
+    return on && g_tc_fiable;
+}
 static void bctc_sonde_resume(void)
 {
     for (int i = 0; i < bctc_nsites; i++)
@@ -3603,7 +3620,7 @@ int c54x_exec_one(C54xState *s)
                  * suivis d'un bc tc/ntc dans la ROM), BIT Xmem (0x96xx, 34), BITT (0x34xx). */
                 static int bctc_etendu = -1;
                 if (bctc_etendu < 0) bctc_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
-                bool tc_strict = ((g_prev_op & 0xFE00) == 0x6000) ||
+                bool tc_strict = ((g_prev_op & 0xFE00) == 0x6000) || c54x_tc_par_rmw() ||
                                  (bctc_sm && s->pc >= 0xde0d && s->pc <= 0xde26) ||
                                  (bctc_norm && (g_prev_op & 0xFCFF) == 0xF48F) ||
                                  (bctc_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 ||
@@ -4376,7 +4393,7 @@ int c54x_exec_one(C54xState *s)
                     static int fa_norm = -1, fa_etendu = -1;
                     if (fa_norm < 0) fa_norm = calypso_gate("CALYPSO_C54X_BCTC_NORM", 0);
                     if (fa_etendu < 0) fa_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
-                    bool fa_tc_strict = (g_prev_op & 0xFE00) == 0x6000 ||
+                    bool fa_tc_strict = (g_prev_op & 0xFE00) == 0x6000 || c54x_tc_par_rmw() ||
                         (fa_norm && (g_prev_op & 0xFCFF) == 0xF48F) ||
                         (fa_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 || (g_prev_op & 0xFF00) == 0x9600 ||
                                        (g_prev_op & 0xFF00) == 0x3400 ||

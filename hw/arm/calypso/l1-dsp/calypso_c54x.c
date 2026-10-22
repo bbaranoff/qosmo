@@ -2850,6 +2850,30 @@ int c54x_run(C54xState *s, int n_insns)
         ev_anneau->rpt = s->rpt_active; ev_anneau->rpt_count = s->rpt_count;
         ev_anneau->intm = !!(s->st1 & ST1_INTM);
         ev_anneau->it = 0; ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
+        /* [2026-10-22 11:40] [trou-prog] Magnetite en TCH : PC qui glisse dans la memoire programme vide
+         * 0x2800..0x6fff (NOP) jusqu'au reset 0x7000 -> init DSP, etat TCH -1, DSP perdu. Le saut qui y mene. */
+        /* [2026-10-22 11:15] [b81e] bitf *ar2(9),#0x8000 -> b829 orm #256,*(0x3fab) : base 0xde57 de la
+         * table TCH. Le rejeu montre le bit pose avec un mot 9 = 0x0002 : quelle page AR2 designe-t-il. */
+        if (exec_pc == 0xb81e && s->insn_count > 3000000) {
+            static unsigned n_b81e;
+            uint16_t a2 = s->ar[2];
+            if (n_b81e++ < 60 || (s->data[(uint16_t)(a2 + 9)] & 0x8000))
+                printf("  [b81e] ar2=%04x mot9=%04x 3fc1=%04x W0[9]=%04x W1[9]=%04x 3fba=%d 4364=%u xpc=%u insn=%u\n",
+                       a2, s->data[(uint16_t)(a2 + 9)], s->data[0x3fc1], s->data[0x0809], s->data[0x081d],
+                       (int16_t)s->data[0x3fba], s->data[0x4364], s->xpc, s->insn_count);
+        }
+        if (exec_pc >= 0x2800 && exec_pc < 0x7000 && s->insn_count > 3000000) {
+            static unsigned n_trou; static uint16_t pc_prec_trou;
+            uint16_t pp = g_anneau_exec[(g_anneau_exec_idx - 2) % C54X_ANNEAU_N].pc;
+            if (!(pp >= 0x2800 && pp < 0x7000) && n_trou < 3) {
+                n_trou++;
+                printf("  [trou-prog] entree dans la memoire vide pc=0x%04x depuis pc=0x%04x xpc=%u pmst=%04x SP=%04x pile=%04x %04x %04x insn=%u\n",
+                       exec_pc, pp, s->xpc, s->pmst, s->sp, s->data[s->sp], s->data[(uint16_t)(s->sp + 1)],
+                       s->data[(uint16_t)(s->sp + 2)], s->insn_count);
+                c54x_anneau_vider_stdout("trou-prog", 120);
+            }
+            (void)pc_prec_trou;
+        }
         /* Repeat state BEFORE execution: tells "the repeat was already
          * active" from "the instruction just executed IS the RPT that armed
          * it". Consumed by the RPT block at the end of the loop. */
@@ -2985,6 +3009,14 @@ int c54x_run(C54xState *s, int n_insns)
             g_prev_pc = s_last_run_pc;
             g_prev2_op = g_prev_op;     /* [2026-10-15] avant-derniere (BC apres cmpm/bitf ; st) */
             g_prev_op = s_last_run_op;
+            /* [2026-10-22] TC fiable : pose par CMPM/BITF, garde a travers ANDM/ORM/XORM/ADDM #lk et ST/STM #k
+             * (hors STM vers ST0), perdu sur toute autre instruction. Voir c54x_tc_par_rmw (c54x_exec.c). */
+            {
+                uint16_t h = g_prev_op & 0xFF00;
+                if ((g_prev_op & 0xFE00) == 0x6000) g_tc_fiable = 1;
+                else if (!((h >= 0x6800 && h <= 0x6B00) || h == 0x7600 || (h == 0x7700 && (g_prev_op & 0xFF) != 0x06)))
+                    g_tc_fiable = 0;
+            }
             s_last_run_pc = s->pc;
             s_last_run_op = exec_op;
         }

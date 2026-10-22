@@ -757,6 +757,26 @@ int calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn)
     *fn = (uint32_t)w;
     return 1;
 }
+/* [2026-10-22] ... et ce que la L1 TI ECRIT en dedie : a_a5fn (pont.c) donne son fn exact. Le dedie (TCH surtout)
+ * fait glisser le tick d'une trame ; sans cette mise a jour, le premier RACH d'apres l'appel partait date de
+ * fn-1 par l'offset du SB d'AVANT l'appel (RA_C 34652 publie 34651, puis tous les suivants) : IMM ASS ignorees,
+ * rafale de RACH, plus aucun appel ni LU (22/10 11:17). CALYPSO_BSP_OFF_A5FN=0 pour couper. */
+static uint32_t g_a5fn_tick; static int g_a5fn_vu;   /* derniere trame ou a_a5fn a donne le fn du mobile */
+void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_OFF_A5FN"); on = !(e && *e == '0'); }
+    if (!on) return;
+    int64_t off = (int64_t)fn - (int64_t)tick;
+    g_a5fn_tick = tick; g_a5fn_vu = 1;
+    if (off != g_off_mobile) {
+        static unsigned n;
+        if (n++ < 30)
+            printf("  [off-mobile] a_a5fn fn=%u tick=%u : offset %lld -> %lld\n", fn, tick,
+                   g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
+        g_off_mobile = off;
+    }
+}
 /* [2026-10-21] firmware TI en mode dedie (taches ALLC vues par montant.c) : voir CALYPSO_BSP_DEDIE_DECAL */
 static int g_dedie_ti;
 extern unsigned long calypso_bsp_routeur_bilan(char *buf, size_t n);
@@ -2273,6 +2293,25 @@ static void bsp_ts0_service(uint32_t tick_fn)
             if (decal == -999) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_DECAL"); decal = (e && *e) ? atoi(e) : 0;
                                  if (decal) printf("  [ts0] decalage en dedie TI : %+d trame(s)\n", decal); }
             if (decal && g_dedie_ti) { w = (w + decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX; }
+        }
+        /* [2026-10-22] EN DEDIE TI, LA TRAME DU MOBILE. La L1 TI ecrit a_a5fn = le fn qu'elle traite (pont.c ->
+         * g_off_mobile) ; l'offset du BSP, cale sur le BCCH, avait 1 a 2 trames de retard sur lui en TCH
+         * ([a5] fn=25548, dernier depot BSP fn=25547) : desentrelacement FACCH/TCH decale, A5 au mauvais fn ->
+         * tous les a_fd en Fire KO, chiffre ou non, et Assignment Failure (appel au 600, 22/10 11:27).
+         * Tant que a_a5fn a parle depuis moins de 200 trames, on joue tick + g_off_mobile.
+         * CALYPSO_BSP_DEDIE_A5FN=0 pour revenir a l'offset BCCH. */
+        {
+            static int a5fn_on = -1;
+            if (a5fn_on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_A5FN"); a5fn_on = !(e && *e == '0'); }
+            if (a5fn_on && g_dedie_ti && g_a5fn_vu && g_off_mobile != INT64_MIN &&
+                (uint32_t)(tick_fn - g_a5fn_tick) < 200) {
+                int64_t wm = ((int64_t)tick_fn + g_off_mobile) % (int64_t)BSP_FN_MAX; if (wm < 0) wm += BSP_FN_MAX;
+                static unsigned n_dm;
+                if (wm != w && (n_dm++ < 20 || n_dm % 2000 == 0))
+                    printf("  [dedie-a5fn] tick=%u trame BCCH %lld -> trame du mobile %lld (%+lld) [%u]\n", tick_fn,
+                           (long long)w, (long long)wm, (long long)(wm - w), n_dm);
+                w = wm;
+            }
         }
         unsigned i = (unsigned)w % BSP_TS0_RING;
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);

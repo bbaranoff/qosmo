@@ -312,6 +312,7 @@ extern int      g_last_ldp_kind;
 extern uint16_t g_prev_pc;
 extern uint16_t g_prev_op;
 extern uint16_t g_prev2_op;
+extern int g_tc_fiable;      /* [2026-10-22] TC pose par CMPM/BITF et non touche depuis (c54x_exec.c) */
 extern uint16_t g_last_st0w_pc;
 extern uint16_t g_last_st0w_val;
 extern uint16_t g_last_st0w_op;
