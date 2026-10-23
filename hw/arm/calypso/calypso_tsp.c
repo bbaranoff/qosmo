@@ -33,6 +33,7 @@ static void rf_arfcn_publier(uint32_t fn)
     e->qbit = (int16_t)calypso_tpu_qbit();
     e->arfcn = (int16_t)calypso_trf6151_arfcn();
     e->gain_db = (int16_t)calypso_trf6151_total_gain_db();
+    e->reserve = (int16_t)calypso_trf6151_rf_flags();   /* [2026-10-23] voir calypso_rf_arfcn.h */
     __atomic_store_n(&m->widx, m->widx + 1, __ATOMIC_RELEASE);
 }
 

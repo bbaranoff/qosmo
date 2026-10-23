@@ -25,6 +25,8 @@ typedef struct {
      * qui convertit la PM de veille avec SON gain (l1ctl_pgc, used_il/used_lna), lisait la cellule au
      * plancher : (1 54) -> (1 8), antenne perdue en veille. */
     int16_t  gain_db;
+    /* [2026-10-23] calypso_trf6151_rf_flags() : bit 15 mode RX, bit 14 mode TX, bit 13 frequence MONTANTE
+     * (ARFCN dans les bits 0..10). 0 : QEMU d'avant (c54x_exe retombe sur `arfcn` seul). */
     int16_t  reserve;
 } CalypsoRfProg;
 

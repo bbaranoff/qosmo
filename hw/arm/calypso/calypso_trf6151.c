@@ -89,6 +89,41 @@ int calypso_trf6151_arfcn(void)
     return -1;
 }
 
+/* [2026-10-23] AIR REALISTE (c54x_exe, CALYPSO_AIR_NIVEAUX) : l'etat du synthetiseur pour le champ `reserve`
+ * de calypso_rf_arfcn.h. bit 15 : mode RX (PWR bit 11) ; bit 14 : mode TX (PWR bit 13) ; bit 13 : frequence
+ * dans une bande MONTANTE (GSM900/E-GSM 880-915 MHz, DCS 1710-1785 MHz), ARFCN correspondant dans les bits
+ * 0..10. calypso_trf6151_arfcn() ne decode que les bandes descendantes et rend -1 pour ces frequences : la vue
+ * montante de l'appli rssi (RX accorde sur l'UL) passait pour « inconnue » et recevait le descendant. */
+int calypso_trf6151_rf_flags(void)
+{
+    unsigned a = (g_reg_pll >> 3) & 0x3f;
+    unsigned b = ((g_reg_pll >> 9) & 0x7f) + 64;
+    unsigned n = b * 64 + a;
+    bool high_band = ((g_reg_pwr >> 6) & 3) == TRF6151_BAND_1800;
+    unsigned freq10 = high_band ? n * 2 : n;
+    int f = 0, ul = -1;
+    if (g_reg_pwr & (1u << 11)) {
+        f |= 1 << 15;
+    }
+    if (g_reg_pwr & (1u << 13)) {
+        f |= 1 << 14;
+    }
+    if (!g_reg_pll) {
+        return f;
+    }
+    if (freq10 >= 8902 && freq10 <= 9148) {
+        ul = (int)((freq10 - 8900) / 2);
+    } else if (freq10 >= 8802 && freq10 < 8900) {
+        ul = 1024 - (int)(8900 - freq10) / 2;
+    } else if (freq10 >= 17102 && freq10 <= 17848) {
+        ul = (int)(512 + (freq10 - 17102) / 2);
+    }
+    if (ul >= 0) {
+        f |= (1 << 13) | (ul & 0x7ff);
+    }
+    return f;
+}
+
 int calypso_trf6151_total_gain_db(void)
 {
     return SYSTEM_INHERENT_GAIN + trf6151_gain_from_reg(g_reg_rx);
