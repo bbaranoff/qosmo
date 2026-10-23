@@ -128,6 +128,8 @@ uint16_t calypso_bsp_rssi_apm_k(int k);
 int calypso_bsp_pm_mav_texte(char *buf, size_t n);
 int calypso_bsp_pm_mav_fort(void);
 uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav);
+/* [2026-10-23] air realiste + AGC : le D_PM ecrit par le DSP (a_serv_demod[1]) ramene au niveau du dernier burst */
+uint16_t calypso_bsp_air_dpm(uint16_t val);
 int calypso_apm_trace_on(void);
 
 int calypso_bsp_fenetre_tn(void);

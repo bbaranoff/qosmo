@@ -1140,6 +1140,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         if (rssi_on < 0) rssi_on = calypso_gate("CALYPSO_PM_RSSI", 1);
         if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) || (addr >= 0x0848 && addr <= 0x084A)))
             val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
+        if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* [2026-10-23] D_PM, air realiste */
         /* [2026-10-19] moniteur mailbox aussi sur le chemin rapide (voir data_read) */
         calypso_mbx(MBX_DSP_WR, addr, val, s->data[addr], s->pc, 0, s->insn_count);
         data_write_locked(s, addr, val);
@@ -1344,6 +1345,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                             (addr >= 0x0848 && addr <= 0x084A))) {
                     val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
                 }
+                if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* [2026-10-23] D_PM, air realiste */
             }
         }
         if (sent && addr == 0x08f8) {

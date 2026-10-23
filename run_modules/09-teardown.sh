@@ -6,6 +6,7 @@ MOD_TIMEOUT[teardown]=25
 _td_patterns() {
     cat <<'EOF'
 f:qemu-system-arm
+f:gardien-bts
 x:osmo-bts-trx
 x:osmocon
 x:mobile
