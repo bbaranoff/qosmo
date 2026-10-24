@@ -21,8 +21,9 @@ tmux_layout() {
             "$(_asm_watch)" "$C_RADIO"
     fi
     _fenetre_coeur
-    _w     ms1 "MS#1 | pile L2/L3 du telephone emule - camp, LU, appels" \
-        "$(_tail "'$L/mobile.log'")" "$C_MS1"
+    # [2026-10-24] MS1_LOG (osmo-operator, 09-mobile-cfg-tmux.sh) : rvinterf.log en Magnetite
+    _w     ms1 "MS#1 | ${MS1_LOG_NOM:-mobile} du telephone emule - camp, LU, appels" \
+        "$(_tail "'${MS1_LOG:-$L/mobile.log}'")" "$C_MS1"
     _split ms1 "BTS#0 | sa station de base - ARFCN ${PONT_ARFCN:-514}, unit-id 6001" \
         "$(_tail "'$L/bts.log'")" "$C_MS1"
     _split ms1 "GSMTAP | capture pcap - a ouvrir dans Wireshark" \

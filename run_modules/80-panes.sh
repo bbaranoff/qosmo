@@ -32,7 +32,7 @@ mod_panes_start() {
     local specs=() spec name what cmd added=0
     specs+=("qemu|${LOG_DIR}/qemu.log")
     [ -r "$CALYPSO_GSM_SNIFF" ] && specs+=("burst|__BURST__")
-    specs+=("mobile|${LOG_DIR}/mobile.log")
+    specs+=("${MS1_LOG_NOM:-mobile}|${MS1_LOG:-${LOG_DIR}/mobile.log}")   # [2026-10-24] rvinterf.log en Magnetite
     specs+=("pont|/dev/shm/pont.log")
     for spec in "${specs[@]}"; do
         name="${spec%%|*}"; what="${spec##*|}"

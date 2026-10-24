@@ -220,6 +220,9 @@ struct CalypsoSim {
     uint8_t     pend[APDU_MAX_LEN + 16];
     int         pend_len;
     QEMUTimer  *resp_timer;
+    /* [2026-10-24] IT TX apres un temps caractere (voir calypso_sim_reg_write, DTX) */
+    QEMUTimer  *tx_timer;
+    int64_t     last_tx_ns;
 };
 
 G_GNUC_UNUSED
@@ -315,12 +318,24 @@ static void update_irq(CalypsoSim *s)
  * ne s'abonne a E_SMS_READY (smsidle_start, fin de mise sous tension) : evenement perdu, sms_initialised reste
  * FALSE, le menu Messages reste sur « Please wait » (SmsRead_R_exec_cb). Une vraie carte a 9600 bauds rend
  * ~1,04 ms par octet. CALYPSO_SIM_US_OCTET (defaut 1040, 0 = ancien delai fixe). */
-static int64_t resp_delai_ns(int n)
+static long us_octet(void)
 {
     static long us = -1;
     if (us < 0) { const char *e = getenv("CALYPSO_SIM_US_OCTET"); us = (e && *e) ? atol(e) : 1040; }
-    int64_t d = (int64_t)n * us * 1000;
+    return us;
+}
+
+static int64_t resp_delai_ns(int n)
+{
+    int64_t d = (int64_t)n * us_octet() * 1000;
     return d > RESP_DELAY_NS ? d : RESP_DELAY_NS;
+}
+
+static void tx_fire(void *opaque)
+{
+    CalypsoSim *s = opaque;
+    s->it |= CALYPSO_SIM_IT_TX;
+    update_irq(s);
 }
 
 static void resp_fire(void *opaque)
@@ -704,8 +719,22 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
     }
 }
 
+/* [2026-10-24] RESYNCHRONISATION. Si le driver TI n'a pas vu l'ACK (SIM_ERR_WAIT au bout de 159 a 1815 ticks,
+ * soit 0,7 s au moins), la couche au-dessus renvoie un en-tete neuf alors qu'on attendait la suite de la commande :
+ * « a0 a4 » etait pris pour le FID (SELECT 0xa0a4) et toutes les commandes suivantes restaient decalees de 2 octets
+ * (CLA=00 INS=00 -> 6D00 a perpetuite -> « SIM Invalid »). Dans une commande les octets se suivent a ~1 ms : un
+ * silence de plus de 500 ms veut dire que le terminal a abandonne la commande, l'octet recu ouvre un nouvel APDU. */
+#define APDU_ABANDON_NS 500000000LL
 static void apdu_tx_byte_inner(CalypsoSim *s, uint8_t b)
 {
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (s->apdu_pos > 0 && now - s->last_tx_ns > APDU_ABANDON_NS) {
+        SIM_LOG("APDU abandonne par le terminal apres %d octet(s) (silence %lld ms) : resynchronisation",
+                s->apdu_pos, (long long)((now - s->last_tx_ns) / 1000000));
+        s->apdu_pos = 0;
+        s->apdu_expected = 0;
+    }
+    s->last_tx_ns = now;
     if (s->apdu_pos < APDU_MAX_LEN) {
         s->apdu[s->apdu_pos++] = b;
     }
@@ -864,8 +893,13 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
         /* [2026-10-21] Octet parti : IT TX (le driver TI, sim32.c, n'envoie
          * l'octet suivant d'une commande que sur cette IT, STAT TXPAR a 1).
          * Acquittee a la lecture de SIM_IT comme NATR/WT/OV. */
-        s->it |= CALYPSO_SIM_IT_TX;
-        update_irq(s);
+        /* [2026-10-24] ... mais au bout d'un temps caractere, pas tout de suite. Levee aussitot, l'IT faisait partir
+         * les 5 octets d'en-tete en quelques us et l'ACK suivait 1,5 ms apres le PREMIER octet. Or SIM_Command_Base
+         * ecrit le premier octet (SIM_WriteBuffer) puis seulement passe moderx a 6 (attente de l'ACK) : une tache SIM
+         * preemptee 1,5 ms entre les deux recevait l'ACK en moderx 5 (range comme SW1), attendait un ACK qui ne
+         * venait plus, SIM_ERR_WAIT, en-tete renvoye -> desynchronisation (voir APDU_ABANDON_NS). A 9600 bauds un
+         * octet dure ~1 ms (CALYPSO_SIM_US_OCTET), l'en-tete ~5 ms comme sur une vraie carte. */
+        timer_mod_ns(s->tx_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)us_octet() * 1000);
         break;
     case CALYPSO_SIM_REG_MASKIT: {
 
@@ -948,6 +982,7 @@ CalypsoSim *calypso_sim_new(qemu_irq sim_irq)
     s->atr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, deliver_atr, s);
     s->resp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, resp_fire, s);
     s->wt_timer  = timer_new_ns(QEMU_CLOCK_VIRTUAL, fire_wt,     s);
+    s->tx_timer  = timer_new_ns(QEMU_CLOCK_VIRTUAL, tx_fire,     s);
 
     s->selected_df = 0x3F00;
     s->selected_ef = 0x3F00;
