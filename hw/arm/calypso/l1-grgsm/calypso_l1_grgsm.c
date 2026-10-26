@@ -25,6 +25,9 @@
 #define GSMTAP_CHANNEL_ACCH     0x80
 #define GSMTAP_CHANNEL_SACCH    (GSMTAP_CHANNEL_SDCCH4 | GSMTAP_CHANNEL_ACCH)
 #define GSMTAP_CHANNEL_TCH_ACCH (GSMTAP_CHANNEL_TCH_F | GSMTAP_CHANNEL_ACCH)
+/* [2026-10-26] slots de la rotation SI : SI1..SI6 (0x19..0x1e), puis SI2bis,
+ * SI2ter, SI2quater, SI13 — voir si_slot(). */
+#define SI_SLOTS                10
 
 #define SHM_RACH        "/dev/shm/calypso_rach"
 #define SHM_SDCCH_UL    "/dev/shm/calypso_sdcch_ul"
@@ -78,8 +81,8 @@ static struct {
     uint16_t d_task_md, d_task_d, d_task_u, d_task_ra, d_burst_d, d_fn;
     uint32_t tick;
 
-    uint8_t  si_set[6][23];
-    bool     si_have[6];
+    uint8_t  si_set[SI_SLOTS][23];
+    bool     si_have[SI_SLOTS];
     uint8_t  si_buf[23];
     bool     si_valid;
     int      si_rr;
@@ -308,8 +311,8 @@ static void present_ccch(uint8_t page, const uint8_t *l2)
 
 static void rotate_si(void)
 {
-    for (int k = 1; k <= 6; k++) {
-        int s = (g.si_rr + k) % 6;
+    for (int k = 1; k <= SI_SLOTS; k++) {
+        int s = (g.si_rr + k) % SI_SLOTS;
         if (g.si_have[s]) {
             g.si_rr = s;
             return;
@@ -902,12 +905,35 @@ static void feed_l2_23(uint8_t *dst, bool *valid, uint32_t *tick,
     *tick = g.tick;
 }
 
+/* [2026-10-26] Les SI du BCCH que la rotation sert au firmware. Les six slots
+ * d'origine (SI1..SI6, 0x19..0x1e) JETAIENT SI2bis (0x02), SI2ter (0x03),
+ * SI2quater (0x07) et SI13 (0x00). Or des que la BTS 0 a une voisine dans une
+ * autre bande (BTS 1 DCS1800, ARFCN 614), osmo-bsc emet un SI2ter et l'annonce
+ * dans les rest octets de SI3 ; le mobile (gsm322.c,
+ * gsm322_c_scan_sysinfo_bcch) exige alors ce SI2ter avant de choisir la
+ * cellule et bouclait sur « Cell selection failed, sync timeout » avec
+ * SI1/2/3/4 pourtant recus — le MS#2 via fake_trx, lui, le recevait. SI13
+ * sert au GPRS (barreau data). */
+static int si_slot(uint8_t mt)
+{
+    if (mt >= 0x19 && mt <= 0x1e) {
+        return mt - 0x19;           /* SI1..SI6 */
+    }
+    switch (mt) {
+    case 0x02: return 6;            /* SI2bis */
+    case 0x03: return 7;            /* SI2ter */
+    case 0x07: return 8;            /* SI2quater */
+    case 0x00: return 9;            /* SI13 */
+    default:   return -1;
+    }
+}
+
 static void feed_si(const uint8_t *l2, int len)
 {
     int n = len < 23 ? len : 23;
     int slot = -1;
-    if (n >= 3 && l2[1] == 0x06 && l2[2] >= 0x19 && l2[2] <= 0x1e) {
-        slot = l2[2] - 0x19;
+    if (n >= 3 && l2[1] == 0x06) {
+        slot = si_slot(l2[2]);
     }
     if (slot >= 0) {
         memcpy(g.si_set[slot], l2, n);
@@ -955,7 +981,7 @@ static void gsmtap_readable(void *opaque)
         uint8_t mt = l2[2];
         switch (sub) {
         case GSMTAP_CHANNEL_BCCH:
-            if (l2[1] == 0x06 && mt >= 0x19 && mt <= 0x1e) {
+            if (l2[1] == 0x06 && si_slot(mt) >= 0) {
                 feed_si(l2, len);
             }
             break;
