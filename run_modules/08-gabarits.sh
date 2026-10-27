@@ -67,9 +67,9 @@ mod_gabarits_start() {
             "1.1.1" "1.1.2" "1.1.3" "$MCC" "$MNC" "$OPERATOR_NAME" \
             "${INTER_STP_IP:-127.0.0.1}" "$_inter_shutdown" "1"; then
         install_configs_native "$tmpdir" "" || rc=1
-        # Les gabarits ecrasent pjsip/extensions/rtp/sms-routing : sans WAN dans
-        # ces fichiers, aucun appel vers un autre noeud (503 cote SIP). On rejoue
-        # le maillage APRES eux, si la table WAN a plusieurs noeuds.
+        # The templates overwrite pjsip/extensions/rtp/sms-routing: without WAN
+        # in those files, no call to another node (503 on the SIP side). The mesh
+        # is replayed AFTER them, if the WAN table has several nodes.
         _wan_rejoue() {
             local t="${WAN_CONF_FILE:-/etc/osmo-wan.conf}"
             local sh="${WAN_MESH_SH:-/opt/GSM/osmo-operator/network/setup-wan-mesh.sh}"

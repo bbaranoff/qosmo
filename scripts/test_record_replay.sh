@@ -1,18 +1,18 @@
 #!/bin/bash
-# test_record_replay.sh — diagnostic determinisme : record live + N replays
+# test_record_replay.sh — determinism diagnostic: live record + N replays
 #
-# Workflow :
-#   1. RECORD : run normal avec BSP_DUMP_RX_FILE=/tmp/bsp_rx.dump
-#   2. REPLAY 1/2/3 : runs avec CALYPSO_BSP_REPLAY_FILE=/tmp/bsp_rx.dump
-#   3. Affiche tableau comparatif des signatures d_fb_det / SOFT-RESET-TRIG /
-#      BURST-IN / etc. pour decider : determinisme restaure (= course feed) ou
-#      encore nondeterministe (= autre source).
+# Workflow:
+#   1. RECORD: normal run with BSP_DUMP_RX_FILE=/tmp/bsp_rx.dump
+#   2. REPLAY 1/2/3: runs with CALYPSO_BSP_REPLAY_FILE=/tmp/bsp_rx.dump
+#   3. Prints a comparison table of the d_fb_det / SOFT-RESET-TRIG /
+#      BURST-IN / etc. signatures to decide: determinism restored (= feed
+#      race) or still nondeterministic (= other source).
 #
-# Usage : ./test_record_replay.sh [duration_sec]    (defaut 30)
+# Usage: ./test_record_replay.sh [duration_sec]    (default 30)
 #
-# Hypotheses :
-#   - run.sh est dans le PATH ou /root/run.sh
-#   - CALYPSO_NO_ATTACH=1 supporte par run.sh pour spawn en background
+# Assumptions:
+#   - run.sh is in the PATH or /root/run.sh
+#   - CALYPSO_NO_ATTACH=1 supported by run.sh to spawn in the background
 
 set -u
 DUR="${1:-30}"
@@ -22,7 +22,7 @@ mkdir -p "$LOGDIR"
 RUN_SH="${RUN_SH:-${QEMU_TREE}/run.sh}"
 QEMU_LOG="${QEMU_LOG:-/root/qemu.log}"
 
-# ---- helper : kill toute la stack et nettoyer ----
+# ---- helper: kill the whole stack and clean up ----
 killall_run() {
     tmux kill-session -t calypso 2>/dev/null || true
     killall -9 qemu-system-arm osmo-bts-trx mobile osmocon osmo-trx-ipc 2>/dev/null || true
@@ -32,20 +32,20 @@ killall_run() {
     sleep 1
 }
 
-# ---- helper : lance un run en background avec env, attend DUR secondes ----
+# ---- helper: start a run in the background with env, wait DUR seconds ----
 do_run() {
     local label="$1"; shift
     echo "===== $label : start (timeout=${DUR}s) ====="
     killall_run
 
-    # CALYPSO_NO_ATTACH=1 : run.sh exit apres tmux session lance en bg
+    # CALYPSO_NO_ATTACH=1: run.sh exits once the tmux session is started in the background
     CALYPSO_NO_ATTACH=1 "$@" bash "$RUN_SH" > "$LOGDIR/$label.stdout" 2>&1 &
     local launcher_pid=$!
 
-    # Attente DUR secondes, qemu.log se remplit
+    # Wait DUR seconds, qemu.log fills up
     sleep "$DUR"
 
-    # Snapshot qemu.log et kill stack
+    # Snapshot qemu.log and kill the stack
     cp -f "$QEMU_LOG" "$LOGDIR/$label.qemu.log" 2>/dev/null || true
     killall_run
     wait "$launcher_pid" 2>/dev/null || true
@@ -53,7 +53,7 @@ do_run() {
     echo
 }
 
-# ---- helper : extrait une signature compact d'un qemu.log ----
+# ---- helper: extract a compact signature from a qemu.log ----
 sig() {
     local log="$1"
     if [ ! -s "$log" ]; then
@@ -111,7 +111,7 @@ for i in 1 2 3; do
     do_run REPLAY$i env CALYPSO_BSP_REPLAY_FILE="$DUMP"
 done
 
-# ---- 3. Comparaison ----
+# ---- 3. Comparison ----
 echo "##############################################"
 echo "##       SIGNATURE COMPARISON TABLE         ##"
 echo "##############################################"

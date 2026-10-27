@@ -23,7 +23,7 @@ bool calypso_tsp_owns_addr(uint8_t addr);
 
 void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn);
 
-/* position du sequenceur TPU dans la trame, en qbits (calypso_tpu.c) */
+/* position of the TPU sequencer in the frame, in qbits (calypso_tpu.c) */
 int calypso_tpu_qbit(void);
 
 #endif

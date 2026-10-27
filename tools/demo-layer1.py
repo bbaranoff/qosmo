@@ -1,17 +1,17 @@
-# demo-layer1.py — « demo » : montrer qu'on a la main sur le firmware layer1 (osmocom-bb)
-# qui tourne dans QEMU, depuis la console telnet (tools/gdb-telnet.py, port 44444).
+# demo-layer1.py — "demo": show that we control the layer1 firmware (osmocom-bb)
+# running in QEMU, from the telnet console (tools/gdb-telnet.py, port 44444).
 #
-#   demo            tout : arrete l'ARM, etat, une trame TDMA au point d'arret, un printf
-#                   dans le firmware (visible dans osmocon.log), puis l'ARM repart
-#   demo etat       seulement l'etat (pc, pile, fn, cellule, boite aux lettres DSP) ; reste arrete
-#   demo trame      tourne jusqu'a la prochaine trame TDMA (tdma_sched_execute) ; reste arrete
-#   demo hello      call printf(...) dans le firmware -> console sercomm (osmocon.log) ; reste arrete
-#   demo go         l'ARM repart (continue &)
+#   demo            everything: stop the ARM, state, one TDMA frame at a breakpoint, a
+#                   printf in the firmware (visible in osmocon.log), then the ARM resumes
+#   demo etat       state only (pc, stack, fn, cell, DSP mailbox); stays stopped
+#   demo trame      runs until the next TDMA frame (tdma_sched_execute); stays stopped
+#   demo hello      call printf(...) in the firmware -> sercomm console (osmocon.log); stays stopped
+#   demo go         the ARM resumes (continue &)
 #
-# Entre deux etapes : 4 s pour lire (set $demo_pause = N pour changer, 0 = enchainer).
-# Si l'ARM tourne, « demo » l'arrete d'abord (interrupt) et enchaine au prochain evenement
-# d'arret (gdb.events.stop) : rien n'est lu tant que la cible n'est pas arretee.
-# Les lectures passent par les commandes du panneau cmd.gdb (fn, l1, tasks), charge avant.
+# Between two steps: 4 s to read (set $demo_pause = N to change, 0 = no pause).
+# If the ARM is running, "demo" stops it first (interrupt) and goes on at the next
+# stop event (gdb.events.stop): nothing is read until the target is stopped.
+# Reads go through the cmd.gdb panel commands (fn, l1, tasks), loaded beforehand.
 import gdb, time
 
 
@@ -35,7 +35,7 @@ def en_marche():
 
 
 def pause_etape():
-    # entre deux etapes, le temps de lire : 4 s par defaut, « set $demo_pause = 2 » pour changer
+    # between two steps, time to read: 4 s by default, "set $demo_pause = 2" to change
     p = gdb.convenience_variable("demo_pause")
     t = float(p) if p is not None else 4.0
     if t > 0:
@@ -84,18 +84,18 @@ def trame():
 
 
 def hello():
-    # Pas de malloc dans le firmware : gdb ne peut pas y poser une chaine litterale. On l'ecrit
-    # nous-memes juste au-dessus du bss (_end + 0x100) : zone libre (pas de tas, les piles sont
-    # tout en haut de la RAM, TOP_OF_RAM 0x83fff0 dans board/compal/macros.S), puis puts() dessus.
+    # No malloc in the firmware: gdb cannot place a string literal there. It is written
+    # by hand just above the bss (_end + 0x100): free area (no heap, the stacks are at
+    # the very top of RAM, TOP_OF_RAM 0x83fff0 in board/compal/macros.S), then puts() on it.
     fn = val("l1s.current_time.fn")
     out("[demo] ===== 5. ON FAIT PARLER LE FIRMWARE : la chaine ecrite en RAM libre, puis call puts() -> console sercomm (osmocon.log)")
     adr = val("(unsigned long)&_end")
     if adr is None:
         out("[demo]        (_end introuvable : ELF sans symboles ?)"); return
     adr = (adr + 0x100) & ~0xf
-    # Couleurs ANSI dans la chaine elle-meme : osmocon recopie la console sercomm octet pour octet
-    # (hdlc_console_cb -> write(1, ...)), donc « tail -f osmocon.log » sous terminal l'affiche en couleur.
-    # hello (vert) a (blanc) 40c3 (violet) : « hello a 40c3 », ecrit en RAM puis sorti par puts().
+    # ANSI colours in the string itself: osmocon copies the sercomm console byte for byte
+    # (hdlc_console_cb -> write(1, ...)), so "tail -f osmocon.log" in a terminal shows it in colour.
+    # hello (green) a (white) 40c3 (purple): "hello a 40c3", written to RAM then output by puts().
     texte = ("\033[1;32mhello\033[0m \033[1;37ma\033[0m \033[1;35m40c3\033[0m "
              "\033[36m(0x%x, fn=%s)\033[0m\n" % (adr, fn))
     msg = texte.encode() + b"\0"
@@ -134,7 +134,7 @@ def corps(arg):
 
 
 class Demo(gdb.Command):
-    """demo [tout|etat|trame|hello|go] — la main sur le firmware layer1 : arret, etat, une trame, printf, reprise."""
+    """demo [tout|etat|trame|hello|go] — control of the layer1 firmware: stop, state, one frame, printf, resume."""
 
     def __init__(self):
         super().__init__("demo", gdb.COMMAND_USER)

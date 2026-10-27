@@ -43,9 +43,9 @@ static int trf6151_gain_from_reg(uint16_t reg_rx)
 
 void calypso_trf6151_tsp_write(uint8_t dev_idx, uint32_t word)
 {
-    /* [2026-10-21 18:50] TSPEN1 (osmocom, Pirelli) ou TSPEN2 : le firmware TI des Motorola C1xx
-     * adresse le TRF6151 sur le peripherique TSP 2 (tpudrv12.h, TC1_DEVICE_RF = TC1_DEVICE2) ; ignore,
-     * l'ARFCN restait inconnu et le faux air ne filtrait rien. */
+    /* TSPEN1 (osmocom, Pirelli) or TSPEN2: the TI firmware of the Motorola C1xx addresses the
+     * TRF6151 on TSP device 2 (tpudrv12.h, TC1_DEVICE_RF = TC1_DEVICE2); both must be accepted
+     * for the ARFCN to be known and the fake air to filter. */
     if (dev_idx != TRF6151_TSP_DEV && dev_idx != 2) {
         return;
     }
@@ -89,11 +89,12 @@ int calypso_trf6151_arfcn(void)
     return -1;
 }
 
-/* [2026-10-23] AIR REALISTE (c54x_exe, CALYPSO_AIR_NIVEAUX) : l'etat du synthetiseur pour le champ `reserve`
- * de calypso_rf_arfcn.h. bit 15 : mode RX (PWR bit 11) ; bit 14 : mode TX (PWR bit 13) ; bit 13 : frequence
- * dans une bande MONTANTE (GSM900/E-GSM 880-915 MHz, DCS 1710-1785 MHz), ARFCN correspondant dans les bits
- * 0..10. calypso_trf6151_arfcn() ne decode que les bandes descendantes et rend -1 pour ces frequences : la vue
- * montante de l'appli rssi (RX accorde sur l'UL) passait pour « inconnue » et recevait le descendant. */
+/* Realistic air (c54x_exe, CALYPSO_AIR_NIVEAUX): synthesizer state for the `reserve`
+ * field of calypso_rf_arfcn.h. bit 15: RX mode (PWR bit 11); bit 14: TX mode (PWR
+ * bit 13); bit 13: frequency in an UPLINK band (GSM900/E-GSM 880-915 MHz, DCS
+ * 1710-1785 MHz), matching ARFCN in bits 0..10. calypso_trf6151_arfcn() only decodes
+ * the downlink bands and returns -1 for these frequencies, so this is how the uplink
+ * view of the rssi app (RX tuned to the UL) is told apart from "unknown". */
 int calypso_trf6151_rf_flags(void)
 {
     unsigned a = (g_reg_pll >> 3) & 0x3f;
@@ -139,10 +140,10 @@ uint16_t calypso_trf6151_apm_for_rf(int target_rf_dbm)
         bb_dbm = 0;
     }
     apm = bb_dbm * 64;
-    /* [2026-10-21 19:25] jamais 0 : un vrai DSP mesure toujours du bruit. a_pm = 0 compte comme une
-     * panne pour la L1 TI (l1_check_pm_error : 100 PM nuls -> l1_initialize_for_recovery, DSP relance
-     * toutes les ~173 trames en balayant des frequences vides). La L1 lit pm = a_pm >> 5
-     * (l1ddsp_meas_read) : plancher 64 (1 dB au-dessus de 0), pm = 2. */
+    /* Never 0: a real DSP always measures some noise. a_pm = 0 counts as a failure for
+     * the TI L1 (l1_check_pm_error: 100 null PMs -> l1_initialize_for_recovery, DSP
+     * restarted every ~173 frames while scanning empty frequencies). The L1 reads
+     * pm = a_pm >> 5 (l1ddsp_meas_read): floor 64 (1 dB above 0), pm = 2. */
     if (apm < 64) {
         apm = 64;
     }

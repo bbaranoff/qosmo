@@ -32,8 +32,8 @@ mod_sidecar_faketrx_start() {
     radio_dirs
     local log; log="$(radio_log sidecar-faketrx)"
     mod_say "fake_trx -P $SC_TRX_PORT (BTS#1) -p $SC_BB_PORT (bande de base)"
-    # Second MS sur le meme BTS#1 : le modem GPRS. fake_trx multiplexe lui-meme
-    # (--trx NOM@ADDR:PORT, transceiver independant) ; trxcon du modem sur ce port.
+    # Second MS on the same BTS#1: the GPRS modem. fake_trx multiplexes itself
+    # (--trx NAME@ADDR:PORT, independent transceiver); the modem's trxcon on that port.
     local -a extra=()
     if modem_enabled; then
         extra=(--trx "MODEM@${TRX_BB_IP}:${MODEM_BB_PORT}")

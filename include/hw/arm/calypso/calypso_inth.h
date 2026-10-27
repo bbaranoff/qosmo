@@ -31,8 +31,8 @@ struct CalypsoINTHState {
     uint64_t frame_eoi;         /* IRQ_CTRL end-of-service writes for the TPU frame IRQ */
 };
 
-/* Acquittement emis par le DSP emule (calypso_c54x.c). Sans couche 1 C54x,
- * personne ne l'appelle. */
+/* Acknowledge emitted by the emulated DSP (calypso_c54x.c). Without a C54x
+ * layer 1, nobody calls it. */
 void calypso_inth_arm_ack(void);
 
 /* [2026-09-21] End-of-service count of the TPU frame interrupt (IRQ 4): the
@@ -42,6 +42,6 @@ void calypso_inth_arm_ack(void);
  * so the ARM reads the R page before the DSP overwrites it, as on silicon. */
 uint64_t calypso_inth_frame_eoi(void);
 bool calypso_inth_irq_masked(int irq);
-bool calypso_inth_irq_pending(int irq);   /* [2026-09-30] IT levee, pas encore servie */
+bool calypso_inth_irq_pending(int irq);   /* interrupt raised, not yet serviced */
 
 #endif

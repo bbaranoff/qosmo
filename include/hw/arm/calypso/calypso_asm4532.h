@@ -1,25 +1,24 @@
 /*
- * calypso_asm4532.h — modele du commutateur d'antenne ASM4532.
+ * calypso_asm4532.h - model of the ASM4532 antenna switch.
  *
- * Position dans la chaine (wiki osmocom TypicalCalypsoModemDesign) :
- *   antenne <-> ASM4532 <-> [SAW Rx -> TRF6151]  ou  [RF3166 -> TX]
- * C'est lui qui relie l'antenne SOIT a l'un des chemins Rx GSM/DCS/PCS,
- * SOIT a la sortie du PA pendant la duree du burst.
+ * Position in the chain (osmocom wiki TypicalCalypsoModemDesign):
+ *   antenna <-> ASM4532 <-> [SAW Rx -> TRF6151]  or  [RF3166 -> TX]
+ * It connects the antenna EITHER to one of the GSM/DCS/PCS Rx paths,
+ * OR to the PA output for the duration of the burst.
  *
- * Pilotage : lignes TSPACT, pas le TSP serie. Mapping porte tel quel de
- * osmocom-bb board/compal/rffe_dualband.c (le board C123 qu'on emule) :
- *   TRENA    = TSPACT(6)  Transmit Enable (Antenna Switch)  -- ACTIF BAS
- *   GSM_TXEN = TSPACT(8)  GSM (par opposition a DCS)        -- ACTIF BAS
- * et la sequence de rffe_mode() :
- *   tspact |= TRENA | GSM_TXEN;          (repos : les deux desassertees)
- *   si TX : tspact &= ~TRENA;            (assertion)
- *           si GSM900 : tspact &= ~GSM_TXEN;
+ * Control: TSPACT lines, not the serial TSP. Mapping taken as is from
+ * osmocom-bb board/compal/rffe_dualband.c (the emulated C123 board):
+ *   TRENA    = TSPACT(6)  Transmit Enable (Antenna Switch)  -- ACTIVE LOW
+ *   GSM_TXEN = TSPACT(8)  GSM (as opposed to DCS)           -- ACTIVE LOW
+ * and the rffe_mode() sequence:
+ *   tspact |= TRENA | GSM_TXEN;          (idle: both deasserted)
+ *   if TX: tspact &= ~TRENA;             (assertion)
+ *          if GSM900: tspact &= ~GSM_TXEN;
  *
- * ⚠️ PORTEE : ce bloc est cote TX / selection de bande. Il n'a AUCUN effet sur
- *    l'acquisition FB/SB : avec un downlink synthetique, le chemin Rx est deja
- *    suppose connecte. Le modeliser sert (a) a rendre la sequence TX lisible,
- *    (b) a detecter une emission demandee alors que l'antenne n'est pas
- *    commutee — une faute silencieuse aujourd'hui.
+ * SCOPE: this block is on the TX / band selection side. It has NO effect
+ *    on FB/SB acquisition: with a synthetic downlink, the Rx path is already
+ *    assumed connected. Modelling it (a) makes the TX sequence readable,
+ *    (b) detects a transmission requested while the antenna is not switched.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -29,18 +28,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Appele depuis calypso_tsp.c a chaque tsp_act_update() (ecriture TSP_ACT_L/U),
- * avec l'etat COMPLET des 16 lignes TSPACT. */
+/* Called from calypso_tsp.c on every tsp_act_update() (TSP_ACT_L/U write),
+ * with the COMPLETE state of the 16 TSPACT lines. */
 void calypso_asm4532_tspact_update(uint16_t tspact, uint32_t fn);
 
-/* true = l'antenne est commutee sur la sortie du PA (TRENA assertee). */
+/* true = the antenna is switched to the PA output (TRENA asserted). */
 bool calypso_asm4532_tx_connected(void);
 
-/* true = bande GSM900 selectionnee pour l'emission (GSM_TXEN assertee),
- * false = DCS1800. N'a de sens que si tx_connected(). */
+/* true = GSM900 band selected for transmission (GSM_TXEN asserted),
+ * false = DCS1800. Only meaningful if tx_connected(). */
 bool calypso_asm4532_band_gsm(void);
 
-/* Compteurs pour les barrieres et le diagnostic. */
+/* Counters for the barriers and diagnostics. */
 uint32_t calypso_asm4532_tx_windows(void);
 
 #endif /* HW_ARM_CALYPSO_ASM4532_H */

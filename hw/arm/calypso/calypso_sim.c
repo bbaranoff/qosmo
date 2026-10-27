@@ -66,39 +66,39 @@ static SimFile sim_files[] = {
         0xFF, 0xFF, 0xFF,
         0x00, 0x00,
         0xFF, 0x00 } },
-    /* [2026-10-21] EF_BCCH (liste BA) : seul l'ARFCN 1 (bit 6 de l'octet 0, MSB d'abord).
-     * A 0xFF la liste couvrait presque tous les ARFCN : la recherche balayait 1..409 au hasard. */
+    /* EF_BCCH (BA list): only ARFCN 1 (bit 6 of byte 0, MSB first). With 0xFF the list
+     * would cover almost every ARFCN and the search would scan 1..409 at random. */
     { 0x6F74, 0x7F20, EF_TRANSPARENT, 16, 0,
       { 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
     { 0x6F46, 0x7F20, EF_TRANSPARENT, 17, 0,
       { 0x01, 'Q','E','M','U','-','S','I','M', ' ',' ',' ',' ',' ',' ',' ',' ' } },
-    /* [2026-10-21] EF absents -> « SIM Invalid » sur Magnetite (la pile TI lit Kc et
-     * PHASE a l'activation ; « file not found » les fait echouer). GSM 11.11 :
-     * Kc = 8 octets + CKSN (0x07 = pas de cle) ; PHASE 0x03 = phase 2+ ;
-     * HPLMN 0xFF = recherche desactivee ; FPLMN vide (0xFF). */
+    /* Required by Magnetite: the TI stack reads Kc and PHASE at activation and a
+     * "file not found" there ends in "SIM Invalid". GSM 11.11:
+     * Kc = 8 bytes + CKSN (0x07 = no key); PHASE 0x03 = phase 2+;
+     * HPLMN 0xFF = search disabled; FPLMN empty (0xFF). */
     { 0x6F20, 0x7F20, EF_TRANSPARENT, 9, 0,
       { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07 } },
-    /* [2026-10-21] ECC (112) et LP (anglais) : « file not found » juste apres l'activation,
-     * le MMI affiche « SIM Invalid » (activation SIM_NO_ERROR, cause 0x80FF mesuree). */
+    /* ECC (112) and LP (English): read right after activation; a "file not found"
+     * there makes the MMI display "SIM Invalid" (activation SIM_NO_ERROR, cause 0x80FF). */
     { 0x6FB7, 0x7F20, EF_TRANSPARENT, 3, 0,
       { 0x11, 0xF2, 0xFF } },
     { 0x6F05, 0x7F20, EF_TRANSPARENT, 1, 0,
       { 0x01 } },
-    /* [2026-10-21] EF_ADN (repertoire) : la SST annonce ADN (service 1). Sans ce fichier le driver
-     * SIM met crdFun = SIM_NO_OPERATION -> SS_INV -> CME_ERR_SimWrong -> « SIM Invalid ». */
+    /* EF_ADN (phonebook): the SST announces ADN (service 1). Without this file the SIM
+     * driver sets crdFun = SIM_NO_OPERATION -> SS_INV -> CME_ERR_SimWrong -> "SIM Invalid". */
     { 0x6FAE, 0x7F20, EF_TRANSPARENT, 1, 0,
       { 0x03 } },
     { 0x6F31, 0x7F20, EF_TRANSPARENT, 1, 0,
       { 0xFF } },
     { 0x6F7B, 0x7F20, EF_TRANSPARENT, 12, 0,
       { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
-    /* [2026-10-21] EF_SMS : capacite de stockage SMS (memory.total = nb d'enregistrements).
-     * Sans ce fichier g_max_messages = 0 -> ALLOC_MEMORY(0) dans smsidle_sms_cb -> « mfwAlloc invalid »
-     * et « Messages: full ». 4 enregistrements libres de 176 octets. */
+    /* EF_SMS: SMS storage capacity (memory.total = number of records). Without this file
+     * g_max_messages = 0 -> ALLOC_MEMORY(0) in smsidle_sms_cb -> "mfwAlloc invalid" and
+     * "Messages: full". 4 free records of 176 bytes. */
     { 0x6F3C, 0x7F20, EF_LINEAR_FIXED, 704, 176,
       { 0 } },
-    /* [2026-10-21] SMS init : EF SMSP (1 enregistrement libre), SMSS et CBMI vides */
+    /* SMS init: EF SMSP (1 free record), SMSS and CBMI empty */
     { 0x6F42, 0x7F20, EF_LINEAR_FIXED, 28, 28,
       { 0xFF } },
     { 0x6F43, 0x7F20, EF_TRANSPARENT, 2, 0,
@@ -107,36 +107,37 @@ static SimFile sim_files[] = {
       { 0xFF, 0xFF } },
     { 0x6F48, 0x7F20, EF_TRANSPARENT, 2, 0,
       { 0xFF, 0xFF } },
-    /* [2026-10-22 14:55] EF que Magnetite demande et qui manquaient (« file not found » dans qemu.log) : apres
-     * chaque SMS recu le telephone lit EF_ACM (6F39) ; puis tout le menu SMS (lire, etat memoire) reste sur
-     * « Please wait » sans plus aucun echange SIM. Contenus neutres (GSM 11.11) : compteurs a zero, tarif
-     * absent, repertoires vides (enregistrements libres = FF). */
-    { 0x6F39, 0x7F20, EF_CYCLIC, 9, 3,          /* EF_ACM : 3 enregistrements de 3 octets, 0 */
+    /* EFs Magnetite requests: after every received SMS the phone reads EF_ACM (6F39), and
+     * the whole SMS menu (read, memory status) stays on "Please wait" if any of them is
+     * missing. Neutral contents (GSM 11.11): counters at zero, no tariff, empty
+     * phonebooks (free records = FF). */
+    { 0x6F39, 0x7F20, EF_CYCLIC, 9, 3,          /* EF_ACM: 3 records of 3 bytes, 0 */
       { 0 } },
-    { 0x6F37, 0x7F20, EF_TRANSPARENT, 3, 0,     /* EF_ACMmax : 0 = pas de limite */
+    { 0x6F37, 0x7F20, EF_TRANSPARENT, 3, 0,     /* EF_ACMmax: 0 = no limit */
       { 0x00, 0x00, 0x00 } },
-    { 0x6F41, 0x7F20, EF_TRANSPARENT, 5, 0,     /* EF_PUCT : devise et prix absents */
+    { 0x6F41, 0x7F20, EF_TRANSPARENT, 5, 0,     /* EF_PUCT: currency and price absent */
       { 0xFF, 0xFF, 0xFF, 0x00, 0x00 } },
     { 0x6F3E, 0x7F20, EF_TRANSPARENT, 1, 0,     /* EF_GID1 */
       { 0xFF } },
     { 0x6F3F, 0x7F20, EF_TRANSPARENT, 1, 0,     /* EF_GID2 */
       { 0xFF } },
-    { 0x6F3A, 0x7F10, EF_LINEAR_FIXED, 280, 28, /* EF_ADN : 10 entrees libres */
+    { 0x6F3A, 0x7F10, EF_LINEAR_FIXED, 280, 28, /* EF_ADN: 10 free entries */
       { 0xFF } },
-    { 0x6F3B, 0x7F10, EF_LINEAR_FIXED, 28, 28,  /* EF_FDN : 1 entree libre */
+    { 0x6F3B, 0x7F10, EF_LINEAR_FIXED, 28, 28,  /* EF_FDN: 1 free entry */
       { 0xFF } },
     { 0x6F40, 0x7F10, EF_LINEAR_FIXED, 28, 28,  /* EF_MSISDN */
       { 0xFF } },
-    { 0x6F44, 0x7F10, EF_CYCLIC, 140, 28,       /* EF_LND : 5 derniers numeros */
+    { 0x6F44, 0x7F10, EF_CYCLIC, 140, 28,       /* EF_LND: 5 last numbers */
       { 0xFF } },
     { 0x6F4A, 0x7F10, EF_LINEAR_FIXED, 13, 13,  /* EF_EXT1 */
       { 0xFF } },
     { 0x6F4B, 0x7F10, EF_LINEAR_FIXED, 13, 13,  /* EF_EXT2 */
       { 0xFF } },
-    /* [2026-10-22 15:05] CPHS (firmware construit avec FF_CPHS) : 6F11/6F13/6F14/6F16 « file not found » et le
-     * menu Messages (qui porte la messagerie vocale CPHS) reste sur « Please wait ». CPHS info (6F16) : phase 2,
-     * aucun service alloue ; indicateurs vides (0x55 = pas de message / pas de renvoi), nom d'operateur absent. */
-    { 0x6F16, 0x7F20, EF_TRANSPARENT, 3, 0,     /* CPHS info : phase 2, services 00 00 */
+    /* CPHS (firmware built with FF_CPHS): 6F11/6F13/6F14/6F16 must exist, otherwise the
+     * Messages menu (which carries the CPHS voice mail) stays on "Please wait". CPHS info
+     * (6F16): phase 2, no service allocated; empty indicators (0x55 = no message / no
+     * forwarding), operator name absent. */
+    { 0x6F16, 0x7F20, EF_TRANSPARENT, 3, 0,     /* CPHS info: phase 2, services 00 00 */
       { 0x02, 0x00, 0x00 } },
     { 0x6F11, 0x7F20, EF_TRANSPARENT, 2, 0,     /* CPHS voice message waiting */
       { 0x55, 0x55 } },
@@ -146,7 +147,7 @@ static SimFile sim_files[] = {
       { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
     { 0x6F15, 0x7F20, EF_TRANSPARENT, 2, 0,     /* CPHS customer service profile */
       { 0xFF, 0xFF } },
-    { 0x6F17, 0x7F20, EF_LINEAR_FIXED, 28, 28,  /* CPHS mailbox numbers : 1 entree libre */
+    { 0x6F17, 0x7F20, EF_LINEAR_FIXED, 28, 28,  /* CPHS mailbox numbers: 1 free entry */
       { 0xFF } },
 };
 #define SIM_FILE_COUNT (sizeof(sim_files) / sizeof(sim_files[0]))
@@ -211,16 +212,16 @@ struct CalypsoSim {
     int         resp_len;
 
     bool        powered;
-    bool        atr_manual_done;   /* [2026-10-21] ATR deja livre pour ce reset (mode manuel TI) */
-    /* [2026-10-21] reponses de la carte differees d'un temps de transmission
-     * (le driver TI attend l'octet de procedure APRES avoir fini d'emettre et
-     * bascule SIO en reception ; une reponse synchrone dans l'ecriture de DTX
-     * arrivait trop tot et il recommencait la commande) */
+    bool        atr_manual_done;   /* ATR already delivered for this reset (TI manual mode) */
+    /* card responses deferred by a transmission time (the TI driver waits for
+     * the procedure byte AFTER it has finished transmitting and switched SIO
+     * to reception; a synchronous response inside the DTX write arrives too
+     * early and makes it restart the command) */
     bool        defer;
     uint8_t     pend[APDU_MAX_LEN + 16];
     int         pend_len;
     QEMUTimer  *resp_timer;
-    /* [2026-10-24] IT TX apres un temps caractere (voir calypso_sim_reg_write, DTX) */
+    /* IT TX after one character time (see calypso_sim_reg_write, DTX) */
     QEMUTimer  *tx_timer;
     int64_t     last_tx_ns;
 };
@@ -272,8 +273,8 @@ static void fire_wt(void *opaque)
 {
     CalypsoSim *s = opaque;
     if (rx_count(s) > 0) return;
-    /* [2026-10-22 15:15] reponse en cours d'emission (delai proportionnel, resp_delai_ns) : la carte « parle »,
-     * le temps d'attente est relance a chaque octet sur une vraie carte -> on ne declare pas de WT. */
+    /* response being transmitted (proportional delay, resp_delai_ns): the card is
+     * "talking"; on a real card the waiting time restarts at every byte -> no WT. */
     if (s->pend_len > 0) { timer_mod_ns(s->wt_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WT_DELAY_NS); return; }
     s->it |= CALYPSO_SIM_IT_WT;
     SIM_LOG("WT timeout fired (RX FIFO empty)");
@@ -312,12 +313,13 @@ static void update_irq(CalypsoSim *s)
     else        qemu_irq_lower(s->irq);
 }
 
-#define RESP_DELAY_NS 1500000   /* ~1,5 ms : un octet a 9600 bauds + marge */
-/* [2026-10-22 15:15] DELAI PROPORTIONNEL A LA REPONSE. 1,5 ms par reponse quelle que soit sa taille : toute
- * l'initialisation SMS de Magnetite (4 x 176 octets d'EF_SMS, SMSP, CBMI) finissait avant que l'ecran de veille
- * ne s'abonne a E_SMS_READY (smsidle_start, fin de mise sous tension) : evenement perdu, sms_initialised reste
- * FALSE, le menu Messages reste sur « Please wait » (SmsRead_R_exec_cb). Une vraie carte a 9600 bauds rend
- * ~1,04 ms par octet. CALYPSO_SIM_US_OCTET (defaut 1040, 0 = ancien delai fixe). */
+#define RESP_DELAY_NS 1500000   /* ~1.5 ms: one byte at 9600 baud + margin */
+/* Delay proportional to the response size. With a fixed 1.5 ms per response, the whole
+ * Magnetite SMS initialisation (4 x 176 bytes of EF_SMS, SMSP, CBMI) finishes before the
+ * idle screen subscribes to E_SMS_READY (smsidle_start, end of power-on): the event is
+ * lost, sms_initialised stays FALSE and the Messages menu stays on "Please wait"
+ * (SmsRead_R_exec_cb). A real card at 9600 baud delivers ~1.04 ms per byte.
+ * CALYPSO_SIM_US_OCTET (default 1040, 0 = fixed delay RESP_DELAY_NS). */
 static long us_octet(void)
 {
     static long us = -1;
@@ -390,18 +392,18 @@ static int build_select_response(CalypsoSim *s, SimFile *f, uint8_t *out)
     out[p++] = (f->fid >> 8) & 0xFF;
     out[p++] =  f->fid       & 0xFF;
     if (f->structure == EF_DF || f->structure == EF_MF) {
-        /* [2026-10-21] GSM 11.11 9.2.1, reponse a SELECT d'un MF/DF :
-         *  6 type (01 MF, 02 DF) ; 7-12 RFU ; 13 caracteristiques du fichier ;
-         *  14 nb de DF ; 15 nb d'EF ; 16 nb de CHV ; 17 RFU ; 18 etat CHV1 ;
-         *  19 UNBLOCK CHV1 ; 20 CHV2 ; 21 UNBLOCK CHV2.
-         * L'octet 13 valait 0 : « carte 5 V seulement » (b5 = 0) -> le driver
-         * SIM de TI (sim.c, test 27.17.1.5.2) coupait la carte et la rejetait.
-         * 0x11 = arret d'horloge permis, technologie 3 V. CHV1 initialise
-         * (0x83), 3 essais, de meme pour CHV2 et les codes de deblocage. */
+        /* GSM 11.11 9.2.1, response to SELECT of an MF/DF:
+         *  6 type (01 MF, 02 DF); 7-12 RFU; 13 file characteristics;
+         *  14 number of DFs; 15 number of EFs; 16 number of CHVs; 17 RFU;
+         *  18 CHV1 status; 19 UNBLOCK CHV1; 20 CHV2; 21 UNBLOCK CHV2.
+         * Byte 13 must not announce "5 V only" (b5 = 0): the TI SIM driver
+         * (sim.c, test 27.17.1.5.2) would power the card off and reject it.
+         * 0x11 = clock stop allowed, 3 V technology. CHV1 initialised
+         * (0x83), 3 attempts, same for CHV2 and the unblock codes. */
         out[p++] = (f->structure == EF_MF) ? 0x01 : 0x02;   /* 6 */
         out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00;  /* 7-9 */
         out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00;  /* 10-12 */
-        out[p++] = 0x91;                                    /* 13 : + b8 CHV1 desactive (pas de « Enter PIN1 ») */
+        out[p++] = 0x91;                                    /* 13: + b8 CHV1 disabled (no "Enter PIN1") */
         out[p++] = 0x02;                                    /* 14 DFs */
         out[p++] = 0x09;                                    /* 15 EFs */
         out[p++] = 0x04;                                    /* 16 CHVs */
@@ -414,14 +416,14 @@ static int build_select_response(CalypsoSim *s, SimFile *f, uint8_t *out)
         out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00;
-        /* [2026-10-21] file status (octet 11) : b1 = 1 -> fichier non invalide. 0xAA (b1 = 0)
-         * faisait croire a app_check_imsi_loci_validation() que IMSI/LOCI sont invalides ->
-         * rehabilitation -> SIM_NO_OPERATION (« SIM Invalid ») */
+        /* file status (byte 11): b1 = 1 -> file not invalidated. With b1 = 0,
+         * app_check_imsi_loci_validation() considers IMSI/LOCI invalid ->
+         * rehabilitation -> SIM_NO_OPERATION ("SIM Invalid") */
         out[p++] = 0xAB;
-        /* [2026-10-21] octets 13-15 (GSM 11.11 9.2.1) : longueur des donnees suivantes (2), structure,
-         * longueur d'enregistrement. Trois zeros de trop decalaient tout : structure lue 00
-         * (transparent) et longueur d'enregistrement 0 -> l'entite SIM ne lisait que l'enregistrement 1
-         * de EF SMS, capacite SMS 0 -> mfwAlloc(0) en boucle et « Messages: full » dans l'IHM. */
+        /* bytes 13-15 (GSM 11.11 9.2.1): length of the following data (2), structure,
+         * record length. The SIM entity derives the record count of EF SMS from them:
+         * a record length of 0 means an SMS capacity of 0 -> mfwAlloc(0) in a loop and
+         * "Messages: full" in the MMI. */
         out[p++] = 0x02;
         out[p++] = (f->structure == EF_TRANSPARENT) ? 0x00
                 : (f->structure == EF_LINEAR_FIXED) ? 0x01 : 0x03;
@@ -495,18 +497,19 @@ static void cmd_get_response(CalypsoSim *s, uint8_t le)
     s->resp_len = 0;
 }
 
-/* [2026-10-22 14:35] ENREGISTREMENTS GARDES. Les lectures rendaient 0xFF partout, EF_SMS compris : un enregistrement
- * SMS libre commence par l'octet d'etat 0x00 (GSM 11.11 10.5.3), 0xFF n'en est pas un. La pile SMS de Magnetite ne
- * trouvait donc aucune place (« [cmhSMS_checkAccess]: Wrong SIM status », « Messages: full ») et repondait RP-ERROR
- * a chaque SMS entrant (MSC : « Sending SMS ... failed »). Et UPDATE RECORD n'etait pas garde. Un tampon par fichier
- * a enregistrements, initialise libre (EF_SMS : 00 puis FF ; les autres : FF), lu et ecrit par record. */
+/* Stored records. A free SMS record starts with the status byte 0x00 (GSM 11.11 10.5.3);
+ * 0xFF is not a free record, and the Magnetite SMS stack would find no room
+ * ("[cmhSMS_checkAccess]: Wrong SIM status", "Messages: full") and answer RP-ERROR to
+ * every incoming SMS. One buffer per record file, initialised free (EF_SMS: 00 then FF;
+ * the others: FF), read and written per record (UPDATE RECORD is kept). */
 #define SIM_REC_MAX 1024
-/* [2026-10-22] CENTRE SMS. EF_SMSP restait libre (FF) : en SMS MO le C139 demandait « Cent. » a la main et le
- * firmware a fini dans dar_reset (boucle de resets du chien de garde). On pose le centre du banc dans
- * l'enregistrement 1 (GSM 11.11 10.5.6) : indicateurs E1 = adresse SC, PID, DCS et VP presents, TP-DA absent.
- * Le numero vient de « sms-service-center » de CALYPSO_SIM_CFG (mobile.cfg), sinon celui du banc. */
+/* SMS centre. With EF_SMSP left free (FF), the C139 asks for "Cent." by hand on an MO SMS
+ * and the firmware ends in dar_reset (watchdog reset loop). The bench centre is placed in
+ * record 1 (GSM 11.11 10.5.6): indicators E1 = SC address, PID, DCS and VP present, TP-DA
+ * absent. The number comes from "sms-service-center" in CALYPSO_SIM_CFG (mobile.cfg),
+ * otherwise the bench default. */
 static char g_sim_smsc[24] = "+3366612340001";
-static void smsp_remplir(uint8_t *r)          /* r : enregistrement de 28 octets, deja a FF */
+static void smsp_remplir(uint8_t *r)          /* r: 28-byte record, already FF */
 {
     const char *d = g_sim_smsc;
     uint8_t ton = 0x81;
@@ -522,12 +525,12 @@ static void smsp_remplir(uint8_t *r)          /* r : enregistrement de 28 octets
     }
     if (!n) return;
     r[0] = 0xE1;
-    r[13] = (uint8_t)(1 + (n + 1) / 2);       /* longueur : TON/NPI + chiffres */
+    r[13] = (uint8_t)(1 + (n + 1) / 2);       /* length: TON/NPI + digits */
     r[14] = ton;
     memcpy(&r[15], bcd, (n + 1) / 2);
     r[25] = 0x00;                             /* TP-PID */
     r[26] = 0x00;                             /* TP-DCS */
-    r[27] = 0xA7;                             /* TP-VP : 24 h */
+    r[27] = 0xA7;                             /* TP-VP: 24 h */
 }
 static uint8_t *rec_store(SimFile *f)
 {
@@ -539,8 +542,8 @@ static uint8_t *rec_store(SimFile *f)
         memset(store[i], 0xFF, f->size);
         if (f->fid == 0x6F3C)
             for (int r = 0; r < f->size / f->rec_len; r++) store[i][r * f->rec_len] = 0x00;
-        if (f->fid == 0x6F39) memset(store[i], 0x00, f->size);   /* EF_ACM : compteur a zero */
-        if (f->fid == 0x6F42 && f->rec_len == 28) smsp_remplir(store[i]);   /* EF_SMSP : centre SMS */
+        if (f->fid == 0x6F39) memset(store[i], 0x00, f->size);   /* EF_ACM: counter at zero */
+        if (f->fid == 0x6F42 && f->rec_len == 28) smsp_remplir(store[i]);   /* EF_SMSP: SMS centre */
     }
     return store[i];
 }
@@ -553,7 +556,7 @@ static void cmd_read_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t le
         return;
     }
     int nrec = f->size / f->rec_len;
-    /* [2026-10-21] modes 02 (suivant) / 03 (precedent) en plus de 04 (absolu), GSM 11.11 9.2.5 */
+    /* modes 02 (next) / 03 (previous) in addition to 04 (absolute), GSM 11.11 9.2.5 */
     static uint16_t rec_ef; static int rec_cur;
     if (rec_ef != s->selected_ef) { rec_ef = s->selected_ef; rec_cur = 0; }
     if (mode == 0x02) rec = (uint8_t)(rec_cur + 1);
@@ -564,7 +567,7 @@ static void cmd_read_record(CalypsoSim *s, uint8_t rec, uint8_t mode, uint8_t le
         return;
     }
     rec_cur = rec;
-    /* enregistrements libres (0xFF) : pas de contenu stocke pour ce fichier */
+    /* free records (0xFF): no content stored for this file */
     uint8_t buf[256];
     int n = (le == 0) ? f->rec_len : le;
     if (n > f->rec_len) n = f->rec_len;
@@ -594,9 +597,9 @@ static void cmd_read_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t le)
     respond_sw(s, 0x90, 0x00);
 }
 
-/* [2026-10-21] UPDATE BINARY / UPDATE RECORD : refuses (6D00) jusqu'ici, le telephone ne pouvait
- * rien ecrire (LOCI, Kc, FPLMN, SMS...). Le transparent est garde dans data[] tant qu'il y tient ;
- * les enregistrements sont acceptes sans etre gardes (les lectures rendent des enregistrements libres). */
+/* UPDATE BINARY / UPDATE RECORD: the phone writes LOCI, Kc, FPLMN, SMS... A transparent
+ * file is kept in data[] as long as it fits; records go to the per-file record store
+ * (rec_store), or are accepted without being kept when the file has none. */
 static void cmd_update_binary(CalypsoSim *s, uint8_t p1, uint8_t p2, uint8_t lc, const uint8_t *data)
 {
     SimFile *f = find_file(s->selected_ef, 0);
@@ -649,9 +652,10 @@ static void cmd_run_gsm_algo(CalypsoSim *s, uint8_t lc, const uint8_t *data)
     if (lc != 16) { respond_sw(s, 0x67, 0x00); return; }
 
     uint8_t resp[12];
-    /* [2026-10-21] le VRAI calcul : COMP128v1 avec la Ki de mobile.cfg (calypso_comp128.c). Le faux SRES
-     * (RAND ^ 0xAA, Kc 0) ne genait pas le mobile osmocom (sim test : comp128 fait dans layer23), mais le
-     * firmware TI (Magnetite) demande le calcul a la carte -> LOCATION UPDATING REJECT du MSC. */
+    /* COMP128v1 with the Ki from mobile.cfg (calypso_comp128.c). The osmocom mobile does not
+     * depend on it (sim test: comp128 done in layer23), but the TI firmware (Magnetite) asks
+     * the card for the computation, and the MSC checks the SRES. Without a Ki, a dummy
+     * SRES (RAND ^ 0xAA, Kc 0) is returned. */
     if (s->ki_valid) {
         comp128v1(s->ki, data, resp, resp + 4);
         SIM_LOG("RUN_GSM_ALGORITHM COMP128v1 (RAND[0]=0x%02x) → SRES=%02x%02x%02x%02x Kc[0]=0x%02x",
@@ -677,13 +681,13 @@ static void dispatch_apdu(CalypsoSim *s)
     SIM_LOG("APDU CLA=%02x INS=%02x P1=%02x P2=%02x P3=%02x dlen=%d",
             cla, ins, p1, p2, p3, dlen > 0 ? dlen : 0);
 
-    /* [2026-10-21] T=0 : une commande qui RENVOIE des donnees (GET RESPONSE,
-     * READ BINARY/RECORD, STATUS, FETCH) commence par l'octet de procedure
-     * (ACK = INS) avant les donnees puis SW1 SW2. Le driver TI (sim32.c,
-     * moderx 1) l'exige ; sans lui le premier octet de donnees passait pour un
-     * ACK invalide et SIM_GetResponse echouait. Les commandes sortantes ont deja
-     * recu leur ACK apres l'en-tete (apdu_tx_byte), les commandes sans donnees
-     * (moderx 5) attendent directement SW1 SW2. */
+    /* T=0: a command that RETURNS data (GET RESPONSE, READ BINARY/RECORD,
+     * STATUS, FETCH) starts with the procedure byte (ACK = INS) before the
+     * data, then SW1 SW2. The TI driver (sim32.c, moderx 1) requires it;
+     * without it the first data byte is taken for an invalid ACK and
+     * SIM_GetResponse fails. Outgoing commands already received their ACK
+     * after the header (apdu_tx_byte); commands without data (moderx 5)
+     * wait directly for SW1 SW2. */
     if (ins == 0xC0 || ins == 0xB0 || ins == 0xB2 || ins == 0xF2 || ins == 0x12) {
         rx_push(s, ins);
     }
@@ -719,11 +723,12 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
     }
 }
 
-/* [2026-10-24] RESYNCHRONISATION. Si le driver TI n'a pas vu l'ACK (SIM_ERR_WAIT au bout de 159 a 1815 ticks,
- * soit 0,7 s au moins), la couche au-dessus renvoie un en-tete neuf alors qu'on attendait la suite de la commande :
- * « a0 a4 » etait pris pour le FID (SELECT 0xa0a4) et toutes les commandes suivantes restaient decalees de 2 octets
- * (CLA=00 INS=00 -> 6D00 a perpetuite -> « SIM Invalid »). Dans une commande les octets se suivent a ~1 ms : un
- * silence de plus de 500 ms veut dire que le terminal a abandonne la commande, l'octet recu ouvre un nouvel APDU. */
+/* Resynchronisation. If the TI driver has not seen the ACK (SIM_ERR_WAIT after 159 to 1815
+ * ticks, at least 0.7 s), the layer above sends a fresh header while the rest of the
+ * command is still expected; taking "a0 a4" for the FID (SELECT 0xa0a4) would leave every
+ * following command shifted by 2 bytes (CLA=00 INS=00 -> 6D00 forever -> "SIM Invalid").
+ * Within a command the bytes follow each other at ~1 ms: a silence of more than 500 ms
+ * means the terminal abandoned the command, and the received byte opens a new APDU. */
 #define APDU_ABANDON_NS 500000000LL
 static void apdu_tx_byte_inner(CalypsoSim *s, uint8_t b)
 {
@@ -830,15 +835,13 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
             SIM_LOG("CMDSTOP");
         }
         if (val & (CALYPSO_SIM_CMD_CARDRST | CALYPSO_SIM_CMD_IFRST)) {
-            /* [2026-10-21] Le driver SIM de TI (Magnetite, sim.c SIM_ManualStart)
-             * n'ecrit jamais START : CLKEN, STOP, puis SWRST en mode automatique
-             * et il attend l'ATR. Un reset avec l'horloge du module active
-             * alimente donc la carte et livre l'ATR (osmocom ecrit START avant,
-             * rien ne change pour lui). */
-            /* [2026-10-21 11:30] Livrer l'ATR ici (SWRST + CLKEN) cassait le
-             * driver TI : la carte repondait avant que SIM_ManualStart ait mis
-             * VCC, SIO et l'horloge, et la sequence ne finissait jamais. L'ATR
-             * du mode manuel part sur CONF1 (SCLKEN / SRSTLEV, ci-dessous). */
+            /* The TI SIM driver (Magnetite, sim.c SIM_ManualStart) never writes
+             * START: CLKEN, STOP, then SWRST in automatic mode, and it waits for
+             * the ATR. The ATR is not delivered here (SWRST + CLKEN): the card
+             * would answer before SIM_ManualStart has set VCC, SIO and the
+             * clock, and the sequence would never finish. The manual-mode ATR
+             * is delivered on CONF1 (SCLKEN / SRSTLEV, below). osmocom writes
+             * START first, so the card is powered and the ATR is delivered. */
             SIM_LOG("RESET → ATR delivered (synchronous) pc=0x%08x lr=0x%08x", sim_guest_pc(), sim_guest_lr());
             s->apdu_pos = 0;
             s->apdu_expected = 0;
@@ -852,11 +855,11 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
         break;
     case CALYPSO_SIM_REG_STAT:    s->stat   = val; break;
     case CALYPSO_SIM_REG_CONF1: {
-        /* [2026-10-21] Mode manuel (BYPASS) du driver SIM de TI : il alimente
-         * la carte (SVCCLEV), lache SIO, lance l'horloge (SCLKEN) et attend
-         * l'ATR, puis leve SRSTLEV s'il ne vient pas. Sur silicium la carte
-         * repond a la sortie de reset : on livre l'ATR au front montant de
-         * SCLKEN ou de SRSTLEV, une fois par reset. */
+        /* Manual mode (BYPASS) of the TI SIM driver: it powers the card
+         * (SVCCLEV), releases SIO, starts the clock (SCLKEN) and waits for the
+         * ATR, then raises SRSTLEV if it does not come. On silicon the card
+         * answers when leaving reset: the ATR is delivered on the rising edge
+         * of SCLKEN or of SRSTLEV, once per reset. */
         uint16_t old = s->conf1;
         s->conf1 = val;
         if (val != old) {
@@ -865,7 +868,7 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
         if (val & CALYPSO_SIM_CONF1_SVCCLEV) {
             s->powered = true;
         }
-        /* warm reset (SIM_WARMReset : SRSTLEV bas 400 ETU puis haut) : nouvel ATR */
+        /* warm reset (SIM_WARMReset: SRSTLEV low for 400 ETU then high): new ATR */
         if (!(val & CALYPSO_SIM_CONF1_SRSTLEV) && (old & CALYPSO_SIM_CONF1_SRSTLEV)) {
             s->atr_manual_done = false;
             s->rx_head = s->rx_tail = 0;
@@ -890,15 +893,17 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
     case CALYPSO_SIM_REG_DTX:
         SIM_LOG("DTX <- 0x%02x", (unsigned)(val & 0xff));
         apdu_tx_byte(s, (uint8_t)(val & 0xFF));
-        /* [2026-10-21] Octet parti : IT TX (le driver TI, sim32.c, n'envoie
-         * l'octet suivant d'une commande que sur cette IT, STAT TXPAR a 1).
-         * Acquittee a la lecture de SIM_IT comme NATR/WT/OV. */
-        /* [2026-10-24] ... mais au bout d'un temps caractere, pas tout de suite. Levee aussitot, l'IT faisait partir
-         * les 5 octets d'en-tete en quelques us et l'ACK suivait 1,5 ms apres le PREMIER octet. Or SIM_Command_Base
-         * ecrit le premier octet (SIM_WriteBuffer) puis seulement passe moderx a 6 (attente de l'ACK) : une tache SIM
-         * preemptee 1,5 ms entre les deux recevait l'ACK en moderx 5 (range comme SW1), attendait un ACK qui ne
-         * venait plus, SIM_ERR_WAIT, en-tete renvoye -> desynchronisation (voir APDU_ABANDON_NS). A 9600 bauds un
-         * octet dure ~1 ms (CALYPSO_SIM_US_OCTET), l'en-tete ~5 ms comme sur une vraie carte. */
+        /* Byte sent: IT TX (the TI driver, sim32.c, only sends the next byte of
+         * a command on this IT, STAT TXPAR at 1). Acknowledged when SIM_IT is
+         * read, like NATR/WT/OV. */
+        /* ... but after one character time, not immediately. Raised at once, the IT
+         * would send the 5 header bytes within a few us and the ACK would follow 1.5 ms
+         * after the FIRST byte. SIM_Command_Base writes the first byte (SIM_WriteBuffer)
+         * and only then sets moderx to 6 (waiting for the ACK): a SIM task preempted
+         * 1.5 ms between the two would receive the ACK in moderx 5 (stored as SW1), wait
+         * for an ACK that no longer comes, SIM_ERR_WAIT, header resent -> loss of
+         * synchronisation (see APDU_ABANDON_NS). At 9600 baud a byte lasts ~1 ms
+         * (CALYPSO_SIM_US_OCTET), the header ~5 ms as on a real card. */
         timer_mod_ns(s->tx_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)us_octet() * 1000);
         break;
     case CALYPSO_SIM_REG_MASKIT: {
@@ -933,7 +938,7 @@ static void load_config_from_file(CalypsoSim *s, const char *path)
             in_test_sim = true;
             continue;
         }
-        if (strncmp(p, "sms-service-center ", 19) == 0) {   /* [2026-10-22] -> EF_SMSP, voir rec_store */
+        if (strncmp(p, "sms-service-center ", 19) == 0) {   /* -> EF_SMSP, see rec_store */
             sscanf(p + 19, "%23s", g_sim_smsc);
             SIM_LOG("centre SMS (EF_SMSP) depuis %s : %s", path, g_sim_smsc);
             continue;

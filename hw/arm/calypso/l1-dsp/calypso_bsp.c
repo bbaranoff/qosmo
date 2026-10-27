@@ -51,13 +51,13 @@ static int rach_force_bsic(void);
 #include "hw/arm/calypso/calypso_debug.h"
 #include "calypso_gmsk.h"
 
-/* calypso_api.h le declare, mais tire tout l'etat QEMU : prototype seul. */
+/* calypso_api.h declares it but pulls in all the QEMU state: bare prototype. */
 extern uint32_t calypso_trx_get_fn(void);
 
 /* DARAM write stamp, published for the c54x memory dump. */
 unsigned calypso_daram_last_fn;
-/* [2026-09-19] fn du dernier burst effectivement remis au BSP, pour mesurer
- * l'ecart entre le DEPOT et l'EVALUATION par la tache DSP (sonde DECALAGE). */
+/* fn of the last burst actually handed to the BSP, to measure the gap between
+ * the DEPOSIT and the EVALUATION by the DSP task (DECALAGE probe). */
 unsigned g_depot_fn, g_depot_seq;
 unsigned calypso_daram_wr_count;
 #define BSP_LOG(fmt, ...) \
@@ -106,15 +106,14 @@ static void bsp_iq_publish(const int16_t *iq, int n)
             acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
         }
         uint32_t mav = (uint32_t)(acc / (uint32_t)n);
-        /* [2026-09-23] UN BURST SILENCIEUX NE MESURE PAS LA CELLULE.
-         * Les effacements (bsp_ts0_service, trame sans burst) et les
-         * remplissages a zero des intervalles vides passent aussi par ici : le
-         * MAV tombait a ~0 et le a_pm suivant au plancher (-100 dBm, que le
-         * firmware rend « rxlev <=-110 (0) »), soit C1 = 0 et la cellule jugee
-         * inutilisable -- « Found signal rxlev <=-110 (0) », « Channel sync
-         * error », LOST_COVERAGE toutes les 5 a 7 s (run du 2026-09-23 15:36).
-         * On garde donc la derniere mesure d'un vrai burst.
-         * CALYPSO_BSP_MAV_MIN=0 retablit la mise a jour inconditionnelle. */
+        /* A silent burst does not measure the cell. Clears (bsp_ts0_service,
+         * frame without burst) and the zero fills of empty slots also come
+         * through here; letting them drive the MAV to ~0 would push the next
+         * a_pm to the floor (-100 dBm, which the firmware reports as
+         * "rxlev <=-110 (0)"), i.e. C1 = 0 and the cell deemed unusable
+         * (LOST_COVERAGE every 5 to 7 s). The last measurement of a real
+         * burst is therefore kept. CALYPSO_BSP_MAV_MIN=0 restores the
+         * unconditional update. */
         static int mav_min = -1;
         if (mav_min < 0) {
             const char *e = calypso_getenv("CALYPSO_BSP_MAV_MIN");
@@ -172,37 +171,36 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ)
     return true;
 }
 
-/* [2026-10-21 23:50] UNE MESURE PAR FENETRE. En veille la L1 TI fait plusieurs mesures dans la meme trame
- * (d_task_md = 0x200 + n : la cellule ARFCN 1 et le voisin 277 = DCS 614), et apm_jamais_nul (pont.c) les
- * remplissait toutes avec le MAV du DERNIER paquet livre : la fenetre du voisin (bruit du faux air) passait
- * en dernier et la cellule tombait au plancher avec lui -- IBA_I (1 54) -> (1 8), barres perdues des
- * l'entree en veille paging (run 23:43). On garde donc le MAV de chaque fenetre de mesure (one-shot,
- * < 150 echantillons) dans l'ordre de la trame ; la k-ieme PM prend le k-ieme. */
+/* One measurement per window. In idle mode the TI L1 makes several measurements in the
+ * same frame (d_task_md = 0x200 + n: the cell ARFCN 1 and the neighbour 277 = DCS 614); if
+ * apm_jamais_nul (pont.c) filled them all with the MAV of the LAST delivered packet, the
+ * neighbour window (fake-air noise) would come last and drag the cell to the floor with it.
+ * The MAV of each measurement window (one-shot, < 150 samples) is therefore kept in frame
+ * order; the k-th PM takes the k-th one. */
 #define BSP_PM_MAV_N 8
-static int faux_air_gain(uint32_t tick, int limite);   /* plus bas, avec faux_air_arfcn */
-static uint32_t g_tick_courant;        /* (definition anticipee, voir bsp_ts0_service) */
+static int faux_air_gain(uint32_t tick, int limite);   /* below, with faux_air_arfcn */
+static uint32_t g_tick_courant;        /* (early definition, see bsp_ts0_service) */
 static uint16_t g_pm_mav[BSP_PM_MAV_N], g_pm_mav_der[BSP_PM_MAV_N];
 static int g_pm_mav_n, g_pm_mav_der_n;
 static uint32_t g_pm_mav_tick;
 #define BSP_PM_FIFO_N 16
 static uint16_t g_pm_mav_cellule = 14000;
 static unsigned g_pm_dette;
-/* [2026-10-22 00:20] LA PM QUE LE DSP ECRIT. c54x_mem.c remplace chaque ecriture du DSP dans a_pm (page R,
- * 0x834-836 / 0x848-84A) par calypso_bsp_rssi_apm(). Celle-ci partait de bsp_last_mav, que seul l'ancien
- * chemin UDP (bsp_iq_publish) alimente : avec pont.c il restait sur du bruit (118) et la PM ecrite par le DSP
- * retombait au plancher 0x0980 apres chaque mesure, meme fenetre pleine de la cellule (trace [apmT]/[apmL] du
- * 22/10 00:13 : R1 1280 -> 0980 entre le DONE et le tick suivant). On prend la DERNIERE fenetre de mesure
- * livree (le DSP ecrit sa PM juste apres l'avoir traitee) avec le gain programme pour elle. */
-static uint16_t g_pm_der_mav; static int g_pm_der_gain = -999, g_pm_der_ok;                   /* PM predites : leurs fenetres, livrees ensuite, ne vont pas en file */     /* MAV d'un burst de la cellule (voir calypso_bsp_rssi_apm_suivante) */
+/* The PM the DSP writes. c54x_mem.c replaces every DSP write into a_pm (page R,
+ * 0x834-836 / 0x848-84A) with calypso_bsp_rssi_apm(). bsp_last_mav is only fed by the UDP
+ * path (bsp_iq_publish); with pont.c it would stay on noise, so the value comes from the
+ * LAST delivered measurement window (the DSP writes its PM right after processing it),
+ * with the gain programmed for that window. */
+static uint16_t g_pm_der_mav; static int g_pm_der_gain = -999, g_pm_der_ok;                   /* predicted PMs: their windows, delivered later, do not go in the queue */     /* MAV of a cell burst (see calypso_bsp_rssi_apm_suivante) */
 static int faux_air_arfcn(uint32_t tick, int limite);
 static int faux_air_cellule(void);
 static uint16_t g_pm_fifo[BSP_PM_FIFO_N];
 static int16_t g_pm_fifo_gain[BSP_PM_FIFO_N];
-static uint32_t g_pm_fifo_tick[BSP_PM_FIFO_N];  /* tick de livraison : au-dela de 3 trames l'entree est perimee */   /* gain RX de la fenetre (faux_air_gain), -999 inconnu */
+static uint32_t g_pm_fifo_tick[BSP_PM_FIFO_N];  /* delivery tick: past 3 frames the entry is stale */   /* RX gain of the window (faux_air_gain), -999 unknown */
 static uint32_t g_pm_fifo_w, g_pm_fifo_r;
-/* [2026-10-22 00:20] TRACE A CHAUD : `touch /dev/shm/apm_trace` -> chaque trame (pont.c [apmT]) et chaque
- * livraison en fenetre de mesure ([apmL]) sont tracees, 4000 lignes au plus ; `rm` pour arreter. Sert a
- * etablir QUAND le DSP ecrit a_pm / d_task_md et quand la file des MAV les sert (perte d'antenne en veille). */
+/* Live trace: `touch /dev/shm/apm_trace` -> every frame (pont.c [apmT]) and every delivery
+ * in a measurement window ([apmL]) are traced, 4000 lines at most; `rm` to stop. Shows WHEN
+ * the DSP writes a_pm / d_task_md and when the MAV queue serves them. */
 int calypso_apm_trace_on(void)
 {
     static unsigned n_appels, n_lignes; static int on;
@@ -211,19 +209,19 @@ int calypso_apm_trace_on(void)
     n_lignes++;
     return 1;
 }
-/* [2026-10-22 00:25] RANG DE LA FENETRE DE MESURE DANS LA TRAME. En veille la L1 TI mesure deux frequences par
- * trame (paires (1, 277) de IBA_I) : la 1re fenetre utilise la programmation du synthe faite en FIN de trame
- * precedente (qbit 4851..4983), la 2e celle du DEBUT de la trame (qbit 323/671) -- releve du shm du 21/10 :
- * trame N 323 -> 1, 4861 -> 614. La recherche « derniere programmation avant le qbit 5000 » rendait la meme
- * pour les deux : les fenetres du voisin recevaient un burst de la cellule, 277 remontait a 30-42, la L1
- * lancait une synchro voisine (tache 28, PM lues a 0) et finissait en RECOVERY. */
+/* Rank of the measurement window in the frame. In idle mode the TI L1 measures two
+ * frequencies per frame (IBA_I pairs (1, 277)): the 1st window uses the synthesizer
+ * programming done at the END of the previous frame (qbit 4851..4983), the 2nd the one at
+ * the START of the frame (qbit 323/671), e.g. frame N: 323 -> 1, 4861 -> 614. Looking up
+ * "last programming before qbit 5000" would return the same for both, so the lookup is
+ * bounded by the window rank. */
 static int pm_rang_fenetre(void)
 {
     return g_pm_mav_tick == g_tick_courant ? g_pm_mav_n : 0;
 }
 static int pm_limite_qbit(int rang)
 {
-    return rang == 0 ? -1 : 2500;    /* -1 : seulement les trames precedentes */
+    return rang == 0 ? -1 : 2500;    /* -1: previous frames only */
 }
 static void bsp_pm_mav_noter(const int16_t *iq, int n, double k_air)
 {
@@ -232,23 +230,23 @@ static void bsp_pm_mav_noter(const int16_t *iq, int n, double k_air)
         g_pm_mav_tick = g_tick_courant; g_pm_mav_n = 0;
     }
     if (n <= 0) return;
-    int lim = pm_limite_qbit(g_pm_mav_n);      /* rang de cette fenetre dans la trame (avant ajout) */
+    int lim = pm_limite_qbit(g_pm_mav_n);      /* rank of this window in the frame (before adding) */
     uint64_t acc = 0;
     for (int i = 0; i < n; i++) { int v = iq[i]; acc += (v < 0) ? (uint32_t)(-v) : (uint32_t)v; }
     uint32_t mav = (uint32_t)(acc / (uint32_t)n * k_air);
     uint16_t m16 = mav > 0xffff ? 0xffff : (uint16_t)mav;
-    if (m16 >= 5000) g_pm_mav_cellule = m16;   /* dernier vrai burst vu dans une fenetre de mesure */
+    if (m16 >= 5000) g_pm_mav_cellule = m16;   /* last real burst seen in a measurement window */
     g_pm_der_mav = m16; g_pm_der_gain = faux_air_gain(g_tick_courant, lim); g_pm_der_ok = 1;
     if (calypso_apm_trace_on())
         printf("  [apmL] tick=%u fenetre=%d rang=%d mav=%u arfcn=%d gain=%d file=%u\n", g_tick_courant,
                calypso_rhea_dma_get_len_words() / 2, g_pm_mav_n - 1, m16, faux_air_arfcn(g_tick_courant, lim),
                faux_air_gain(g_tick_courant, lim), g_pm_fifo_w - g_pm_fifo_r);
     if (g_pm_mav_n < BSP_PM_MAV_N) g_pm_mav[g_pm_mav_n++] = m16;
-    /* [2026-10-21 23:58] FILE PAR EVENEMENT. En veille la pompe sert les fenetres de mesure APRES le DONE
-     * (PONT_DONE_TOT) : le 0 que le DSP ecrit pour cette PM n'est vu par apm_jamais_nul qu'au DONE suivant,
-     * et l'association par trame lui donnait alors le MAV des fenetres de CETTE trame (bruit du voisin) --
-     * sonde [apm-fort] : 0000->1280 sur les trames du burst, mais la L1 relisait le plancher. Chaque fenetre
-     * livree empile son MAV ; chaque PM nulle trouvee dans une page R depile le plus ancien. */
+    /* Event queue. In idle mode the pump serves the measurement windows AFTER the DONE
+     * (PONT_DONE_TOT): the 0 the DSP writes for this PM is only seen by apm_jamais_nul at
+     * the next DONE, so a per-frame association would hand it the MAV of the windows of
+     * THAT frame (neighbour noise). Each delivered window pushes its MAV; each null PM
+     * found in an R page pops the oldest. */
     g_pm_fifo_gain[g_pm_fifo_w % BSP_PM_FIFO_N] = (int16_t)faux_air_gain(g_tick_courant, lim);
     g_pm_fifo_tick[g_pm_fifo_w % BSP_PM_FIFO_N] = g_tick_courant;
     g_pm_fifo[g_pm_fifo_w++ % BSP_PM_FIFO_N] = m16;
@@ -256,12 +254,12 @@ static void bsp_pm_mav_noter(const int16_t *iq, int n, double k_air)
 }
 static uint16_t bsp_apm_de_mav(double mav, int gain_db);
 static int air_niveaux_on(void);
-/* [2026-10-23] AGC de l'air realiste (CALYPSO_AIR_AGC=1, defaut) : le niveau d'un burst de la cellule (dBm) ne
- * change plus son amplitude I/Q -- un vrai recepteur la ramene a pleine echelle par son AGC, et a l'amplitude
- * 3000 le DSP ne decodait plus le BCCH (appli rssi : synchro OK mais MCC/MNC/LAC jamais lus, run du 23/10
- * 18:55 ; sans l'air realiste : MCC 001 01 LAC 1 cell 6001). Le niveau ne porte que sur la MESURE de puissance :
- * air_choisir() range le facteur d'amplitude par (fn, TN), calypso_bsp_rx_burst() l'applique au MAV de la
- * fenetre de mesure (bsp_pm_mav_noter). */
+/* AGC of the realistic air (CALYPSO_AIR_AGC=1, default): the level of a cell burst (dBm)
+ * does not change its I/Q amplitude -- a real receiver brings it back to full scale through
+ * its AGC, and at amplitude 3000 the DSP does not decode the BCCH. The level only affects
+ * the power MEASUREMENT: air_choisir() stores the amplitude factor by (fn, TN) and
+ * calypso_bsp_rx_burst() applies it to the MAV of the measurement window
+ * (bsp_pm_mav_noter). */
 #define AIR_PM_RING 4096u
 static struct { uint32_t fn; float k; } g_air_pm[AIR_PM_RING][8];
 static double air_pm_k(uint32_t fn, unsigned tn)
@@ -269,21 +267,23 @@ static double air_pm_k(uint32_t fn, unsigned tn)
     const typeof(g_air_pm[0][0]) *e = &g_air_pm[fn % AIR_PM_RING][tn & 7];
     return (e->fn == fn && e->k > 0) ? e->k : 1.0;
 }
-static double g_air_k_der = 1.0;   /* facteur du dernier burst livre au DSP (calypso_bsp_rx_burst) */
-static int g_air_dpm = -1;          /* D_PM du modele pour ce burst (meme echelle que a_pm), -1 inconnu */
+static double g_air_k_der = 1.0;   /* factor of the last burst delivered to the DSP (calypso_bsp_rx_burst) */
+static int g_air_dpm = -1;          /* model D_PM for this burst (same scale as a_pm), -1 unknown */
 static int faux_air_gain(uint32_t tick, int limite);
-/* D_PM (a_serv_demod[1], 1/64 dB a la bande de base, layer1/prim_rx_nb.c : agc_inp_dbm8_by_pm(D_PM >> 3)) : le DSP
- * le calcule sur des I/Q a pleine echelle ; l'appli rssi en tire le niveau de la vue synchro (rx_level). */
+/* D_PM (a_serv_demod[1], 1/64 dB at baseband, layer1/prim_rx_nb.c:
+ * agc_inp_dbm8_by_pm(D_PM >> 3)): the DSP computes it on full-scale I/Q; the rssi app
+ * derives the level of the sync view (rx_level) from it. */
 uint16_t calypso_bsp_air_dpm(uint16_t val)
 {
-    /* La valeur du DSP ne sert pas : sur des I/Q a pleine echelle il sature (rxlev 63, -47 dBm affiche) et un
-     * simple decalage de 20 log k donnait -73 pour -60. Le modele de a_pm (bsp_apm_de_mav, gain programme de la
-     * fenetre) donne la meme echelle que la vue spectre. */
+    /* The DSP value is not used: on full-scale I/Q it saturates (rxlev 63, -47 dBm shown)
+     * and a plain 20 log k offset is off by more than 10 dB. The a_pm model
+     * (bsp_apm_de_mav, programmed gain of the window) gives the same scale as the
+     * spectrum view. */
     if (!air_niveaux_on() || g_air_dpm < 0 || val == 0) return val;
     return (uint16_t)g_air_dpm;
 }
 static double air_env_dbm(const char *nom, double defaut);
-/* sonde [apm] (pont.c) : les MAV par fenetre de la trame en cours et de la precedente */
+/* [apm] probe (pont.c): the per-window MAVs of the current and previous frame */
 int calypso_bsp_pm_mav_texte(char *buf, size_t n)
 {
     int o = snprintf(buf, n, "tick %u:", g_pm_mav_tick);
@@ -293,18 +293,18 @@ int calypso_bsp_pm_mav_texte(char *buf, size_t n)
     if (o < (int)n) o += snprintf(buf + o, n - o, " | dernier=%u courant=%u", bsp_last_mav, g_tick_courant);
     return o;
 }
-/* la trame en cours a-t-elle livre un vrai burst (MAV >= 5000) dans une fenetre de mesure ? (sonde [apm]) */
+/* did the current frame deliver a real burst (MAV >= 5000) in a measurement window? ([apm] probe) */
 int calypso_bsp_pm_mav_fort(void)
 {
     if (g_pm_mav_tick != g_tick_courant) return 0;
     for (int k = 0; k < g_pm_mav_n; k++) if (g_pm_mav[k] >= 5000) return 1;
     return 0;
 }
-/* la PM nulle suivante (pont.c, apm_jamais_nul) : le MAV de la plus ancienne fenetre de mesure non consommee */
+/* the next null PM (pont.c, apm_jamais_nul): the MAV of the oldest unconsumed measurement window */
 uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav)
 {
     while (g_pm_fifo_r != g_pm_fifo_w && (uint32_t)(g_tick_courant - g_pm_fifo_tick[g_pm_fifo_r % BSP_PM_FIFO_N]) > 3)
-        g_pm_fifo_r++;                       /* fenetre jamais mesuree : on ne la garde pas pour la suivante */
+        g_pm_fifo_r++;                       /* window never measured: not kept for the next one */
     if (g_pm_fifo_r != g_pm_fifo_w) {
         int g = g_pm_fifo_gain[g_pm_fifo_r % BSP_PM_FIFO_N];
         uint16_t m = g_pm_fifo[g_pm_fifo_r++ % BSP_PM_FIFO_N];
@@ -346,13 +346,13 @@ static uint16_t bsp_apm_de_mav(double mav, int gain_db)
         if (rr && *rr) {
             rf_ref = atof(rr);
         } else if (air_niveaux_on()) {
-            /* [2026-10-23] AIR REALISTE : une seule echelle. mav_ref (20929) est le MAV d'un burst module a
-             * 30000, que l'air realiste pose a CALYPSO_AIR_REF_DBM (-40) ; avec -60 ici, la cellule jouee a
-             * -60 dBm (amplitude 3000) ressortait a -83 dBm dans le modele, et l'appli rssi l'affichait
-             * n'importe ou des que le gain de la fenetre manquait (-38 dBm releve le 23/10 18:50). */
+            /* Realistic air: a single scale. mav_ref is the MAV of a burst modulated at 30000,
+             * which the realistic air places at CALYPSO_AIR_REF_DBM (-40); the reference level
+             * must be the same here, otherwise a cell played at -60 dBm comes out at a
+             * different level in the model and in the rssi app. */
             rf_ref = air_env_dbm("CALYPSO_AIR_REF_DBM", -40.0);
-            /* MAV mesure d'un burst GMSK module a 30000 (moyenne des |I|,|Q| : 1330..1400 a l'amplitude 3000,
-             * trace [apmL] du 23/10) ; 20929 laissait la cellule 4 dB sous sa consigne (-64 pour -60). */
+            /* Measured MAV of a GMSK burst modulated at 30000 (mean of |I|,|Q|: 1330..1400 at
+             * amplitude 3000); 20929 would leave the cell 4 dB under its setpoint. */
             if (!(mr && *mr)) mav_ref = 13700.0;
         }
         if (mav_ref < 1.0) {
@@ -371,7 +371,7 @@ static uint16_t bsp_apm_de_mav(double mav, int gain_db)
     }
     int rfi = (int)(rf >= 0 ? rf + 0.5 : rf - 0.5);
     if (gain_db > -999) {
-        /* meme formule que calypso_trf6151_apm_for_rf, avec le gain que la L1 a programme pour la fenetre */
+        /* same formula as calypso_trf6151_apm_for_rf, with the gain the L1 programmed for the window */
         int bb = rfi + gain_db, apm;
         if (bb < 0) bb = 0;
         apm = bb * 64;
@@ -781,10 +781,10 @@ uint8_t  calypso_bsp_get_last_att(void)   { return bsp.last_att; }
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid, joue; } *g_ts0;
 static uint32_t g_ts0_next; static int g_ts0_any;
 
-/* [2026-10-22] REGLAGES A CHAUD (calypso_bsp.h). Le calage du TCH Magnetite (CALYPSO_BSP_TCH_DECAL,
- * PONT_TCH_DEPOT_IDLE, CALYPSO_TI_SYNC_DL) se cherchait en relancant tout le banc ou par gdb sur c54x_exe
- * vivant (reseau perdu) : ecrire « NOM=valeur » dans /dev/shm/calypso_reglages suffit, relu au plus tous
- * les 50 appels quand sa date change. */
+/* Live settings (calypso_bsp.h). Tuning values such as CALYPSO_BSP_TCH_DECAL,
+ * PONT_TCH_DEPOT_IDLE or CALYPSO_TI_SYNC_DL can be changed on a running c54x_exe: write
+ * "NAME=value" into /dev/shm/calypso_reglages; the file is re-read at most every 50 calls
+ * when its mtime changes. Falls back to the environment variable. */
 int calypso_reglage(const char *nom, int defaut)
 {
     static char texte[4096]; static struct timespec mtime; static unsigned n_appels;
@@ -809,13 +809,14 @@ int calypso_reglage(const char *nom, int defaut)
     return (e && *e) ? atoi(e) : defaut;
 }
 static int64_t g_ts0_offset = INT64_MIN;
-/* [2026-10-21 23:15] FN DU MOBILE : fn - tick du dernier SCH livre dans une VRAIE fenetre SB, c'est-a-dire ce que
- * la L1 TI vient d'apprendre ; elle compte ensuite une trame par tick jusqu'au SB suivant. L'offset du BSP
- * (g_ts0_offset), lui, est recale par la lecture BCCH et derive (494 -> 484 en 12 000 trames, tick du DSP un peu
- * plus rapide que la BTS) : un RACH date par lui tombait a fn-1 ou fn+1 de ce que le mobile attend (RA_C 7797,
- * publie 7796), IMM ASS ignorees. calypso_bsp_fn_mobile_du_tick() sert a dater le RACH (pont.c tx_tsp_fn). */
+/* Mobile FN: fn - tick of the last SCH delivered in a REAL SB window, i.e. what the TI L1
+ * has just learnt; it then counts one frame per tick until the next SB. The BSP offset
+ * (g_ts0_offset) is instead re-aligned by the BCCH reads and drifts (the DSP tick is slightly
+ * faster than the BTS), so a RACH dated by it can land at fn-1 or fn+1 of what the mobile
+ * expects and the IMM ASS is ignored. calypso_bsp_fn_mobile_du_tick() dates the RACH
+ * (pont.c tx_tsp_fn). */
 static int64_t g_off_mobile = INT64_MIN;
-static int g_off_rac_vu;   /* [2026-10-22] l'offset vient d'un RA_C : les SB livres ne le remplacent plus */
+static int g_off_rac_vu;   /* the offset comes from an RA_C: delivered SBs no longer replace it */
 int calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn)
 {
     if (g_off_mobile == INT64_MIN) return 0;
@@ -824,17 +825,17 @@ int calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn)
     *fn = (uint32_t)w;
     return 1;
 }
-/* [2026-10-22] ... et ce que la L1 TI ECRIT en dedie : a_a5fn (pont.c) donne son fn exact. Le dedie (TCH surtout)
- * fait glisser le tick d'une trame ; sans cette mise a jour, le premier RACH d'apres l'appel partait date de
- * fn-1 par l'offset du SB d'AVANT l'appel (RA_C 34652 publie 34651, puis tous les suivants) : IMM ASS ignorees,
- * rafale de RACH, plus aucun appel ni LU (22/10 11:17). CALYPSO_BSP_OFF_A5FN=0 pour couper. */
-static uint32_t g_a5fn_tick; static int g_a5fn_vu;   /* derniere trame ou a_a5fn a donne le fn du mobile */
+/* ... and what the TI L1 WRITES in dedicated mode: a_a5fn (pont.c) gives its exact fn.
+ * Dedicated mode (TCH above all) slips the tick by one frame; without this update the first
+ * RACH after the call would be dated fn-1 by the offset of the SB from BEFORE the call and
+ * its IMM ASS ignored. CALYPSO_BSP_OFF_A5FN=0 disables it. */
+static uint32_t g_a5fn_tick; static int g_a5fn_vu;   /* last frame where a_a5fn gave the mobile fn */
 void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
 {
-    /* [2026-10-22 12:15] PAR DEFAUT, a_a5fn ne fixe PLUS l'offset : il oscille de +-1 (766/767 quand RA_C dit 767,
-     * selon la page W lue au tick) et le premier RACH de l'acces suivant partait faux d'une trame -> un SDCCH en
-     * trop, « lchan allocation failed ... Timeout ». RA_C (calypso_bsp_off_mobile_rac) fait foi ; a_a5fn garde
-     * seulement l'alignement dedie actif. CALYPSO_BSP_OFF_A5FN=1 : ancien comportement. */
+    /* By default a_a5fn does NOT set the offset: it oscillates by +-1 depending on which W
+     * page is read at the tick, which would date the first RACH of the next access one
+     * frame off. RA_C (calypso_bsp_off_mobile_rac) is authoritative; a_a5fn only keeps the
+     * dedicated alignment alive. CALYPSO_BSP_OFF_A5FN=1: a_a5fn also sets the offset. */
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_OFF_A5FN"); on = (e && *e == '1'); }
     g_a5fn_tick = tick; g_a5fn_vu = 1;
@@ -848,16 +849,18 @@ void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
         g_off_mobile = off;
     }
 }
-/* [2026-10-22 12:10] ... et la VERITE du mobile : RA_C (trace L1 TI dans rvinterf.log) donne le fn auquel IL a
- * emis son RACH. fn % 42432 seulement (la trace) : on garde le multiple de 42432 de l'offset courant. Le decalage
- * du mobile derive (501 -> 503 en 9000 ticks) pendant que celui de la BTS (SB, BCCH) recule (501 -> 495) : les
- * estimations venues de la BTS datent les RACH a -1..-3 et livrent les mauvaises trames en dedie. */
-/* [2026-10-22 14:15] LE FN DU MOBILE PAR d_fn. Run de 14:06 : RA_C - tick = 761/762 avant le LU, 759 apres ; le
- * fn du mobile glisse par rapport au tick pendant le dedie (charge), l'offset du BSP reste, toutes les lectures
- * BCCH/paging en erreur (BS_I/NP_I 1), perte de la cellule. La page W porte d_fn = fn_report | (fn%104) << 8 :
- * la trame que le mobile croit lire au tick suivant. (tick + 1 + offset) % 104 doit lui etre egal ; ecart d
- * (|d| <= 6) trois fois de suite -> offset + d (et l'offset du mobile pour dater les RACH). Appele par montant.c
- * a chaque page avec tache. CALYPSO_BSP_DFN=0 coupe, CALYPSO_BSP_DFN_K decale la reference. */
+/* ... and the mobile's own truth: RA_C (TI L1 trace in rvinterf.log) gives the fn at which
+ * IT sent its RACH. The trace only carries fn % 42432, so the multiple of 42432 of the
+ * current offset is kept. The mobile offset drifts upwards over time while the BTS one (SB,
+ * BCCH) drifts down, so estimates coming from the BTS would date the RACHs 1..3 frames early
+ * and deliver the wrong frames in dedicated mode. */
+/* Mobile FN through d_fn. The mobile fn slips against the tick during dedicated mode
+ * (load) while the BSP offset stays, which breaks every BCCH/paging read (BS_I/NP_I 1). The
+ * W page carries d_fn = fn_report | (fn%104) << 8: the frame the mobile believes it reads at
+ * the next tick. (tick + 1 + offset) % 104 must equal it; a gap d (|d| <= 6) seen three
+ * times in a row -> offset + d (and the mobile offset used to date the RACHs). Called by
+ * montant.c on every page carrying a task. CALYPSO_BSP_DFN=0 disables, CALYPSO_BSP_DFN_K
+ * shifts the reference. */
 void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d)
 {
     static int on = -1, k = 0, d_prec = 99, n_meme; static unsigned n_log;
@@ -894,10 +897,10 @@ void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
                g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
         g_off_mobile = off;
     }
-    /* [2026-10-22 14:15] RA_C = le fn exact du mobile : l'offset de livraison le suit (run de 14:10 : RA_C - tick = 768
-     * sur quatre RACH, livraison CCCH encore a 767 -> IMM ASS du bon RACH manquee). Ecart <= 6 seulement. */
-    /* 14:20 : COUPE PAR DEFAUT. Run de 14:18 : livraison 770 -> 771 par RA_C, puis tous les NP_I en erreur, 8 RACH,
-     * perte de la cellule ; RA_C - tick vaut l'offset de livraison OU +1 selon l'acces. CALYPSO_BSP_RAC_LIVRAISON=1. */
+    /* Optionally let the delivery offset follow RA_C (gap <= 6 only). Off by default:
+     * RA_C - tick equals the delivery offset OR +1 depending on the access, so following it
+     * can shift the delivery by one frame and break the NP_I reads.
+     * CALYPSO_BSP_RAC_LIVRAISON=1 enables it. */
     static int rac_liv = -1;
     if (rac_liv < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RAC_LIVRAISON"); rac_liv = (e && *e == '1'); }
     if (rac_liv && g_ts0_offset != INT64_MIN && off != g_ts0_offset) {
@@ -908,10 +911,10 @@ void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
         }
     }
 }
-/* [2026-10-21] firmware TI en mode dedie (taches ALLC vues par montant.c) : voir CALYPSO_BSP_DEDIE_DECAL */
+/* TI firmware in dedicated mode (ALLC tasks seen by montant.c): see CALYPSO_BSP_DEDIE_DECAL */
 static int g_dedie_ti;
 extern unsigned long calypso_bsp_routeur_bilan(char *buf, size_t n);
-static unsigned g_dedie_entrees;   /* [2026-10-22] entrees en dedie TI (pont.c : un RACH a-t-il abouti ?) */
+static unsigned g_dedie_entrees;   /* entries into TI dedicated mode (pont.c: did a RACH succeed?) */
 unsigned calypso_bsp_dedie_entrees(void) { return g_dedie_entrees; }
 void calypso_bsp_set_dedie_ti(int actif)
 {
@@ -923,29 +926,29 @@ void calypso_bsp_set_dedie_ti(int actif)
     }
     g_dedie_ti = actif;
 }
-/* [2026-10-21] FENETRE SB EN FIN DE TRAME (CALYPSO_BSP_SB_FIN_TRAME=1, Magnetite / L1 TI TCS211).
- * La L1 TI ouvre sa fenetre SB SB_MARGIN (92 qbits) avant le debut du burst : quand le SCH est cale
- * en debut de trame, elle s'ouvre A LA FIN DE LA TRAME PRECEDENTE (SB_I time_alignmt=4928), et la L1
- * en deduit « trame BTS N = trame locale k+1 » (l1a_add_time_for_nb : 4928+80 -> 8, fn_offset-1).
- * Le banc, lui, livrait au tick k le burst du tick k : toutes les fenetres NB etaient armees un
- * tick APRES leur burst (BCCH : p51=2 dans aucune fenetre, p51=3..5 dans celles de 2..4), CRC KO
- * sur chaque bloc. Dans ce mode l'offset est cale sur fn - tick - 1 au SCH livre en fenetre SB,
- * puis VERIFIE sur la lecture BCCH elle-meme (bsp_bcch_calage) : la L1 arme ses fenetres NB sur les
- * trames ou elle croit le bloc, ce qui dit directement de combien le flux est decale. Une lecture
- * en avance du SCH (premier essai) aggravait les choses : a la resynchro la L1 arme DEUX fenetres SB
- * de suite et cale son horloge sur la seconde. */
+/* SB window at the end of the frame (CALYPSO_BSP_SB_FIN_TRAME=1, Magnetite / TI L1 TCS211).
+ * The TI L1 opens its SB window SB_MARGIN (92 qbits) before the start of the burst: when
+ * the SCH is aligned at the start of the frame, the window opens AT THE END OF THE PREVIOUS
+ * FRAME (SB_I time_alignmt=4928), and the L1 infers "BTS frame N = local frame k+1"
+ * (l1a_add_time_for_nb: 4928+80 -> 8, fn_offset-1). Delivering the burst of tick k at
+ * tick k would arm every NB window one tick AFTER its burst. In this mode the offset is
+ * set to fn - tick - 1 at the SCH delivered in an SB window, then VERIFIED on the BCCH read
+ * itself (bsp_bcch_calage): the L1 arms its NB windows on the frames where it believes
+ * the block is, which directly tells by how much the stream is shifted. The SCH must not
+ * be delivered early: on resync the L1 arms TWO SB windows in a row and sets its clock
+ * on the second. */
 static int sb_fin_trame(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_FIN_TRAME"); on = (e && *e == '1'); }
     return on;
 }
-/* [2026-10-21] FAUX AIR (CALYPSO_FAUX_AIR=<arfcn de la cellule>, Magnetite). Le pont livrait les bursts
- * du BTS quelle que soit la frequence du telephone : la L1 TI voyait la cellule (BSIC 7) sur 65, 81,
- * 265... et RR s'y perdait. QEMU publie chaque programmation du synthetiseur (calypso_rf_arfcn.h) ;
- * ici, une fenetre accordee ailleurs que sur la cellule recoit du bruit (CALYPSO_FAUX_AIR_BRUIT,
- * ecart-type, 200 par defaut) au lieu du burst. ARFCN inconnu (pas de shm, pas encore programme) :
- * comportement d'avant. */
+/* Fake air (CALYPSO_FAUX_AIR=<cell ARFCN>, Magnetite). Without it the BTS bursts are
+ * delivered whatever frequency the phone is tuned to, and the TI L1 sees the cell
+ * (BSIC 7) on 65, 81, 265... QEMU publishes every synthesizer programming
+ * (calypso_rf_arfcn.h); here a window tuned elsewhere than the cell receives noise
+ * (CALYPSO_FAUX_AIR_BRUIT, standard deviation, 200 by default) instead of the burst.
+ * Unknown ARFCN (no shm, not yet programmed): burst delivered as is. */
 #include "hw/arm/calypso/calypso_rf_arfcn.h"
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -956,13 +959,13 @@ static int faux_air_cellule(void)
                    if (a >= 0) printf("  [faux-air] cellule sur l'ARFCN %d : bruit sur les autres frequences\n", a); }
     return a;
 }
-/* ARFCN de la fenetre du tick : derniere programmation faite avant `limite` qbits dans la trame tick. */
+/* ARFCN of the window of the tick: last programming done before `limite` qbits in frame tick. */
 static int faux_air_arfcn(uint32_t tick, int limite)
 {
     static const CalypsoRfArfcnShm *m;
     static uint32_t essai;
     if (!m) {
-        if (essai++ % 216) return -1;              /* QEMU cree le fichier a sa premiere ecriture */
+        if (essai++ % 216) return -1;              /* QEMU creates the file on its first write */
         int fd = open(CALYPSO_RF_ARFCN_SHM, O_RDONLY);
         if (fd < 0) return -1;
         void *p = mmap(NULL, sizeof *m, PROT_READ, MAP_SHARED, fd, 0);
@@ -972,20 +975,21 @@ static int faux_air_arfcn(uint32_t tick, int limite)
     }
     if (m->magic != CALYPSO_RF_ARFCN_MAGIC) return -1;
     uint32_t w = __atomic_load_n(&m->widx, __ATOMIC_ACQUIRE);
-    uint32_t n = w < CALYPSO_RF_ARFCN_N ? w : CALYPSO_RF_ARFCN_N - 4;   /* les plus vieilles peuvent etre reecrites */
+    uint32_t n = w < CALYPSO_RF_ARFCN_N ? w : CALYPSO_RF_ARFCN_N - 4;   /* the oldest may be overwritten */
     for (uint32_t k = 1; k <= n; k++) {
         const CalypsoRfProg *e = &m->e[(w - k) % CALYPSO_RF_ARFCN_N];
-        /* [2026-10-22 00:30] arfcn -1 = ecriture PWR de debut de trame (qbit 323/671, 0x003a : changement de
-         * mode, pas de reglage) decodee avec une PLL d'une autre bande. Le synthe n'est regle qu'en FIN de
-         * trame precedente (PLL 4851, bande 4861/4983, trace [tsp]) : on remonte jusqu'a ce reglage. Avant,
-         * « inconnu » valait « cellule » et les fenetres du voisin 614 recevaient le burst de l'ARFCN 1. */
+        /* arfcn -1 = PWR write at the start of the frame (qbit 323/671, 0x003a: mode change, not
+         * a tuning) decoded with a PLL of another band. The synthesizer is only tuned at the
+         * END of the previous frame (PLL 4851, band 4861/4983): walk back to that tuning,
+         * otherwise "unknown" would count as "cell" and the neighbour windows would receive
+         * the cell burst. */
         if (e->arfcn < 0) continue;
         int32_t d = (int32_t)(e->fn - tick);
         if (d < 0 || (d == 0 && e->qbit <= limite)) return e->arfcn;
     }
     return -1;
 }
-/* gain RX programme pour la fenetre du tick (meme recherche que faux_air_arfcn), -999 si inconnu */
+/* RX gain programmed for the window of the tick (same lookup as faux_air_arfcn), -999 if unknown */
 static int faux_air_gain(uint32_t tick, int limite)
 {
     static const CalypsoRfArfcnShm *m;
@@ -1005,10 +1009,10 @@ static int faux_air_gain(uint32_t tick, int limite)
     int recent = -999;
     for (uint32_t k = 1; k <= n; k++) {
         const CalypsoRfProg *e = &m->e[(w - k) % CALYPSO_RF_ARFCN_N];
-        /* [2026-10-23] air realiste : le dernier reglage de RECEPTION (pas celui d'emission) sert de repli. Hors
-         * pas a pas (banc-rssi, tick 0 ou ~130 trames derriere QEMU) aucun reglage n'est « avant » le tick :
-         * -999 faisait convertir la PM avec le gain de RESET de c54x_exe (calypso_trf6151_apm_for_rf), l'appli
-         * rssi lisait -38 dBm pour une cellule a -60. Meme repli que air_accord. */
+        /* Realistic air: the last RECEIVE tuning (not the transmit one) is the fallback. Outside
+         * step-by-step mode (banc-rssi, tick 0 or ~130 frames behind QEMU) no tuning is "before"
+         * the tick, and -999 would convert the PM with the RESET gain of c54x_exe
+         * (calypso_trf6151_apm_for_rf). Same fallback as air_accord. */
         if (recent == -999 && !((uint16_t)e->reserve & (1u << 14))) recent = e->gain_db;
         int32_t d = (int32_t)(e->fn - tick);
         if (d < 0 || (d == 0 && e->qbit <= limite)) return e->gain_db;
@@ -1022,21 +1026,24 @@ static void faux_air_bruit(int16_t *iq, int n_ech)
     for (int k = 0; k < 2 * n_ech; k++) {
         double u = 0;
         for (int j = 0; j < 4; j++) { x = x * 1664525u + 1013904223u; u += (double)(x >> 8) / 16777216.0; }
-        iq[k] = (int16_t)lrint((u - 2.0) * 1.732 * sigma);   /* somme de 4 uniformes ~ gaussienne */
+        iq[k] = (int16_t)lrint((u - 2.0) * 1.732 * sigma);   /* sum of 4 uniforms ~ gaussian */
     }
 }
-/* [2026-10-23] AIR REALISTE (CALYPSO_AIR_NIVEAUX=1, banc-rssi). Sans lui, tout burst recu est joue a
- * l'amplitude 30000 quelle que soit la frequence ou le sens sur lequel le recepteur est accorde : l'appli rssi
- * voyait la cellule sur n'importe quel ARFCN et ses huit barres au maximum (rxlev 63), y compris en vue
- * MONTANTE ou il n'y a que le mobile. Ici :
- *   - QEMU publie le mode et la frequence montante (calypso_trf6151_rf_flags, champ `reserve`) ;
- *   - le pont copie aussi le montant (octet 6 = 0xA5, pont/trx.py send_ul), range a part (g_air_ul) ;
- *   - une fenetre accordee sur la frequence descendante de la cellule recoit le descendant au niveau
- *     CALYPSO_AIR_DL_DBM (-60) moins l'attenuation BTS, une fenetre accordee sur sa frequence montante recoit le
- *     burst du mobile de cet intervalle (TN montant = position - 3) au niveau CALYPSO_AIR_UL_DBM (-75), tout le
- *     reste du bruit. L'amplitude 30000 vaut CALYPSO_AIR_REF_DBM (-40) : a etalonner sur l'affichage.
- * Cellule : CALYPSO_FAUX_AIR (sinon toute frequence est la cellule). Sans les drapeaux de QEMU (QEMU
- * d'avant) : rien ne change. */
+/* Realistic air (CALYPSO_AIR_NIVEAUX=1, banc-rssi). Without it, every received burst is
+ * played at amplitude 30000 whatever the frequency or direction the receiver is tuned to:
+ * the rssi app sees the cell on any ARFCN with all eight bars (rxlev 63), including in the
+ * UPLINK view where only the mobile is. Here:
+ *   - QEMU publishes the mode and the uplink frequency (calypso_trf6151_rf_flags, field
+ *     `reserve`);
+ *   - the bridge also copies the uplink (byte 6 = 0xA5, pont/trx.py send_ul), stored
+ *     separately (g_air_ul);
+ *   - a window tuned to the downlink frequency of the cell receives the downlink at level
+ *     CALYPSO_AIR_DL_DBM (-60) minus the BTS attenuation, a window tuned to its uplink
+ *     frequency receives the mobile burst of that slot (uplink TN = position - 3) at level
+ *     CALYPSO_AIR_UL_DBM (-75), everything else noise. Amplitude 30000 corresponds to
+ *     CALYPSO_AIR_REF_DBM (-40): calibrate against the display.
+ * Cell: CALYPSO_FAUX_AIR (otherwise every frequency is the cell). Without the QEMU flags:
+ * nothing changes. */
 static int air_niveaux_on(void)
 {
     static int on = -1;
@@ -1049,8 +1056,8 @@ static double air_env_dbm(const char *nom, double defaut)
     const char *e = calypso_getenv(nom);
     return (e && *e) ? atof(e) : defaut;
 }
-/* accord de la fenetre : comme faux_air_arfcn, mais en sautant les reglages d'EMISSION et en gardant les
- * receptions sur une frequence montante. Rend 1 si connu (*arfcn, *ul, *qbit), 0 sinon. */
+/* tuning of the window: like faux_air_arfcn, but skipping the TRANSMIT tunings and keeping
+ * the receptions on an uplink frequency. Returns 1 if known (*arfcn, *ul, *qbit), 0 otherwise. */
 static int air_accord(uint32_t tick, int limite, int *arfcn, int *ul, int *qbit)
 {
     static const CalypsoRfArfcnShm *m;
@@ -1067,15 +1074,15 @@ static int air_accord(uint32_t tick, int limite, int *arfcn, int *ul, int *qbit)
     if (m->magic != CALYPSO_RF_ARFCN_MAGIC) return 0;
     uint32_t w = __atomic_load_n(&m->widx, __ATOMIC_ACQUIRE);
     uint32_t n = w < CALYPSO_RF_ARFCN_N ? w : CALYPSO_RF_ARFCN_N - 4;
-    /* [2026-10-23] REPLI SUR LE REGLAGE LE PLUS RECENT. Hors pas a pas (banc-rssi), le DSP court ~130 trames
-     * derriere QEMU (dsp.log fn=8895, shm fn=9023) et l'anneau ne garde que ~10 trames : aucun reglage n'etait
-     * « avant » le tick, l'accord restait inconnu et tout passait comme avant. Le synthe d'une appli comme rssi
-     * reste longtemps sur la meme frequence : le dernier reglage de reception est le bon. */
+    /* Fallback on the most recent tuning. Outside step-by-step mode (banc-rssi), the DSP runs
+     * ~130 frames behind QEMU and the ring only keeps ~10 frames: no tuning is "before" the
+     * tick. The synthesizer of an app like rssi stays on the same frequency for a long time,
+     * so the last receive tuning is the right one. */
     int r_arfcn = -1, r_ul = 0, r_qbit = -1;
     for (uint32_t k = 1; k <= n; k++) {
         const CalypsoRfProg *e = &m->e[(w - k) % CALYPSO_RF_ARFCN_N];
         uint16_t f = (uint16_t)e->reserve;
-        if (f & (1u << 14)) continue;                              /* reglage d'emission */
+        if (f & (1u << 14)) continue;                              /* transmit tuning */
         int a_ul = (f & (1u << 15)) && (f & (1u << 13));
         int a = a_ul ? (int)(f & 0x7ff) : e->arfcn;
         if (a < 0) continue;
@@ -1087,11 +1094,11 @@ static int air_accord(uint32_t tick, int limite, int *arfcn, int *ul, int *qbit)
     if (r_arfcn >= 0) { *arfcn = r_arfcn; *ul = r_ul; *qbit = r_qbit; return 1; }
     return 0;
 }
-/* le montant copie par le pont, par trame et par TN (BTS) */
+/* the uplink copied by the bridge, per frame and per TN (BTS) */
 #define AIR_UL_RING (1u << 12)
 static struct { uint32_t fn; uint8_t bits[8][148]; uint8_t presents; } *g_air_ul;
 static unsigned long g_air_ul_recus;
-static struct { uint32_t fn; int valide; } g_air_ul_der[8];   /* dernier fn montant recu par TN */
+static struct { uint32_t fn; int valide; } g_air_ul_der[8];   /* last uplink fn received per TN */
 static void air_ul_stocker(uint32_t fn, unsigned tn, const uint8_t *bits)
 {
     if (!g_air_ul && !(g_air_ul = calloc(AIR_UL_RING, sizeof *g_air_ul))) return;
@@ -1102,10 +1109,10 @@ static void air_ul_stocker(uint32_t fn, unsigned tn, const uint8_t *bits)
     g_air_ul_der[tn & 7].fn = fn; g_air_ul_der[tn & 7].valide = 1;
     g_air_ul_recus++;
 }
-/* [2026-10-23] le DERNIER burst montant de l'intervalle, s'il a moins de deux multitrames (102 trames) d'ecart avec
- * la trame jouee. Chercher la trame exacte ne trouvait rien : sur le chemin direct la fenetre est servie a
- * l'arrivee du descendant, que la BTS emet en avance, alors que le montant du meme fn n'existe pas encore
- * (4050 recus, 0 joues, run du 23/10 14:50). */
+/* The LAST uplink burst of the slot, if it is less than two multiframes (102 frames) away
+ * from the played frame. The exact frame cannot be looked up: on the direct path the window
+ * is served when the downlink arrives, which the BTS sends ahead of time, while the uplink
+ * of the same fn does not exist yet. */
 static const uint8_t *air_ul_bits(uint32_t fn, unsigned tn)
 {
     if (!g_air_ul || !g_air_ul_der[tn & 7].valide) return NULL;
@@ -1115,9 +1122,9 @@ static const uint8_t *air_ul_bits(uint32_t fn, unsigned tn)
     unsigned i = f % AIR_UL_RING;
     return (g_air_ul[i].fn == f && (g_air_ul[i].presents & (1u << (tn & 7)))) ? g_air_ul[i].bits[tn & 7] : NULL;
 }
-/* bruit de l'air realiste : plancher CALYPSO_AIR_BRUIT_DBM (-110), sur la meme echelle que les bursts (30000 =
- * CALYPSO_AIR_REF_DBM). Le bruit du faux air (ecart-type 200, ~-83 dBm sur cette echelle) noyait le montant du
- * mobile (-75 dBm = 533) : les huit barres de la vue UL restaient au meme niveau (run du 23/10 14:51). */
+/* noise of the realistic air: floor CALYPSO_AIR_BRUIT_DBM (-110), on the same scale as the
+ * bursts (30000 = CALYPSO_AIR_REF_DBM). The fake-air noise (standard deviation 200, ~-83 dBm
+ * on this scale) would drown the mobile uplink (-75 dBm = 533). */
 static void air_bruit(int16_t *iq, int n_ech)
 {
     static double sigma = -1; static uint32_t x = 0x9e3779b9u;
@@ -1129,22 +1136,23 @@ static void air_bruit(int16_t *iq, int n_ech)
         iq[k] = (int16_t)lrint((u - 2.0) * 1.732 * sigma);
     }
 }
-/* ramene des echantillons modules a 30000 (sb_moduler) a l'amplitude choisie par l'air realiste */
+/* scales samples modulated at 30000 (sb_moduler) to the amplitude chosen by the realistic air */
 static void air_echelle(int16_t *iq, int n_ech, int amp)
 {
     if (amp == 30000) return;
     double k = amp / 30000.0;
     for (int i = 0; i < 2 * n_ech; i++) iq[i] = (int16_t)lrint(iq[i] * k);
 }
-/* intervalle d'une fenetre de mesure, tire du qbit du reglage du synthe (pose ~200 qbits avant la fenetre) */
+/* slot of a measurement window, from the qbit of the synthesizer tuning (~200 qbits before the window) */
 static unsigned air_pos_fenetre(uint32_t tick)
 {
     int a, ul, q;
     if (!air_accord(tick, 5000, &a, &ul, &q) || q < 0) return 0;
     return (unsigned)(((q + 300) / 625) & 7);
 }
-/* Le burst a jouer dans la fenetre (intervalle `pos` de la trame fn) et son amplitude (*amp, deja calculee
- * pour le niveau de reference) ; NULL = bruit. Hors CALYPSO_AIR_NIVEAUX, ou accord inconnu : dl tel quel. */
+/* The burst to play in the window (slot `pos` of frame fn) and its amplitude (*amp, already
+ * computed for the reference level); NULL = noise. Without CALYPSO_AIR_NIVEAUX, or with an
+ * unknown tuning: dl as is. */
 static const uint8_t *air_choisir(uint32_t tick, int limite, uint32_t fn, unsigned pos, const uint8_t *dl, int *amp)
 {
     if (!air_niveaux_on()) return dl;
@@ -1166,7 +1174,7 @@ static const uint8_t *air_choisir(uint32_t tick, int limite, uint32_t fn, unsign
         double r = *amp * pow(10.0, (dbm - air_env_dbm("CALYPSO_AIR_REF_DBM", -40.0)) / 20.0);
         if (r > 32000.0) r = 32000.0;
         if (r < 1.0) r = 1.0;
-        if (agc) pm->k = (float)(r / *amp);    /* I/Q a pleine echelle, le niveau va a la mesure */
+        if (agc) pm->k = (float)(r / *amp);    /* full-scale I/Q, the level goes to the measurement */
         else *amp = (int)r;
         if (ul) n_ul++; else n_dl++;
     } else n_bruit++;
@@ -1177,10 +1185,10 @@ static const uint8_t *air_choisir(uint32_t tick, int limite, uint32_t fn, unsign
                b ? *amp : 0, (double)pm->k, n_dl, n_ul, n_bruit, g_air_ul_recus);
     return b;
 }
-/* [2026-10-21 19:20] BRUIT DE FOND (CALYPSO_BSP_BRUIT_FOND=1, Magnetite). Les intervalles sans burst etaient
- * bourres de ZEROS : la L1 TI y prend ses mesures de puissance, le DSP rendait PM = 0, et au bout de 100
- * (l1_check_pm_error) la L1 se croyait plantee : l1_initialize_for_recovery, DSP relance toutes les ~173
- * trames (« > RECOVERY »), retards et campement casse. Un vrai recepteur voit toujours du bruit. */
+/* Background noise (CALYPSO_BSP_BRUIT_FOND=1, Magnetite). Slots without a burst are filled
+ * with noise rather than zeros: the TI L1 takes its power measurements there, and 100 PMs
+ * at 0 (l1_check_pm_error) make it believe the DSP is dead (l1_initialize_for_recovery,
+ * DSP restarted every ~173 frames). A real receiver always sees noise. */
 extern uint16_t g_remplissage_ts0[];
 static const int16_t *bsp_remplissage(void)
 {
@@ -1191,40 +1199,42 @@ static const int16_t *bsp_remplissage(void)
     faux_air_bruit(bruit, 148);
     return bruit;
 }
-static int g_bcch_verrou;        /* offset confirme par la lecture BCCH : les SCH ne le recalent plus */
-static uint32_t g_bcch_vu_tick;  /* dernier tick ou une fenetre NB BCCH a ete vue armee */
-/* [2026-10-20] MODE TRX (CALYPSO_BSP_TRX=1, c54x_exe/run.sh OSMO_TRX=1) : cette instance est la radio de la
- * BTS (firmware trx), elle ne recoit jamais de SB ; ses bursts montants arrivent de l'air (pont/air.py)
- * tagues du fn GSM du mobile. L'offset fn <-> tick est alors POSE par pont.c, qui decode le sch du SB
- * que le firmware emet (fn F au tick T) : calypso_bsp_trx_calage(). Le burst montant fn X est attendu
- * dans la trame DSP ou part le burst descendant fn X+1 (l1s_bts_cmd programme TX next_time.fn et RX
- * « in the next frame », l1s_bts_resp tague current_fn - 2) : offset = F - T + delta, delta = -1 par
- * defaut avec le firmware d'origine, -2 avec BTS_RX_LAG 3 (prim_bts.c patche : une trame de marge pour l'air) (CALYPSO_BSP_TRX_DELTA). Une fois cale, les recalages du mode mobile (SB livre, seconde chance)
- * ne touchent plus l'offset. */
+static int g_bcch_verrou;        /* offset confirmed by the BCCH read: SCHs no longer re-align it */
+static uint32_t g_bcch_vu_tick;  /* last tick where a BCCH NB window was seen armed */
+/* TRX mode (CALYPSO_BSP_TRX=1, c54x_exe/run.sh OSMO_TRX=1): this instance is the radio of
+ * the BTS (trx firmware), it never receives an SB; its uplink bursts come from the air
+ * (pont/air.py) tagged with the GSM fn of the mobile. The fn <-> tick offset is then SET by
+ * pont.c, which decodes the sch of the SB the firmware transmits (fn F at tick T):
+ * calypso_bsp_trx_calage(). Uplink burst fn X is expected in the DSP frame where downlink
+ * burst fn X+1 leaves (l1s_bts_cmd programs TX next_time.fn and RX "in the next frame",
+ * l1s_bts_resp tags current_fn - 2): offset = F - T + delta, delta = -1 with the original
+ * firmware, -2 with BTS_RX_LAG 3 (patched prim_bts.c: one frame of margin for the air)
+ * (CALYPSO_BSP_TRX_DELTA). Once set, the mobile-mode re-alignments (delivered SB, second
+ * chance) no longer touch the offset. */
 static int g_trx_cale = 0;
-/* [2026-10-20] PROTHESE MONTANTE (mode TRX). Mesure du jour, capture TRXD TRX -> osmo-bts-trx : la BTS
- * recoit les 4 bursts de chaque bloc SDCCH au bon fn, mais leurs bits sont presque tous a zero
- * (mots de resultat d[5..33] = 0000/8080/0007...) alors que le mobile a bien emis un SABM : la
- * demodulation NB de l'extcode du firmware trx (dsp_extcode.c) ne sort rien de juste sur ce coeur,
- * comme son codeur SCH. L'air transportant les bits exacts, on les ecrit nous-memes dans la page de
- * resultat que l'ARM va lire (l1s_bts_resp : d[0] toa, d[1] pm, d[3] energie > 0x1000, d[5+i/4]
- * nibble (3 - i%4), bit 3 = valeur ; ordre des 116 bits : burst[3..59], burst[88..144], burst[87],
- * burst[60]). Le RACH (rx cmd AB) passe par les I/Q et n'est pas touche. Le jour ou le coeur
- * emule juste l'extcode, le compteur « bits deja justes » le dira (CALYPSO_BSP_TRX_UL=0 pour couper). */
+/* Uplink prosthesis (TRX mode). The NB demodulation of the trx firmware extcode
+ * (dsp_extcode.c) does not produce correct bits on this core (its result words d[5..33]
+ * come out as 0000/8080/0007...), nor does its SCH encoder. Since the air carries the
+ * exact bits, they are written directly into the result page the ARM will read
+ * (l1s_bts_resp: d[0] toa, d[1] pm, d[3] energy > 0x1000, d[5+i/4] nibble (3 - i%4),
+ * bit 3 = value; order of the 116 bits: burst[3..59], burst[88..144], burst[87],
+ * burst[60]). The RACH (rx cmd AB) goes through the I/Q and is not touched. The
+ * "bits already correct" counter shows whether the core emulates the extcode correctly
+ * (CALYPSO_BSP_TRX_UL=0 to disable). */
 static struct { uint32_t fn, tick; uint8_t bits[148]; int valide; } g_trx_ul;
 #define BSP_AUTRES_RING (1u << 16)
 struct autres_s { uint32_t fn; uint8_t bits[7][148]; uint8_t presents; };
-static struct autres_s *g_autres;   /* rempli par bsp_autres_stocker (TS1..7 du mobile), lu par la prothese TS1 */
+static struct autres_s *g_autres;   /* filled by bsp_autres_stocker (mobile TS1..7), read by the TS1 prosthesis */
 static unsigned long g_autres_stockes, g_autres_joues;
-/* burst d'acces (05.02 5.2.7) : 8 bits de queue etendue puis la sequence de synchro de 41 bits */
+/* access burst (05.02 5.2.7): 8 extended tail bits then the 41-bit synchronisation sequence */
 static int bsp_ts0_est_rach(const uint8_t *bits)
 {
     static const char sync[] = "01001011011111111001100110101010001111000";
     for (int i = 0; i < 41; i++) if ((bits[8 + i] & 1) != (uint8_t)(sync[i] - '0')) return 0;
     return 1;
 }
-/* [2026-10-21] combien des 116 bits de la page ressemblent deja au burst exact (sans rien ecrire) :
- * ~85-116 dans la page ou l'extcode vient de demoduler CE burst, ~58 (hasard) dans l'autre page. */
+/* how many of the 116 bits of the page already match the exact burst (without writing):
+ * ~85-116 in the page where the extcode just demodulated THIS burst, ~58 (chance) in the other. */
 static int trx_ul_compter(const uint16_t *d, const uint8_t *bits)
 {
     int j = 0;
@@ -1237,7 +1247,7 @@ static int trx_ul_compter(const uint16_t *d, const uint8_t *bits)
 }
 static void trx_ul_ecrire(uint16_t *d, const uint8_t *bits, int *justes)
 {
-    /* d[] de l1s_bts_resp : toa, pm, -, energie, -, 116 bits par nibbles (bit 3) ; ordre des bits :
+    /* d[] of l1s_bts_resp: toa, pm, -, energy, -, 116 bits as nibbles (bit 3); bit order:
      * burst[3..59], burst[88..144], burst[87], burst[60] */
     int j = 0;
     for (int i = 0; i < 116; i++) {
@@ -1257,22 +1267,17 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
     if (actif < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TRX_UL"); actif = !(e && *e == '0'); }
     if (!actif || !g_trx_cale) return 0;
     (void)w_page;
-    /* [2026-10-20 soir] LA PAGE PAR LA PARITE DU fn, PAS PAR d_dsp_page. La page W de l'ARM (index 0/1,
-     * bascule a chaque trame) et le bit de page du DSP partent chacun de 0 a leur reset : leur relation
-     * change d'un demarrage a l'autre, d'ou une LU qui passait une fois sur deux. La page de resultat de
-     * la trame fn est celle d'index (fn + parite) & 1 ; la parite est VOTEE sur les detections d'energie
-     * de l'extcode (d3 > 0x1000 dans une seule page, pour un burst joue de fn connu). Tant qu'elle n'est
-     * pas connue, on ecrit les deux pages. */
-    /* [2026-10-21 08:28] le vote par l'ENERGIE (d3 > 0x1000 dans une seule page) s'est trompe (5/1 pour la
-     * mauvaise parite : bits deja justes 63/116 = hasard, LU perdue). Vote principal PAR LES BITS : la page du
-     * DSP est celle dont la demod ressemble au burst exact (trx_ul_compter, ecart >= 20 bits), l'energie ne
-     * sert plus qu'en secours ; CALYPSO_BSP_TRX_PARITE=0|1 force ; et si, une fois calibre, la page ecrite reste
-     * au hasard sur 64 bursts, on bascule une fois (parite_flip). */
-    /* [2026-10-21 08:42] ... et a ce boot AUCUNE parite fixe ne tenait (LU ACCEPT tant que les deux pages etaient
-     * ecrites, puis echec des connexions avec la parite 0 comme avec la 1 : la relation page/fn bouge, un tick
-     * saute du DSP suffit a l'inverser). DEFAUT : ecrire les DEUX pages a chaque burst (le burst exact de fn est
-     * dans la page que l'ARM lira, quelle qu'elle soit ; l'autre page est reecrite au burst suivant avant que
-     * l'ARM ne la lise). CALYPSO_BSP_TRX_PARITE=auto : le vote ; 0|1 : forcee. */
+    /* The page is selected by the parity of fn, not by d_dsp_page. The ARM W page (index
+     * 0/1, toggles every frame) and the DSP page bit each start from 0 at their own reset:
+     * their relation changes from one boot to the next, and a skipped DSP tick is enough
+     * to invert it. The result page of frame fn is the one of index (fn + parity) & 1.
+     * Default: write BOTH pages on every burst (the exact burst of fn is in the page the
+     * ARM will read, whichever it is; the other page is rewritten at the next burst before
+     * the ARM reads it). CALYPSO_BSP_TRX_PARITE=auto: the parity is VOTED, mainly by the
+     * bits (the DSP page is the one whose demod resembles the exact burst, trx_ul_compter,
+     * gap >= 20 bits), with the extcode energy detections (d3 > 0x1000 in a single page)
+     * as a fallback; if, once calibrated, the written page stays random over 64 bursts,
+     * the parity is flipped once (parite_flip). CALYPSO_BSP_TRX_PARITE=0|1: forced. */
     static int parite = -1; static unsigned votes[2], votes_nrj[2];
     static int parite_flip, mode_pages = -1; static unsigned n_post, j_post;
     if (mode_pages < 0) {
@@ -1290,7 +1295,7 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
     else if ((int32_t)(tick - g_trx_ul.tick) != 1) n_diff++;
     if (n_appels % 20000 == 0)
         printf("  [ts0] prothese TS0 : %u appels, %u sans burst, %u mauvais tick, parite %d (votes %u/%u)\n", n_appels, n_pas_valide, n_diff, parite, votes[0], votes[1]);
-    /* TS0 : le burst joue par bsp_ts0_livrer au tick T = tick - 1 */
+    /* TS0: the burst played by bsp_ts0_livrer at tick T = tick - 1 */
     if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) == 1) {
         if (parite < 0) {
             int det = -1, j[2] = { -1, -1 };
@@ -1303,7 +1308,7 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
             if (j[0] >= 0 && j[1] >= 0 && (j[0] - j[1] >= 20 || j[1] - j[0] >= 20))
                 votes[(unsigned)((j[1] > j[0]) ^ (g_trx_ul.fn & 1))]++;
             if (det >= 0) votes_nrj[(unsigned)(det ^ (g_trx_ul.fn & 1))]++;
-            if (mode_pages != 0) { /* deux pages : pas de decision, on ne garde que la mesure */ }
+            if (mode_pages != 0) { /* both pages: no decision, only the measurement is kept */ }
             else if (votes[0] + votes[1] >= 4 && votes[0] != votes[1] && 3 * (votes[0] > votes[1] ? votes[1] : votes[0]) <= votes[0] + votes[1]) {
                 parite = votes[1] > votes[0];
                 printf("  [ts0] prothese : parite de page calibree = %d (votes bits %u/%u, energie %u/%u) : la trame fn ecrit dans la page (fn + %d) & 1\n",
@@ -1320,20 +1325,20 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
         for (int pg = 0; pg < 2; pg++) {
             if (parite >= 0 && pg != (int)((g_trx_ul.fn + parite) & 1)) continue;
             uint16_t *db = &dspdata[pg ? 0x2200 : 0x2000];
-            if (db[16] != 2) continue;                 /* rx[0].cmd : 2 = NB (fenetre AB : on ne touche pas) */
+            if (db[16] != 2) continue;                 /* rx[0].cmd: 2 = NB (AB window: left alone) */
             int justes = 0;
             trx_ul_ecrire(&db[34 + 32], g_trx_ul.bits, &justes);
             n_justes += (unsigned)justes; n_pages++; fait = 1;
             if (parite >= 0) { n_post++; j_post += (unsigned)justes; }
         }
-        /* garde-fou : page ecrite toujours au hasard (< 70/116 sur 64 bursts) -> on avait la mauvaise parite */
+        /* guard: written page still random (< 70/116 over 64 bursts) -> the parity was wrong */
         if (parite >= 0 && !parite_flip && n_post >= 64) {
             if (j_post < 70u * n_post) {
                 parite ^= 1; parite_flip = 1;
                 printf("  [ts0] prothese : la page ecrite restait au hasard (%.1f/116 sur %u bursts) -> parite basculee a %d\n", (double)j_post / n_post, n_post, parite);
             } else if (n_post == 64)
                 printf("  [ts0] prothese : parite %d confirmee (%.1f/116 justes sur %u bursts)\n", parite, (double)j_post / n_post, n_post);
-            if (n_post >= 64 && j_post >= 70u * n_post) parite_flip = 1;   /* confirmee : plus de bascule */
+            if (n_post >= 64 && j_post >= 70u * n_post) parite_flip = 1;   /* confirmed: no more flipping */
         }
         if (fait) {
             n_ok++;
@@ -1343,8 +1348,9 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
         }
         g_trx_ul.valide = 0;
     } else if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) > 1) g_trx_ul.valide = 0;
-    /* TS1 (le TCH) : le burst montant du mobile stocke pour la trame w = T + offset, ecrit dans rx[2] /
-     * data[72..] de la page de w, que le firmware patche remonte avec tn = rx_start + 1 (prim_bts.c). */
+    /* TS1 (the TCH): the mobile uplink burst stored for frame w = T + offset, written into
+     * rx[2] / data[72..] of the page of w, which the patched firmware reports with
+     * tn = rx_start + 1 (prim_bts.c). */
     if (g_autres && g_ts0_offset != INT64_MIN) {
         int64_t w = ((int64_t)(tick - 1) + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
         unsigned i = (unsigned)w % BSP_AUTRES_RING;
@@ -1358,7 +1364,7 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
                 uint16_t *d = &db[34 + 72];
                 memset(d, 0, 40 * sizeof *d);
                 trx_ul_ecrire(d, g_autres[i].bits[0], NULL);
-                db[16 + 2 * 2] = 2;                    /* rx[2].cmd = NB : le marqueur lu par l1s_bts_resp */
+                db[16 + 2 * 2] = 2;                    /* rx[2].cmd = NB: the marker read by l1s_bts_resp */
                 fait = 1;
             }
             g_autres[i].presents &= (uint8_t)~1u;
@@ -1373,7 +1379,7 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
 }
 int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
 {
-    static int actif = -1, delta = -3;   /* -3 : BTS_RX_LAG 4 du firmware trx patche (prim_bts.c) ; -1 pour le firmware d'origine */
+    static int actif = -1, delta = -3;   /* -3: BTS_RX_LAG 4 of the patched trx firmware (prim_bts.c); -1 for the original firmware */
     if (actif < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TRX"); actif = (e && *e == '1') ? 1 : 0;
         e = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); if (e && *e) delta = atoi(e);
@@ -1389,8 +1395,8 @@ int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
     g_ts0_offset = off; g_trx_cale = 1;
     return 1;
 }
-static uint32_t g_ts0_fn_max;   /* trame BTS la plus recente stockee */
-static unsigned long g_ts0_recales;      /* nb de recalages d'offset (voir bsp_ts0_service) */
+static uint32_t g_ts0_fn_max;   /* most recent BTS frame stored */
+static unsigned long g_ts0_recales;      /* number of offset re-alignments (see bsp_ts0_service) */
 static unsigned long g_ts0_silences;     /* effacements deposes (voir bsp_ts0_service) */
 static long long     g_ts0_recul_total;  /* somme des reculs, en trames */
 static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };

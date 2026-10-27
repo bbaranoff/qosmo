@@ -10,6 +10,6 @@ int calypso_trf6151_total_gain_db(void);
 
 uint16_t calypso_trf6151_apm_for_rf(int target_rf_dbm);
 int calypso_trf6151_arfcn(void);
-int calypso_trf6151_rf_flags(void);   /* [2026-10-23] mode RX/TX + ARFCN montant, voir le .c */
+int calypso_trf6151_rf_flags(void);   /* RX/TX mode + uplink ARFCN, see the .c */
 
 #endif

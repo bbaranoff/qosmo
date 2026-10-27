@@ -56,6 +56,6 @@ mod_stp_wait() {
     mod_ok
 }
 
-# Motif exact : "osmo-stp -c" seul tuait aussi le hub (osmo-stp-interop.cfg),
-# lance par start-native.sh --wan sur le noeud 1.
+# Exact pattern: "osmo-stp -c" alone would also kill the hub
+# (osmo-stp-interop.cfg), started by start-native.sh --wan on node 1.
 mod_stp_stop() { core_svc_stop "$STP_UNIT" "osmo-stp -c $(_stp_cfg)"; }

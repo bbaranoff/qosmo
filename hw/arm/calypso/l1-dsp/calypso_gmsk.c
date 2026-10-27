@@ -107,27 +107,25 @@ void gmsk_elargir(int16_t *iq, int n, double a)
     }
 }
 
-/* [2026-09-30] LA CHAINE DE RECEPTION, PAS UNE BOITE A TROIS COEFFICIENTS.
- * gmsk_elargir() imite le filtre de reception par y = (x[n-1] + x[n] + x[n+1])/3 :
- * trois coefficients egaux, un canal beaucoup plus long et symetrique que ce
- * qu'un vrai Calypso voit (filtre analogique de bande de base, causal, ~100 kHz).
- * Mesure en rejeu : la ROM rate encore ~20 % des SCH, sur la moitie AVANT la
- * sequence d'apprentissage, et ce sont les bits de donnees qui bordent la
- * sequence (c38, c40) qui decident : l'ISI aux bords contamine son estimation
- * de canal. Ici : GMSK BT=0.3 exacte a OS echantillons/symbole, passe-bas
- * Butterworth d'ordre 3 (bilineaire), coupure fc en kHz (symbole = 270.833 kHz),
- * puis decimation a l'instant `decalage` du symbole. Le retard de groupe du
- * filtre est laisse tel quel : la ROM recale son TOA. */
+/* The receive chain, not a three-coefficient box.
+ * gmsk_elargir() imitates the receive filter by y = (x[n-1] + x[n] + x[n+1])/3:
+ * three equal coefficients, a channel much longer and more symmetric than what
+ * a real Calypso sees (causal analog baseband filter, ~100 kHz). The data bits
+ * bordering the training sequence (c38, c40) decide the ROM's channel estimate,
+ * so the ISI at the edges matters. Here: exact GMSK BT=0.3 at OS samples per
+ * symbol, 3rd-order Butterworth low-pass (bilinear), cutoff fc in kHz (symbol =
+ * 270.833 kHz), then decimation at instant `decalage` of the symbol. The group
+ * delay of the filter is left as is: the ROM realigns its TOA. */
 #define OS_F 8
 static void butter3(double fc_norm, double b[4], double a[4])
 {
-    /* Butterworth ordre 3 analogique : (s+1)(s^2+s+1), bilineaire, fs = 1, fc_norm = fc/fs */
-    double wc = tan(M_PI * fc_norm);                 /* pre-distorsion */
-    /* H(s) = 1 / ((s/wc + 1)((s/wc)^2 + s/wc + 1)) ; on passe par les coefficients en s */
+    /* analog 3rd-order Butterworth: (s+1)(s^2+s+1), bilinear, fs = 1, fc_norm = fc/fs */
+    double wc = tan(M_PI * fc_norm);                 /* pre-warping */
+    /* H(s) = 1 / ((s/wc + 1)((s/wc)^2 + s/wc + 1)); go through the s-domain coefficients */
     double k = wc;
-    /* denominateur en s : s^3 + 2 wc s^2 + 2 wc^2 s + wc^3 ; numerateur : wc^3 */
+    /* denominator in s: s^3 + 2 wc s^2 + 2 wc^2 s + wc^3; numerator: wc^3 */
     double A3 = 1, A2 = 2 * k, A1 = 2 * k * k, A0 = k * k * k, B0 = k * k * k;
-    /* bilineaire s = (1 - z^-1)/(1 + z^-1) (fs normalise a 2 dans tan ci-dessus) */
+    /* bilinear s = (1 - z^-1)/(1 + z^-1) (fs normalised to 2 in tan above) */
     double d0 = A3 + A2 + A1 + A0;
     a[0] = 1.0;
     a[1] = (-3 * A3 - A2 + A1 + 3 * A0) / d0;
@@ -142,12 +140,12 @@ void gmsk_moduler_filtre(const uint8_t *bits, int n, int amp, double phase0, dou
     int prev = 1;
     double alpha[GMSK_MAX_BITS];
     for (int i = 0; i < n; i++) { int d = (bits[i] & 1) ^ prev; prev = bits[i] & 1; alpha[i] = 1.0 - 2.0 * d; }
-    /* sur-echantillonnage : (n + 3) symboles de trajectoire pour laisser le filtre s'etablir et la queue sortir */
+    /* oversampling: (n + 3) symbols of trajectory to let the filter settle and the tail out */
     int N = (n + 3) * OS_F;
     double *xi = malloc(sizeof(double) * N), *xq = malloc(sizeof(double) * N);
     if (!xi || !xq) { free(xi); free(xq); gmsk_moduler(bits, n, amp, phase0, decalage, iq); return; }
     for (int m = 0; m < N; m++) {
-        double t = (double)m / OS_F - 1.5;            /* le premier symbole commence a t = 0 */
+        double t = (double)m / OS_F - 1.5;            /* the first symbol starts at t = 0 */
         double ph = phase0;
         for (int i = 0; i < n; i++) {
             double dt = t - i;
@@ -164,10 +162,10 @@ void gmsk_moduler_filtre(const uint8_t *bits, int n, int amp, double phase0, dou
         double oq = b[0]*uq[0] + b[1]*uq[1] + b[2]*uq[2] + b[3]*uq[3] - a[1]*yq[1] - a[2]*yq[2] - a[3]*yq[3];
         yi[0] = oi; yq[0] = oq;
         for (int j = 3; j > 0; j--) { ui[j] = ui[j-1]; uq[j] = uq[j-1]; yi[j] = yi[j-1]; yq[j] = yq[j-1]; }
-        xi[m] = oi; xq[m] = oq;                       /* filtre en place */
+        xi[m] = oi; xq[m] = oq;                       /* filter in place */
     }
     for (int k = 0; k < n; k++) {
-        double t = k + decalage + 1.5;                /* meme origine que la trajectoire */
+        double t = k + decalage + 1.5;                /* same origin as the trajectory */
         int m = (int)lrint(t * OS_F); if (m < 0) m = 0; if (m >= N) m = N - 1;
         iq[2 * k]     = (int16_t)lrint(amp * xi[m]);
         iq[2 * k + 1] = (int16_t)lrint(amp * xq[m]);

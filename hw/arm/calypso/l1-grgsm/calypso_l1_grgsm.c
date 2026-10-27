@@ -25,8 +25,8 @@
 #define GSMTAP_CHANNEL_ACCH     0x80
 #define GSMTAP_CHANNEL_SACCH    (GSMTAP_CHANNEL_SDCCH4 | GSMTAP_CHANNEL_ACCH)
 #define GSMTAP_CHANNEL_TCH_ACCH (GSMTAP_CHANNEL_TCH_F | GSMTAP_CHANNEL_ACCH)
-/* [2026-10-26] slots de la rotation SI : SI1..SI6 (0x19..0x1e), puis SI2bis,
- * SI2ter, SI2quater, SI13 — voir si_slot(). */
+/* SI rotation slots: SI1..SI6 (0x19..0x1e), then SI2bis, SI2ter, SI2quater,
+ * SI13 - see si_slot(). */
 #define SI_SLOTS                10
 
 #define SHM_RACH        "/dev/shm/calypso_rach"
@@ -905,15 +905,12 @@ static void feed_l2_23(uint8_t *dst, bool *valid, uint32_t *tick,
     *tick = g.tick;
 }
 
-/* [2026-10-26] Les SI du BCCH que la rotation sert au firmware. Les six slots
- * d'origine (SI1..SI6, 0x19..0x1e) JETAIENT SI2bis (0x02), SI2ter (0x03),
- * SI2quater (0x07) et SI13 (0x00). Or des que la BTS 0 a une voisine dans une
- * autre bande (BTS 1 DCS1800, ARFCN 614), osmo-bsc emet un SI2ter et l'annonce
- * dans les rest octets de SI3 ; le mobile (gsm322.c,
- * gsm322_c_scan_sysinfo_bcch) exige alors ce SI2ter avant de choisir la
- * cellule et bouclait sur « Cell selection failed, sync timeout » avec
- * SI1/2/3/4 pourtant recus — le MS#2 via fake_trx, lui, le recevait. SI13
- * sert au GPRS (barreau data). */
+/* The BCCH SIs that the rotation serves to the firmware: SI1..SI6
+ * (0x19..0x1e) plus SI2bis (0x02), SI2ter (0x03), SI2quater (0x07) and SI13
+ * (0x00). As soon as BTS 0 has a neighbour in another band (BTS 1 DCS1800,
+ * ARFCN 614), osmo-bsc emits an SI2ter and announces it in the SI3 rest
+ * octets; the mobile (gsm322.c, gsm322_c_scan_sysinfo_bcch) then requires
+ * that SI2ter before selecting the cell. SI13 is used by GPRS (data bar). */
 static int si_slot(uint8_t mt)
 {
     if (mt >= 0x19 && mt <= 0x1e) {

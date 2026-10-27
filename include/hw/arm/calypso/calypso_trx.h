@@ -62,16 +62,16 @@
 #define ULPD_GSM_TIMER        0x28
 
 void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs);
-/* Ligne RESET_DSP du registre CNTL_RST (calypso_soc.c) : en DSP externe, le
- * front asserte -> relache relance la ROM de boot du C54x (PONT_RESET). */
+/* RESET_DSP line of the CNTL_RST register (calypso_soc.c): with an external
+ * DSP, the asserted -> released edge restarts the C54x boot ROM (PONT_RESET). */
 void calypso_trx_dsp_reset_line(bool active);
-/* L1CTL_RACH_CONF vu par le tap sercomm : la trame que le firmware remonte a
- * la couche 2/3 pour la tentative d'acces la plus ancienne non confirmee.
- * C'est CETTE valeur que gsm48_rr stocke dans cr_hist et compare ensuite a la
- * reference de requete de l'IMMEDIATE ASSIGNMENT. */
+/* L1CTL_RACH_CONF seen by the sercomm tap: the frame the firmware reports to
+ * layer 2/3 for the oldest unconfirmed access attempt. This is THE value
+ * gsm48_rr stores in cr_hist and later compares with the request reference
+ * of the IMMEDIATE ASSIGNMENT. */
 void calypso_trx_rach_conf(uint32_t fn);
-/* Canal dedie appris du flux L1CTL : genre 0 = SDCCH/4, 1 = SDCCH/8,
- * 0xFF = libere. Relaye au DSP par PONT_DCCH. */
+/* Dedicated channel learnt from the L1CTL stream: kind 0 = SDCCH/4,
+ * 1 = SDCCH/8, 0xFF = released. Relayed to the DSP by PONT_DCCH. */
 void calypso_trx_dcch(int genre, int ss, int tn);
 void calypso_tpu_run_scenario(uint16_t *tpu_ram, uint32_t fn, uint16_t *tpu_regs);
 void calypso_tpu_sequencer_tick(uint32_t fn);

@@ -1,18 +1,18 @@
 """
-test_timer_invariants.py — tests sur les compteurs de timers instrumentés.
+test_timer_invariants.py — tests on the instrumented timer counters.
 
-Cible les logs `[tdma]`, `[frame_irq]`, `[kick]` produits par
-`calypso_trx.c` + le CSV `/tmp/log_timeline.csv` produit par `log_timeline.py`.
+Targets the `[tdma]`, `[frame_irq]`, `[kick]` logs produced by
+`calypso_trx.c` + the CSV `/tmp/log_timeline.csv` produced by `log_timeline.py`.
 
-Invariants testés :
-  - log [tdma] présent (rebuild fait, env CALYPSO_DSP_BUDGET respecté)
+Invariants tested:
+  - [tdma] log present (rebuild done, env CALYPSO_DSP_BUDGET honoured)
   - dsp_n_exec_* <= dsp_budget (sanity)
-  - dsp saturation : si dsp_n_exec_5 == budget sur N ticks consécutifs → signal
-  - period virtual entre [tdma] thinned = 1000 × 4.615 ms ± 2%
-  - ratio frame_irq/tdma ≈ 1
-  - table log_timeline.csv produite, pas de bucket totalement vide
+  - dsp saturation: if dsp_n_exec_5 == budget on N consecutive ticks → signal
+  - virtual period between thinned [tdma] = 1000 × 4.615 ms ± 2%
+  - frame_irq/tdma ratio ≈ 1
+  - log_timeline.csv table produced, no completely empty bucket
 
-Lancement :
+Run:
     pytest -v -m timer_invariant
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ import pytest
 CONTAINER  = os.environ.get("CALYPSO_CONTAINER", "trying")
 QEMU_LOG   = os.environ.get("CALYPSO_QEMU_LOG",  "/root/qemu.log")
 CSV_PATH   = os.environ.get("CALYPSO_TIMELINE_CSV", "/tmp/log_timeline.csv")
-# Marqueur Docker standard : présent dans container, absent sur host.
+# Standard Docker marker: present in the container, absent on the host.
 INSIDE = os.path.exists("/.dockerenv")
 
 TDMA_RE = re.compile(
@@ -117,18 +117,18 @@ def kick_samples():
 
 
 # -----------------------------------------------------------------------------
-# Tests timers
+# Timer tests
 # -----------------------------------------------------------------------------
 @pytest.mark.timer_invariant
 def test_tdma_log_present(tdma_samples):
-    """Au moins 2 lignes [tdma] (= 2000+ ticks observés)."""
+    """At least 2 [tdma] lines (= 2000+ ticks observed)."""
     assert len(tdma_samples) >= 2, \
         f"only {len(tdma_samples)} [tdma] entries — wait for 2000+ ticks (~9s virtual)"
 
 
 @pytest.mark.timer_invariant
 def test_dsp_n_exec_within_budget(tdma_samples):
-    """dsp_n_exec_2 et dsp_n_exec_5 doivent rester <= budget."""
+    """dsp_n_exec_2 and dsp_n_exec_5 must stay <= budget."""
     for s in tdma_samples:
         assert 0 <= s["dsp_n_exec_2"] <= s["budget"], \
             f"tick #{s['tick']}: dsp_n_exec_2={s['dsp_n_exec_2']} hors [0, {s['budget']}]"
@@ -138,8 +138,8 @@ def test_dsp_n_exec_within_budget(tdma_samples):
 
 @pytest.mark.timer_invariant
 def test_dsp_budget_saturation_signal(tdma_samples):
-    """Si dsp_n_exec_5 == budget sur les 3 dernières entries → DSP saturé,
-    XFAIL avec message — c'est un état observable, pas un bug du test."""
+    """If dsp_n_exec_5 == budget on the last 3 entries → DSP saturated,
+    XFAIL with a message — an observable state, not a test bug."""
     if len(tdma_samples) < 3:
         pytest.skip("need >= 3 samples")
     last3 = tdma_samples[-3:]
@@ -149,13 +149,13 @@ def test_dsp_budget_saturation_signal(tdma_samples):
             f"DSP saturé: dsp_n_exec_5 == budget ({last3[0]['budget']}) sur "
             f"les 3 derniers [tdma] ticks. Descendre CALYPSO_DSP_BUDGET cassera "
             f"probablement la fb-det convergence. Voir REPORT_CLAUDE_WEB_20260516_DSP_OVERRUN.md.")
-    # Else: pass — DSP non saturé en steady state
+    # Else: pass — DSP not saturated in steady state
     assert True
 
 
 @pytest.mark.timer_invariant
 def test_tdma_period_virtual_close_to_target(tdma_samples):
-    """Période virtual entre 2 [tdma] thinned (1000 ticks) ≈ 4.615 s ± 2%."""
+    """Virtual period between 2 thinned [tdma] (1000 ticks) ≈ 4.615 s ± 2%."""
     if len(tdma_samples) < 2:
         pytest.skip("need >= 2 samples")
     dt_virt_ns = tdma_samples[-1]["t_virt_ns"] - tdma_samples[-2]["t_virt_ns"]
@@ -164,9 +164,9 @@ def test_tdma_period_virtual_close_to_target(tdma_samples):
         pytest.skip(f"non-1000-tick gap: {dtick}")
     expected_ns = 1000 * GSM_TDMA_NS
     rel_err = abs(dt_virt_ns - expected_ns) / expected_ns
-    # Sous icount le temps VIRTUAL n'est pas précis (déterministe mais pas
-    # calé sur le mur) : on garde un contrôle de sanité large, pas un assert
-    # dur ±2%. On échoue seulement sur un ordre de grandeur manifestement faux.
+    # Under icount the VIRTUAL time is not precise (deterministic but not
+    # aligned with the wall clock): keep a wide sanity check, not a hard ±2%
+    # assert. Fail only on an obviously wrong order of magnitude.
     if rel_err > 0.50:
         pytest.skip(
             f"period_virtual = {dt_virt_ns:,} ns vs target {expected_ns:,} "
@@ -177,7 +177,7 @@ def test_tdma_period_virtual_close_to_target(tdma_samples):
 
 @pytest.mark.timer_invariant
 def test_frame_irq_per_tdma_ratio(tdma_samples, firq_samples):
-    """Ratio frame_irq/tdma ≈ 1 (le frame_irq lower fire à chaque tdma_tick)."""
+    """frame_irq/tdma ratio ≈ 1 (the frame_irq lower fires on every tdma_tick)."""
     if not firq_samples:
         pytest.skip("no firq samples")
     n_tdma = tdma_samples[-1]["tick"]
@@ -185,33 +185,33 @@ def test_frame_irq_per_tdma_ratio(tdma_samples, firq_samples):
     if n_tdma == 0:
         pytest.skip()
     ratio = n_firq / n_tdma
-    # Tolérance large : 0.5..1.5 (frame_irq peut ne pas fire au boot avant que
-    # le hardware-frame-arm soit set par firmware)
+    # Wide tolerance: 0.5..1.5 (frame_irq may not fire at boot before the
+    # hardware-frame-arm is set by the firmware)
     assert 0.5 <= ratio <= 1.5, \
         f"frame_irq/tdma = {ratio:.2f} (firq={n_firq} / tdma={n_tdma})"
 
 
 @pytest.mark.timer_invariant
 def test_kick_realtime_cadence(kick_samples):
-    """Kick fires sur REALTIME ~5 ms. Délta moyen entre 2 logs thinned 1/200
-    devrait être ~1 s wall = ~1e9 ns realtime."""
+    """Kick fires on REALTIME ~5 ms. Mean delta between 2 logs thinned 1/200
+    should be ~1 s wall = ~1e9 ns realtime."""
     if len(kick_samples) < 3:
         pytest.skip("few kick samples")
     rts = [s["rt"] for s in kick_samples]
     deltas = [(rts[i+1] - rts[i]) for i in range(len(rts)-1)]
     mean = sum(deltas) / len(deltas)
-    # 200 fires × 5 ms = 1 s = 1e9 ns. Tolérance ±50%.
+    # 200 fires × 5 ms = 1 s = 1e9 ns. Tolerance ±50%.
     assert 0.5e9 <= mean <= 1.5e9, \
         f"kick realtime mean delta = {mean/1e9:.2f}s, expected ~1s (1e9 ns)"
 
 
 # -----------------------------------------------------------------------------
-# Tests sur la table log_timeline.csv
+# Tests on the log_timeline.csv table
 # -----------------------------------------------------------------------------
 def _has_docker(): return shutil.which("docker") is not None
 
 def _csv_exists() -> tuple[bool, str]:
-    """(exists, where) — check CSV side : local ou container."""
+    """(exists, where) — check the CSV side: local or container."""
     if Path(CSV_PATH).exists():
         return (True, "local")
     if _has_docker():
@@ -223,11 +223,11 @@ def _csv_exists() -> tuple[bool, str]:
     return (False, "none")
 
 def _generate_csv() -> str:
-    """Tente de produire le CSV. Priorité : container si docker dispo
-    (qemu.log canonique côté container), sinon local SEULEMENT si in-container.
-    Évite la race où on lit un /root/qemu.log host stale.
+    """Tries to produce the CSV. Priority: container if docker is available
+    (canonical qemu.log on the container side), else local ONLY if in-container.
+    Avoids the race where a stale host /root/qemu.log is read.
     """
-    # 1) Container path (priorité) — sauf si on EST dans le container
+    # 1) Container path (priority) — unless we ARE in the container
     if _has_docker() and not INSIDE:
         r = subprocess.run(
             ["docker", "exec", CONTAINER, "python3",
@@ -235,7 +235,7 @@ def _generate_csv() -> str:
              "--bucket-s", "10", "--csv", CSV_PATH],
             capture_output=True, text=True, timeout=20)
         return r.stderr or r.stdout[:200]
-    # 2) Local (in-container : /root/qemu.log est canonique)
+    # 2) Local (in-container: /root/qemu.log is canonical)
     script_local = Path(__file__).resolve().parent.parent / "log_timeline.py"
     if script_local.exists() and Path("/root/qemu.log").exists():
         r = subprocess.run(
@@ -246,8 +246,8 @@ def _generate_csv() -> str:
 
 @pytest.mark.timer_invariant
 def test_log_timeline_csv_produced():
-    """log_timeline.py doit avoir produit le CSV (local ou container).
-    Si absent, tente une génération à la volée puis re-check."""
+    """log_timeline.py must have produced the CSV (local or container).
+    If absent, tries an on-the-fly generation then re-checks."""
     ok, where = _csv_exists()
     if ok:
         return
@@ -271,7 +271,7 @@ def _read_csv_rows() -> list[dict]:
 
 @pytest.mark.timer_invariant
 def test_log_timeline_csv_no_dead_bucket():
-    """Aucun bucket avec 0 events all-sources confondus (= run pas stallé)."""
+    """No bucket with 0 events across all sources (= run not stalled)."""
     rows = _read_csv_rows()
     if not rows:
         pytest.skip("CSV empty")
@@ -286,8 +286,8 @@ def test_log_timeline_csv_no_dead_bucket():
 
 @pytest.mark.timer_invariant
 def test_log_timeline_csv_steady_qemu_rate():
-    """qemu rate par bucket doit rester dans une fenêtre raisonnable
-    (pas de spike 10× ni de chute 10× sur la majorité des buckets)."""
+    """qemu rate per bucket must stay within a reasonable window
+    (no 10× spike nor 10× drop on the majority of buckets)."""
     rows = _read_csv_rows()
     if len(rows) < 5:
         pytest.skip("too few buckets")
@@ -295,6 +295,6 @@ def test_log_timeline_csv_steady_qemu_rate():
     if not qemu_rates: pytest.skip("no qemu rates")
     mean = sum(qemu_rates) / len(qemu_rates)
     outliers = [v for v in qemu_rates if v > 10*mean or v < mean/10]
-    # Tolère jusqu'à 20% d'outliers
+    # Tolerates up to 20% outliers
     assert len(outliers) <= 0.2 * len(qemu_rates), \
         f"{len(outliers)}/{len(qemu_rates)} buckets outliers (>10× ou <1/10 mean={mean:.0f})"

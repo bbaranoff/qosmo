@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# gsm_sniff.py — sniff PASSIF (raw socket) des sockets UDP GSMTAP/SCH/TRXD et
-# TRANSFORME en SI decode / burst decode. NE bind AUCUN port (AF_PACKET) -> ne
-# vole rien aux vrais destinataires (grgsm/qemu), ne touche AUCUNE fifo.
+# gsm_sniff.py — PASSIVE sniff (raw socket) of the GSMTAP/SCH/TRXD UDP sockets,
+# TURNED into decoded SI / decoded bursts. Binds NO port (AF_PACKET) -> steals
+# nothing from the real recipients (grgsm/qemu), touches NO fifo.
 #
-# Usage : gsm_sniff.py si      # GSMTAP -> num+type SI, canal BCCH/CCCH, FN (4729,4730)
-#         gsm_sniff.py burst   # SCH (4731) + TRXD v1 (5700-5702/5800-5802) -> burst
+# Usage: gsm_sniff.py si      # GSMTAP -> SI number+type, BCCH/CCCH channel, FN (4729,4730)
+#        gsm_sniff.py burst   # SCH (4731) + TRXD v1 (5700-5702/5800-5802) -> burst
 import socket, struct, sys, os
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "si"
 IFACE = os.environ.get("SNIFF_IFACE", "lo")
 ETH_P_IP = 0x0800
-GSMTAP_HDR_LEN = 16                         # GSMTAP v2 header (octets)
+GSMTAP_HDR_LEN = 16                         # GSMTAP v2 header (bytes)
 
 # --- GSM 04.08 / 44.018 RR message types (PD = 0x06), 10.4 -------------------
-# key = RR message-type octet (L2[2]) ; value = (nom, is_si, canal DL attendu)
+# key = RR message-type octet (L2[2]); value = (name, is_si, expected DL channel)
 RR_MT = {
     0x19: ("SI1",       True,  "BCCH"),
     0x1a: ("SI2",       True,  "BCCH"),
@@ -25,10 +25,10 @@ RR_MT = {
     0x03: ("SI9",       True,  "BCCH"),
     0x00: ("SI13",      True,  "CCCH"),   # SI13 = mt 0x00 (44.018 tbl 10.4.1)
     # --- CCCH downlink non-SI ---
-    0x3f: ("IMM-ASSIGN",     False, "CCCH"),   # Immediate Assignment (AGCH) <- le LU !
+    0x3f: ("IMM-ASSIGN",     False, "CCCH"),   # Immediate Assignment (AGCH) <- the LU
     0x39: ("IMM-ASSIGN-EXT", False, "CCCH"),
     0x3a: ("IMM-ASSIGN-REJ", False, "CCCH"),
-    0x21: ("PAGING-REQ-1",   False, "CCCH"),   # 0x21 = PAGING type 1 (PAS SI13)
+    0x21: ("PAGING-REQ-1",   False, "CCCH"),   # 0x21 = PAGING type 1 (NOT SI13)
     0x22: ("PAGING-REQ-2",   False, "CCCH"),
     0x24: ("PAGING-REQ-3",   False, "CCCH"),
     0x06: ("CHAN-RELEASE",   False, "*"),
@@ -83,8 +83,8 @@ def udp_payload(ip):
 def decode_si(pl):
     if len(pl) < GSMTAP_HDR_LEN: return None
     ts  = pl[3]
-    fn  = struct.unpack(">I", pl[8:12])[0]     # frame_number reel (BE @ offset 8)
-    sub = pl[12]                               # GSMTAP sub_type / canal
+    fn  = struct.unpack(">I", pl[8:12])[0]     # real frame_number (BE @ offset 8)
+    sub = pl[12]                               # GSMTAP sub_type / channel
     l2  = pl[16:]
     if len(l2) >= 3 and l2[1] == 0x06:
         mt = l2[2]

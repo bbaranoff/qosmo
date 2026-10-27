@@ -21,13 +21,12 @@
 
 static const CalypsoL1Ops *l1;
 
-/* ── Le firmware charge ──────────────────────────────────────────────────
+/* ── The loaded firmware ─────────────────────────────────────────────────
  *
- * calypso_mb.c passe -kernel ici ; on le retient pour ceux qui ont besoin
- * d'un SYMBOLE du firmware plutot que d'une adresse en dur. La couche 1
- * gr-gsm le faisait pour son compte (elf_symbol/arm_read32) ; avec un DSP
- * externe elle est desactivee, et c'est calypso_trx.c qui en a besoin pour
- * « last_rach ». */
+ * calypso_mb.c passes -kernel here; it is kept for the users that need a
+ * firmware SYMBOL rather than a hard-coded address. The gr-gsm layer 1 has
+ * its own lookup (elf_symbol/arm_read32) but is disabled with an external
+ * DSP, and calypso_trx.c needs it for "last_rach". */
 static const char *g_firmware_elf;
 
 const char *calypso_firmware_elf(void)
@@ -35,8 +34,8 @@ const char *calypso_firmware_elf(void)
     return g_firmware_elf;
 }
 
-/* Adresse d'un symbole de l'ELF charge, 0 si introuvable. Table des symboles
- * ELF32 little-endian, comme l1-grgsm/calypso_l1_grgsm.c:elf_symbol(). */
+/* Address of a symbol of the loaded ELF, 0 if not found. ELF32 little-endian
+ * symbol table, as in l1-grgsm/calypso_l1_grgsm.c:elf_symbol(). */
 uint32_t calypso_firmware_symbol(const char *want)
 {
     if (!g_firmware_elf || !want) {
@@ -127,7 +126,7 @@ const char *calypso_l1_name(void)
 
 void calypso_l1_do_init(const char *firmware_elf)
 {
-    g_firmware_elf = firmware_elf;   /* avant tout retour: voir calypso_firmware_symbol() */
+    g_firmware_elf = firmware_elf;   /* before any return: see calypso_firmware_symbol() */
     /* First of all: with an external DSP the shunt must not even open its
      * ports, hence the check here - calypso_mb.c calls this before
      * calypso_trx_init(). */
@@ -187,9 +186,9 @@ void calypso_l1_do_page_written(uint16_t d_dsp_page)
     if (l1 && l1->page_written) {
         l1->page_written(d_dsp_page);
     }
-    /* [2026-09-21] Ne PAS liberer le canal dedie sur d_dsp_page == 0 : le
-     * firmware fait un l1s_dsp_abort() en basculant VERS le canal dedie. La
-     * liberation se deduit du retour sur une voie commune, dans le tap. */
+    /* Do NOT release the dedicated channel on d_dsp_page == 0: the firmware
+     * does an l1s_dsp_abort() when switching TO the dedicated channel. The
+     * release is inferred from the return to a common channel, in the tap. */
 }
 
 void calypso_l1_do_uart_tx_byte(uint8_t ch)
@@ -197,8 +196,8 @@ void calypso_l1_do_uart_tx_byte(uint8_t ch)
     if (l1 && l1->uart_tx_byte) {
         l1->uart_tx_byte(ch);
     } else {
-        /* Pas de couche 1 enregistree (DSP externe) : le tap du pont publie
-         * quand meme le canal dedie, sans quoi pont.py jette le montant. */
+        /* No layer 1 registered (external DSP): the bridge tap still publishes
+         * the dedicated channel, otherwise pont.py drops the uplink. */
         calypso_dcch_tap_tx_byte(ch);
     }
 }

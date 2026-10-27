@@ -149,9 +149,9 @@
  *    level per channel (CAL207 15.2.1): bits 7, 8, 9 edge, matching exactly the
  *    three lines CAL207 15.1 marks as edge (INT7n/INT8n/INT9n). Channel N is
  *    therefore INTNn.
- *  - [2026-10-15] FAUX auparavant (« SPI, stub RETE ») : vec 20 / IMR bit 4 est le port
- *    voix SP0 (DRR 0x20, DXR 0x21, SPC 0x22) ; la ROM l'arme au demarrage parole (0xbd1e/
- *    0xbd47 : SPC 0x08 puis 0xC8, IMR |= 0x10). Modelise par calypso_vsp.c (CALYPSO_VSP=1).
+ *  - vec 20 / IMR bit 4 is the voice port SP0 (DRR 0x20, DXR 0x21, SPC 0x22); the ROM
+ *    arms it at speech start (0xbd1e/0xbd47: SPC 0x08 then 0xC8, IMR |= 0x10). Modelled
+ *    by calypso_vsp.c (CALYPSO_VSP=1).
  *
  * CAL000 5.1 on INT9n: "a facility offered to the DSP programmer in order to
  * allow the generation of a DSP interrupt at a dedicated time with a quarter of

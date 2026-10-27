@@ -108,10 +108,10 @@ static void calypso_uart_update_irq(CalypsoUARTState *s)
         iir = IIR_TX_EMPTY;
         want = true;
     }
-    /* [2026-10-21] Reveil RX (driver UART TI, serialswitch_core.c) : en veille le
-     * firmware coupe ERBI et arme SCR[4] ; a la premiere activite RX l'UART leve
-     * l'IT avec SSR[1] (RX_CTS_WAKE_UP_STS), le firmware la desarme (SCR[4]) et
-     * reactive la reception. Sans ca, rien ne rentrait plus apres la mise en veille. */
+    /* RX wake-up (TI UART driver, serialswitch_core.c): in sleep the firmware
+     * clears ERBI and arms SCR[4]; on the first RX activity the UART raises the
+     * interrupt with SSR[1] (RX_CTS_WAKE_UP_STS), the firmware disarms it (SCR[4])
+     * and re-enables reception. */
     if (s->wakeup_pending && (s->scr & 0x10)) {
         want = true;
     }
@@ -213,9 +213,9 @@ static struct {
     .payload_size = 1024,
 };
 
-/* [2026-10-21] Vrai firmware en flash (FreeCalypso Magnetite, calypso_mb.c sans
- * -kernel) : pas de romload, le stub ne doit rien avaler. Sinon fc-fsio / fc-shell
- * (ETM par rvinterf) parlaient dans le vide : ROM_IDLE mangeait tout. */
+/* Real firmware in flash (FreeCalypso Magnetite, calypso_mb.c without
+ * -kernel): no romload, the stub must not swallow anything, so that fc-fsio /
+ * fc-shell (ETM through rvinterf) get through instead of ROM_IDLE eating it. */
 void calypso_uart_romload_passthrough(void)
 {
     romload.state = ROM_PASSTHROUGH;

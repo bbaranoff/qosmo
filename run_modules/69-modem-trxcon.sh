@@ -17,20 +17,19 @@ mod_modem_trxcon_check() {
 
 mod_modem_trxcon_status() { radio_alive modem-trxcon && have_unix "$MODEM_L2_SOCK"; }
 
-# Meme lancement que le trxcon du MS#2 (67-sidecar-trxcon.sh), sur la base
-# TRXD que fake_trx a ouverte pour ce second MS (--trx ...:MODEM_BB_PORT).
+# Same launch as the trxcon of MS#2 (67-sidecar-trxcon.sh), on the TRXD base
+# that fake_trx opened for this second MS (--trx ...:MODEM_BB_PORT).
 mod_modem_trxcon_start() {
     radio_dirs
     local log; log="$(radio_log modem-trxcon)"
     rm -f "$MODEM_L2_SOCK" 2>/dev/null
-    # -f 0 (avance de tirage des rafales montantes) : sur un PDCH, trxcon
-    # demande au modem le bloc montant X au DECODAGE du bloc descendant
-    # (rafale X-1, trxcon_fsm.c TRXCON_EV_RX_DATA_IND) mais, avec l'avance par
-    # defaut (2), il TIRE ce bloc a l'arrivee de la rafale X-2 : la primitive
-    # arrive toujours apres le tirage et part a la poubelle (« dropping stale
-    # Tx prim », un bloc de retard a chaque fois ; N3101 cote PCU). A 0, le
-    # tirage a lieu a la rafale X : une trame pour repondre. MS#2 (voix) garde
-    # son propre trxcon et son avance.
+    # -f 0 (uplink burst pull advance): on a PDCH, trxcon asks the modem for
+    # uplink block X when the downlink block is DECODED (burst X-1,
+    # trxcon_fsm.c TRXCON_EV_RX_DATA_IND) but, with the default advance (2),
+    # it PULLS that block when burst X-2 arrives: the primitive always comes
+    # after the pull and is discarded ("dropping stale Tx prim", one block
+    # late every time; N3101 on the PCU side). At 0, the pull happens at burst
+    # X: one frame to answer. MS#2 (voice) keeps its own trxcon and advance.
     mod_say "trxcon -p $MODEM_BB_PORT -s $MODEM_L2_SOCK (fbsb +$MODEM_TRXCON_FN_ADVANCE, avance UL $MODEM_TRXCON_TRX_ADVANCE)"
     mod_say "journal : $log"
     setsid stdbuf -oL -eL "$SC_TRXCON_BIN" -i "$TRX_BIND_IP" -b "$TRX_BB_IP" \

@@ -132,11 +132,10 @@ FILE *qemu_log_trylock(void)
     return qemu_log_trylock_with_err(NULL);
 }
 
-/* [2026-10-19] QEMU_LOG_BUFFERED=<octets> : le fichier -D est pleinement
- * bufferise (setvbuf) et qemu_log_unlock() ne fait plus de fflush() par ligne.
- * Avec -d exec chaque bloc execute coutait un write(2) (32 M en 3 min sur le
- * banc Calypso). Le contenu n'arrive sur disque que par paquets : en cas de
- * plantage les dernieres lignes manquent, d'ou l'option (defaut : inchange). */
+/* QEMU_LOG_BUFFERED=<bytes>: the -D file is fully buffered (setvbuf) and
+ * qemu_log_unlock() does not fflush() per line. With -d exec every executed
+ * block otherwise costs one write(2). Content reaches the disk in chunks, so
+ * the last lines may be missing after a crash; unset keeps the default. */
 static size_t qemu_log_buffered(void)
 {
     static ssize_t sz = -1;
@@ -158,9 +157,9 @@ static void qemu_log_setvbuf(FILE *f)
     }
 }
 
-/* [2026-10-19] Vidage explicite du tampon QEMU_LOG_BUFFERED : appele par la
- * machine calypso a chaque arret de la VM (Ctrl-C gdb, stop moniteur), pour que
- * les dernieres lignes soient dans le fichier au moment ou on les lit. */
+/* Explicit flush of the QEMU_LOG_BUFFERED buffer: called by the calypso
+ * machine on every VM stop (gdb Ctrl-C, monitor stop) so the last lines are
+ * in the file when they are read. */
 void qemu_log_flush(void)
 {
     FILE *f = qemu_log_trylock();

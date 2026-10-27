@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-# --- racine de l'installation, resolue sans chemin en dur --------------------
-# GSM_ROOT si l'environnement le pose (c'est le cas quand on passe par run.sh),
-# sinon le parent du depot : les deux depots vivent cote a cote.
+# --- installation root, resolved without a hard-coded path -------------------
+# GSM_ROOT if the environment sets it (the case when going through run.sh),
+# otherwise the parent of the repository: both repositories live side by side.
 import os as _os
 GSM_ROOT = _os.environ.get(
     "GSM_ROOT",
@@ -11,7 +11,7 @@ GSM_ROOT = _os.environ.get(
 """
 make_dsp_bin_L1.py — Generate calypso_dsp.PROM0.bin with synthetic L1+L2 publisher.
 
-Scope (extension 2026-05-28 : L1 → L2) :
+Scope (L1 → L2):
 - FB lock : d_fb_det + a_sync_demod[4] cells (TOA/PM/ANGLE/SNR)
 - PM measurement : a_pm[3] WP0/WP1 with canned -85 dBm value
 - SB lock : a_sch[5] WP0/WP1 with canned BSIC matching osmo-bsc.cfg
@@ -40,7 +40,7 @@ import sys
 import struct
 
 INPUT  = sys.argv[1] if len(sys.argv) > 1 else f'{GSM_ROOT}/calypso_dsp.PROM0.bin'
-# *** OUTPUT path EXPLICITLY separate — JAMAIS écrase l'original ***
+# *** OUTPUT path EXPLICITLY separate — NEVER overwrites the original ***
 OUTPUT = sys.argv[2] if len(sys.argv) > 2 else '/tmp/calypso_dsp_L1stub.PROM0.bin'
 
 # ---- C54x opcode encoders ----
@@ -87,9 +87,9 @@ A_PM_WP1     = 0x0844    # API + 0x88 byte = read page 1 word 8
 A_SCH_WP0    = 0x0837    # RP0 + 15 word = 0x0828 + 15
 A_SCH_WP1    = 0x084B    # RP1 + 15 word = 0x083C + 15
 # a_cd[0..14] = CCCH demod result.
-# Per CLAUDE.md DWARF-validated 2026-05-26 : NDB+0x1DC byte = NDB+0xEE word
-# = code 0x08D4 + 0xEE = 0x09C2. Le shunt utilise 0x1FC (= probablement une
-# struct variant alternative). On suit le DWARF qui est l'autorité firmware.
+# Per the firmware DWARF: NDB+0x1DC byte = NDB+0xEE word
+# = code 0x08D4 + 0xEE = 0x09C2. The shunt uses 0x1FC (probably an alternative
+# struct variant). The DWARF, the firmware authority, is followed.
 A_CD_BASE    = 0x09C2    # a_cd[0]
 A_CD_PAYLOAD = 0x09C5    # a_cd[3] = start of 12-word SI3 packed payload
 

@@ -1,33 +1,32 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_uwire.c - le controleur uWire du Calypso (0xFFFE4000) et, derriere
- * son chip select 0, l'ecran couleur 96x64 du Motorola C139/C140.
+ * calypso_uwire.c - the Calypso uWire controller (0xFFFE4000) and, behind
+ * its chip select 0, the 96x64 colour LCD of the Motorola C139/C140.
  *
- * [2026-10-21] Ecrit pour FreeCalypso Magnetite (cible c139, config
- * hybrid-ui-vo) : son pilote r2d (src/cs/drivers/drv_app/r2d/lcds/c139/)
- * parle a l'ecran en mots de 9 bits sur uWire CS0, bit 8 = donnee (1) ou
- * commande (0) :
- *   - commande 0x10/0x11 = debut de fenetre (x, y), 0x12/0x13 = fin de
- *     fenetre, 0x14/0x15 = curseur ; chaque commande est suivie d'UN mot de
- *     parametre (bit 8 a 1). 0x3F, 0x20, 0x31 (init) sont acceptees sans effet ;
- *   - donnees hors commande : deux octets par point (poids fort puis faible),
- *     RGB565, le curseur avance en x puis revient a xstart et passe a la ligne
- *     suivante au bout de la fenetre.
- * Le firmware n'affiche qu'une UI 84x48 centree (TI « C-Sample ») : bordure
- * 0x5555, blanc 0xFFFF, noir 0x0000.
+ * Written for FreeCalypso Magnetite (c139 target, hybrid-ui-vo config):
+ * its r2d driver (src/cs/drivers/drv_app/r2d/lcds/c139/) talks to the LCD
+ * in 9-bit words on uWire CS0, bit 8 = data (1) or command (0):
+ *   - command 0x10/0x11 = window start (x, y), 0x12/0x13 = window end,
+ *     0x14/0x15 = cursor; each command is followed by ONE parameter word
+ *     (bit 8 set). 0x3F, 0x20, 0x31 (init) are accepted without effect;
+ *   - data outside a command: two bytes per pixel (high then low), RGB565,
+ *     the cursor advances in x, then returns to xstart and moves to the next
+ *     row at the end of the window.
+ * The firmware only displays a centred 84x48 UI (TI "C-Sample"): border
+ * 0x5555, white 0xFFFF, black 0x0000.
  *
- * Registres uWire (16 bits) : 0x00 TDR/RDR (donnee cadree a gauche), 0x02 CSR
- * (bit 13 START, bit 12 CS_CMD, bits 10-11 index du CS, bits 5-9 nombre de
- * bits ecrits, bit 14 CSRB occupe : toujours 0 ici), 0x04/0x06/0x08 SR1-3.
+ * uWire registers (16 bits): 0x00 TDR/RDR (left-aligned data), 0x02 CSR
+ * (bit 13 START, bit 12 CS_CMD, bits 10-11 CS index, bits 5-9 number of
+ * bits written, bit 14 CSRB busy: always 0 here), 0x04/0x06/0x08 SR1-3.
  *
- * Sorties, comme calypso_st7558.c : la console QEMU (-display sdl, x3) et une
- * image partagee CALYPSO_LCD_SHM (defaut /dev/shm/calypso_lcd, « none ») :
- * en-tete de 32 octets (magic "C139LCD", largeur, hauteur, octets par point
- * = 2, drapeaux, compteur) puis 96 x 64 x 2 octets RGB565 petit-boutiste.
- * tools/osmo-c123-gtk.py reconnait les deux magics.
+ * Outputs, as in calypso_st7558.c: the QEMU console (-display sdl, x3) and
+ * a shared image CALYPSO_LCD_SHM (default /dev/shm/calypso_lcd, "none"):
+ * 32-byte header (magic "C139LCD", width, height, bytes per pixel = 2,
+ * flags, counter) then 96 x 64 x 2 bytes RGB565 little-endian.
+ * tools/osmo-c123-gtk.py recognises both magics.
  *
- * Activation : propriete « c139-lcd » (calypso_soc.c la pose quand
- * CALYPSO_LCD=c139) ; sans elle le controleur avale les mots en silence.
+ * Enabling: property "c139-lcd" (calypso_soc.c sets it when
+ * CALYPSO_LCD=c139); without it the controller silently swallows the words.
  */
 
 #include "qemu/osdep.h"
@@ -66,11 +65,11 @@ struct CalypsoUwireState {
     bool lcd_enabled;
     bool debug;
 
-    /* ecran C139 */
+    /* C139 LCD */
     uint16_t ram[LCD_W * LCD_H];
     int xs, xe, ys, ye, cx, cy;
-    int cmd;            /* commande en attente de son parametre, -1 sinon */
-    int pix_hi;         /* octet fort du point en cours, -1 sinon */
+    int cmd;            /* command waiting for its parameter, -1 otherwise */
+    int pix_hi;         /* high byte of the current pixel, -1 otherwise */
     bool dirty, redraw;
     QEMUTimer *flush;
     QemuConsole *con;
@@ -92,7 +91,7 @@ static void c139_export(CalypsoUwireState *s)
     memcpy(buf, "C139LCD", 8);
     buf[8] = LCD_W; buf[9] = 0;
     buf[10] = LCD_H; buf[11] = 0;
-    buf[12] = 2; buf[13] = 0;               /* octets par point */
+    buf[12] = 2; buf[13] = 0;               /* bytes per pixel */
     buf[14] = 0;
     buf[16] = s->seq & 0xff; buf[17] = (s->seq >> 8) & 0xff;
     buf[18] = (s->seq >> 16) & 0xff; buf[19] = (s->seq >> 24) & 0xff;
@@ -120,12 +119,12 @@ static void c139_word(CalypsoUwireState *s, uint16_t w)
 {
     uint8_t d = w & 0xff;
 
-    if (!(w & 0x100)) {                     /* commande */
+    if (!(w & 0x100)) {                     /* command */
         s->cmd = d;
         s->pix_hi = -1;
         return;
     }
-    if (s->cmd >= 0) {                      /* parametre de la commande */
+    if (s->cmd >= 0) {                      /* command parameter */
         switch (s->cmd) {
         case 0x10: s->xs = d; break;
         case 0x11: s->ys = d; break;
@@ -141,7 +140,7 @@ static void c139_word(CalypsoUwireState *s, uint16_t w)
         s->cmd = -1;
         return;
     }
-    if (s->pix_hi < 0) {                    /* octet fort du point */
+    if (s->pix_hi < 0) {                    /* high byte of the pixel */
         s->pix_hi = d;
         return;
     }
@@ -165,7 +164,7 @@ static uint64_t uwire_read(void *opaque, hwaddr offset, unsigned size)
     CalypsoUwireState *s = opaque;
 
     switch (offset) {
-    case UW_TDR: return 0;                  /* RDR : rien a lire */
+    case UW_TDR: return 0;                  /* RDR: nothing to read */
     case UW_CSR: return s->csr & ~(CSR_START | CSR_CSRB);
     case UW_SR1: return s->sr1;
     case UW_SR2: return s->sr2;

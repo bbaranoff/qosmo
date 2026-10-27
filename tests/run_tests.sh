@@ -1,12 +1,12 @@
 #!/bin/bash
-# Runner tests Calypso — pile VIVANTE (lit /root/qemu.log, /root/osmocon.log…).
-# COMPLET : tout tests/*.py (calypso + génériques top-level), on IGNORE seulement
-# functional/ + guest-debug/ (suite d'intégration QEMU : binaires/downloads absents).
-# --continue-on-collection-errors = ne bloque jamais.
-# Sortie EN DIRECT (pytest -v + tee, line-buffered) — chaque test s'affiche au fil.
-# Génère grafcet.html/md + rapport_final.pdf via hook conftest::pytest_sessionfinish.
+# Calypso test runner — LIVE stack (reads /root/qemu.log, /root/osmocon.log...).
+# COMPLETE: all tests/*.py (calypso + generic top-level), only functional/ +
+# guest-debug/ are IGNORED (QEMU integration suite: binaries/downloads absent).
+# --continue-on-collection-errors = never blocks.
+# LIVE output (pytest -v + tee, line-buffered) — each test shows up as it runs.
+# Generates grafcet.html/md + rapport_final.pdf via the conftest::pytest_sessionfinish hook.
 #
-# Usage : run_tests.sh [loop]
+# Usage: run_tests.sh [loop]
 set -u
 PY="${CALYPSO_PY:-/root/.env/bin/python3}"
 TESTS=${QEMU_TREE}/tests

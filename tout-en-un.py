@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""tout-en-un.py — rassemble les .log .sh .md .mmd .py .txt d'un ou plusieurs
-dossiers dans UN fichier Markdown, raccourci SANS PERTE :
+"""tout-en-un.py — gathers the .log .sh .md .mmd .py .txt of one or more
+directories into ONE Markdown file, shortened WITHOUT LOSS:
 
-  * fichiers identiques (meme contenu) : une seule copie, les autres renvoient
-    a la premiere ;
-  * lignes consecutives identiques : « ligne  ×N » ;
-  * lignes consecutives qui ne different que par des nombres (horodatage,
-    compteur, fn...) : un gabarit ou les nombres constants restent en place et
-    les nombres variables deviennent ⟨1⟩ ⟨2⟩..., suivi de la liste ordonnee des
-    valeurs. On reconstruit chaque ligne en remettant les valeurs dans l'ordre.
-  * codes couleur ANSI et retours chariot retires (seule perte, volontaire).
+  * identical files (same content): a single copy, the others refer to the
+    first one;
+  * identical consecutive lines: "line  ×N";
+  * consecutive lines that only differ by numbers (timestamp, counter, fn...):
+    a template where the constant numbers stay in place and the variable
+    numbers become ⟨1⟩ ⟨2⟩..., followed by the ordered list of values. Each
+    line is rebuilt by putting the values back in order.
+  * ANSI colour codes and carriage returns removed (the only loss, deliberate).
 
-    ./tout-en-un.py [dossier...]      defaut : /opt/GSM/qosmo et le dernier /root/banc-max-*
-    SORTIE=/chemin.md  EXT="log sh md mmd py txt"  SEUIL=3 (taille mini d'un groupe)
+    ./tout-en-un.py [dir...]      default: /opt/GSM/qosmo and the latest /root/banc-max-*
+    SORTIE=/path.md  EXT="log sh md mmd py txt"  SEUIL=3 (minimum group size)
 """
 import glob
 import hashlib
@@ -23,13 +23,13 @@ import time
 
 EXT = os.environ.get("EXT", "log sh md mmd py txt").split()
 SEUIL = int(os.environ.get("SEUIL", "3"))
-FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) ou md
+FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) or md
 SORTIE = os.environ.get("SORTIE") or "/root/tout-en-un-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
 AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # negociation telnet (IAC) des captures VTY
-CONTROLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]")  # caracteres de commande, octets indecodables
+TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # telnet negotiation (IAC) of the VTY captures
+CONTROLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]")  # control characters, undecodable bytes
 NUM = re.compile(r"\d+")
 LANG = {"sh": "bash", "py": "python", "md": "markdown", "mmd": "mermaid", "txt": "text", "log": "text"}
 
@@ -44,14 +44,14 @@ def fichiers(dossier):
     for racine, dirs, noms in os.walk(dossier):
         dirs[:] = sorted(d for d in dirs if d not in IGNORES)
         for n in sorted(noms):
-            if n.startswith("tout-en-un-"):      # nos propres sorties
+            if n.startswith("tout-en-un-"):      # our own outputs
                 continue
             if n.rsplit(".", 1)[-1].lower() in EXT and "." in n:
                 yield os.path.join(racine, n)
 
 
 def compacter(lignes):
-    """Rend (lignes de sortie, nb de groupes compactes)."""
+    """Returns (output lines, number of compacted groups)."""
     out, groupes, i, n = [], 0, 0, len(lignes)
     while i < n:
         cle = NUM.sub("\0", lignes[i])
@@ -64,14 +64,14 @@ def compacter(lignes):
             i = j
             continue
         groupes += 1
-        if "\0" not in cle:                      # repetition exacte
+        if "\0" not in cle:                      # exact repetition
             out.append("%s  ×%d" % (lignes[i], taille))
             i = j
             continue
         valeurs = [NUM.findall(l) for l in lignes[i:j]]
         nb = len(valeurs[0])
         varie = [len({v[k] for v in valeurs}) > 1 for k in range(nb)]
-        # gabarit : nombres constants remis en place, variables numerotes ⟨k⟩
+        # template: constant numbers put back, variable ones numbered ⟨k⟩
         morceaux, k, idx = cle.split("\0"), 0, 0
         gab = morceaux[0]
         for m in morceaux[1:]:
@@ -85,7 +85,7 @@ def compacter(lignes):
         out.append("%s  ×%d" % (gab, taille))
         if idx:
             tuples = [",".join(v[k] for k in range(nb) if varie[k]) for v in valeurs]
-            # lignes de valeurs de ~100 colonnes
+            # value lines of ~100 columns
             ligne, courant = [], "    ⟨⟩ ="
             for t in tuples:
                 if len(courant) + len(t) + 3 > 110:
@@ -99,14 +99,14 @@ def compacter(lignes):
 
 
 def synthese(tous):
-    """Run, echelle, echecs, bilan de couverture : lus dans verdict.txt / couverture.txt."""
+    """Run, scale, failures, coverage summary: read from verdict.txt / couverture.txt."""
     lignes, vus = [], set()
     for f in tous:
         nom = os.path.basename(f)
         if nom not in ("verdict.txt", "couverture.txt"):
             continue
         run = os.path.basename(os.path.dirname(f))
-        if (run, nom) in vus:                 # meme run copie a deux endroits
+        if (run, nom) in vus:                 # same run copied in two places
             continue
         vus.add((run, nom))
         try:
@@ -138,7 +138,7 @@ def rendre_mmd(lignes):
 def rendre_md(lignes):
     out, dans_bloc, cloture = [], False, ""
     i = 0
-    if lignes and lignes[0].strip() == "---":           # front matter YAML : montre en bloc, pas interprete
+    if lignes and lignes[0].strip() == "---":           # YAML front matter: shown as a block, not interpreted
         j = next((k for k in range(1, len(lignes)) if lignes[k].strip() in ("---", "...")), None)
         if j:
             out.append("```yaml"); out.extend(lignes[1:j]); out.append("```")
@@ -151,7 +151,7 @@ def rendre_md(lignes):
             info = m.group(3).strip()
             if info.startswith("{mermaid}") or info.startswith("mermaid"):
                 l = m.group(1) + MERMAID_OUVRE
-            elif info.startswith("{"):                     # ```{r ...} : jamais execute
+            elif info.startswith("{"):                     # ```{r ...}: never executed
                 l = m.group(1) + m.group(2) + info.strip("{}").split(" ")[0].split(",")[0]
             out.append(l); continue
         if m and dans_bloc and m.group(2)[0] == cloture[0] and len(m.group(2)) >= len(cloture) and not m.group(3).strip():
@@ -160,7 +160,7 @@ def rendre_md(lignes):
             h = re.match(r"^(#{1,6})\s", l)
             if h:
                 l = "#" * min(6, len(h.group(1)) + 3) + l[len(h.group(1)):]
-            elif l.strip() in ("---", "..."):             # pas de bloc YAML ni de regle au milieu du dossier
+            elif l.strip() in ("---", "..."):             # no YAML block nor rule in the middle of the dossier
                 l = "* * *"
         out.append(l)
     if dans_bloc:
@@ -172,11 +172,11 @@ def main():
     dossiers = sys.argv[1:] or dossiers_par_defaut()
     vus, sections, table = {}, [], []
     total_in = total_out = 0
-    # Ordre : les resultats des tests (.txt .md .mmd : verdicts, couverture, rapports, grafcets)
-    # d'abord, les fichiers du banc (.sh .py) ensuite, les .log en dernier
+    # Order: test results (.txt .md .mmd: verdicts, coverage, reports, grafcets)
+    # first, then the bench files (.sh .py), the .log last
     CATEGORIES = (("Verdict et couverture", ()), ("Resultats des tests", ("txt", "md", "mmd")),
                   ("Fichiers", ("sh", "py")), ("Logs", ("log",)))
-    EN_TETE = ("verdict.txt", "couverture.txt")     # tout en haut, dans cet ordre
+    EN_TETE = ("verdict.txt", "couverture.txt")     # at the very top, in this order
     tous = []
     for d in dossiers:
         if not os.path.isdir(d):
@@ -219,9 +219,9 @@ def main():
             vus[h] = f
             ext = f.rsplit(".", 1)[-1].lower()
             if ext in ("md", "mmd"):
-                # Rendu, pas cite : les .mmd deviennent des diagrammes Mermaid, les .md
-                # sont inclus tels quels (titres retrogrades sous le titre du fichier,
-                # blocs mermaid rendus, blocs {r}/{python} neutralises). Pas de compactage.
+                # Rendered, not quoted: .mmd become Mermaid diagrams, .md are
+                # included as is (headings demoted under the file title, mermaid
+                # blocks rendered, {r}/{python} blocks neutralised). No compaction.
                 total_out += len(texte) + 1
                 sections.append("### %s\n\n%d octets, %d lignes\n\n%s\n"
                                 % (f, len(brut), len(lignes), rendre_md(lignes) if ext == "md" else rendre_mmd(lignes)))
@@ -229,9 +229,9 @@ def main():
             compact, groupes = compacter(lignes)
             total_out += sum(len(l) + 1 for l in compact)
             note = "%d groupes compactés" % groupes if groupes else ""
-            # cloture plus longue que toute suite de ` du contenu : un ``` dans un
-            # .py ou un .md ne referme plus le bloc (pandoc lisait alors la suite
-            # comme du Markdown : « Could not fetch resource »)
+            # fence longer than any run of ` in the content: a ``` in a .py or
+            # a .md no longer closes the block (pandoc would otherwise read what
+            # follows as Markdown: "Could not fetch resource")
             plus_long = max((len(m) for m in re.findall(r"`+", "\n".join(compact))), default=0)
             cloture = "`" * max(3, plus_long + 1)
             sections.append("### %s\n\n%d octets, %d lignes → %d lignes%s\n\n%s%s\n%s\n%s\n"
@@ -246,7 +246,7 @@ def main():
         o.write("date: \"%s\"\n" % time.strftime("%Y-%m-%d %H:%M"))
         o.write("lang: fr\n")
         if FORMAT == "qmd":
-            o.write("engine: markdown\n")     # pandoc seul : knitr voyait des ```{r} dans les rapports inclus et s'arretait
+            o.write("engine: markdown\n")     # pandoc only: knitr would see ```{r} in the included reports and stop
         if FORMAT == "qmd":
             o.write("format:\n  html:\n    toc: true\n    toc-depth: 3\n    toc-location: left\n"
                     "    number-sections: true\n    embed-resources: true\n    theme: cosmo\n"
@@ -271,7 +271,7 @@ def main():
                 "sont retirés. Les .md sont inclus tels quels (titres rétrogradés) et les .mmd rendus en "
                 "diagrammes Mermaid, sans compactage.\n")
         o.write(":::\n\n" if FORMAT == "qmd" else "\n")
-        for t in table:                      # ne reste que les dossiers absents / fichiers illisibles
+        for t in table:                      # only absent directories / unreadable files remain
             o.write(t.strip("| ").split(" |")[0] + "\n")
         o.write("\n")
         o.write("\n".join(sections))

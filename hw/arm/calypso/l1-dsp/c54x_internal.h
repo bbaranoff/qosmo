@@ -2,8 +2,7 @@
 /*
  * c54x_internal.h - internal header of the C54x core.
  *
- * [2026-09-18] calypso_c54x.c had grown to 21475 lines and nobody could find
- * anything in it. The core is now split by role:
+ * The core is split by role:
  *   calypso_c54x.c  init / reset / c54x_run loop / public API
  *   c54x_exec.c     c54x_exec_one and the instruction families
  *   c54x_decode.c   operand resolution (Smem/Lmem/Xmem), conditions
@@ -24,25 +23,25 @@
 
 #include "calypso_c54x.h"
 extern int c54x_rapide;   /* fast path, see calypso_c54x.h */
-/* [2026-09-23] Interrupteur des SONDES PURES (celles qui ne font que lire
- * l'etat et journaliser ou compter). Le coeur tournait a ~9 M insn/s parce que
- * des centaines de tests de PC, de compteurs statiques et de prog_fetch de
- * diagnostic s'executaient a chaque instruction ; le temps reel en demande 13+.
- * Resolu UNE fois (c54x_sondes_resoudre, appele par c54x_init et en tete de
- * c54x_run) : CALYPSO_SONDES=1, ou CALYPSO_DEBUG non vide, ou -vvvv et plus
- * dans c54x_exe (main.c le pose avant c54x_init). Defaut : coupe.
- *   -1 = pas encore resolu (traite comme coupe par C54X_SONDES)
- * Ce qui MODIFIE l'etat (@BEQUILLE, recalages, forcages, OVM, timer, IRQ) et
- * ce qui alimente d'autres processus (/dev/shm, side-bands) reste HORS de cet
- * interrupteur, execute tel quel et dans le meme ordre. Avec CALYPSO_SONDES=1
- * la sortie est identique a celle d'avant l'interrupteur. */
+/* Switch for the PURE probes (those that only read the state and log or
+ * count). Hundreds of PC tests, static counters and diagnostic prog_fetch
+ * calls per instruction cost too much for real time (13+ M insn/s needed),
+ * so they sit behind this switch. Resolved ONCE (c54x_sondes_resoudre, called
+ * by c54x_init and at the top of c54x_run): CALYPSO_SONDES=1, or CALYPSO_DEBUG
+ * non-empty, or -vvvv and above in c54x_exe (main.c sets it before c54x_init).
+ * Default: off.
+ *   -1 = not resolved yet (treated as off by C54X_SONDES)
+ * Whatever MODIFIES the state (@BEQUILLE, realignments, forcings, OVM, timer,
+ * IRQ) and whatever feeds other processes (/dev/shm, side-bands) stays OUTSIDE
+ * this switch, executed as is and in the same order. With CALYPSO_SONDES=1 the
+ * output is identical to the unswitched one. */
 extern int c54x_sondes;
 void c54x_sondes_resoudre(void);
 #define C54X_SONDES (__builtin_expect(c54x_sondes > 0, 0))
-/* [2026-09-23] Compteur des interruptions PRISES (vectorisees), tous chemins :
- * rejeu en tete de c54x_run, c54x_irq_level_check, c54x_interrupt_ex. Pur
- * compteur de diagnostic, toujours tenu (une incrementation par IT prise) ; il
- * dit a l'anneau ANNEAU-EXEC si une IT a ete prise dans l'instruction courante. */
+/* Counter of TAKEN (vectored) interrupts, all paths: replay at the top of
+ * c54x_run, c54x_irq_level_check, c54x_interrupt_ex. Pure diagnostic counter,
+ * always maintained (one increment per taken interrupt); it tells the
+ * ANNEAU-EXEC ring whether an interrupt was taken in the current instruction. */
 extern unsigned g_c54x_it_prises;
 #include "calypso_rif.h"
 #include "calypso_rhea_dma.h"
@@ -273,7 +272,7 @@ struct c54x_g_sp_trail_s {
     uint16_t old_sp, new_sp, exec_pc, exec_op, a_low;
 };
 
-/* ---- etats globaux du coeur, definis dans l'un des .c ---- */
+/* ---- core global state, defined in one of the .c files ---- */
 extern uint16_t g_last_d_burst_d;
 extern struct c54x_g_fb_det_timing_s g_fb_det_timing;
 extern ArEntry  g_ar_hist[8][AR_HIST_MAX];
@@ -312,7 +311,7 @@ extern int      g_last_ldp_kind;
 extern uint16_t g_prev_pc;
 extern uint16_t g_prev_op;
 extern uint16_t g_prev2_op;
-extern int g_tc_fiable;      /* [2026-10-22] TC pose par CMPM/BITF et non touche depuis (c54x_exec.c) */
+extern int g_tc_fiable;      /* TC set by CMPM/BITF and untouched since (c54x_exec.c) */
 extern uint16_t g_last_st0w_pc;
 extern uint16_t g_last_st0w_val;
 extern uint16_t g_last_st0w_op;
@@ -441,17 +440,16 @@ uint16_t prog_fetch(C54xState *s, uint16_t pc);
 uint16_t prog_read(C54xState *s, uint32_t addr);
 uint16_t c54x_ovly_bas(void);
 
-/* [2026-09-23] prog_fetch en ligne pour le chemin chaud (5,5 appels par
- * instruction mesures, chacun double d'un appel a c54x_ovly_bas). Copie EXACTE
- * de prog_fetch + c54x_prog_xlate (c54x_mem.c) : alias OVLY vers data[] au-dessus
- * du plancher, fenetre 0x8000-0xDFFF banquee par XPC, le reste non banque. Le
- * plancher OVLY est lu dans g_c54x_ovly_bas, pose par le premier appel de
- * c54x_ovly_bas() (qui garde son message d'armement au meme instant). La
- * fonction prog_fetch reste exportee (pont.c l'appelle) ; c54x_mem.c la definit
- * apres un #undef. */
-extern uint16_t g_c54x_ovly_bas;   /* 0 = pas encore resolu */
-/* [2026-10-22] 0xE000-0xFFFF banque en pages 1 et 2 (PROM1/PROM2 de 32K), voir c54x_prog_xlate */
-extern int g_c54x_xpc_haut;        /* -1 = pas encore resolu */
+/* Inline prog_fetch for the hot path (5.5 calls per instruction, each
+ * doubled by a call to c54x_ovly_bas). EXACT copy of prog_fetch +
+ * c54x_prog_xlate (c54x_mem.c): OVLY alias to data[] above the floor, window
+ * 0x8000-0xDFFF banked by XPC, the rest unbanked. The OVLY floor is read from
+ * g_c54x_ovly_bas, set by the first call of c54x_ovly_bas() (which keeps its
+ * arming message at the same instant). The prog_fetch function stays exported
+ * (pont.c calls it); c54x_mem.c defines it after an #undef. */
+extern uint16_t g_c54x_ovly_bas;   /* 0 = not resolved yet */
+/* 0xE000-0xFFFF banked in pages 1 and 2 (32K PROM1/PROM2), see c54x_prog_xlate */
+extern int g_c54x_xpc_haut;        /* -1 = not resolved yet */
 int c54x_xpc_haut_init(void);
 static inline int c54x_xpc_haut_banque(uint16_t xpc)
 {

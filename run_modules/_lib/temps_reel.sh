@@ -1,31 +1,28 @@
 [ -n "${_TEMPS_REEL_LIB_LOADED:-}" ] && return 0
 _TEMPS_REEL_LIB_LOADED=1
 
-# Priorité temps réel (SCHED_RR) pour les process qui ont une échéance dure.
+# Real-time priority (SCHED_RR) for the processes that have a hard deadline.
 #
-# [2026-10-04] Le BTS#1 (side-car) s'est arrêté en pleine campagne banc-max :
-#     DL1C ERROR PC clock skew: elapsed_us=231775, error_us=227160
-#     BTS_SHUTDOWN(bts0): Shutting down BTS, exit 1, reason: PC clock skew too high
-# Son timer de trame (4,615 ms) a été servi 227 ms trop tard. En SCHED_OTHER,
-# sous charge (load ~11 ce soir-là), un process peut attendre aussi longtemps,
-# et osmo-bts-trx se coupe de lui-même au-delà. Le BTS#0 frôle la même limite
-# (« We missed 1 timers » en continu dans bts.log).
+# osmo-bts-trx shuts itself down ("PC clock skew too high", exit 1) when its
+# frame timer (4.615 ms) is served too late; under load a SCHED_OTHER process
+# can wait long enough for that to happen, and BTS#0 is close to the same
+# limit ("We missed 1 timers" in bts.log).
 #
-# Par chrt AU LANCEMENT, et pas par « cpu-sched / policy rr 1 » dans le .cfg :
-# avec le .cfg, osmo-bts-trx 1.10 REFUSE DE DÉMARRER quand le droit manque
-# (« Failed setting SCHED_RR priority 1 », exit 1 - vérifié sans CAP_SYS_NICE
-# ni rtprio). Ici on essaie d'abord : sans le droit, on lance comme avant.
-# Le droit : root (CAP_SYS_NICE) sur l'hôte ; « --ulimit rtprio=18 » dans les
-# conteneurs (start-docker.sh, compose.yaml).
+# Done with chrt AT LAUNCH, not with "cpu-sched / policy rr 1" in the .cfg:
+# with the .cfg, osmo-bts-trx 1.10 REFUSES TO START when the right is missing
+# ("Failed setting SCHED_RR priority 1", exit 1, without CAP_SYS_NICE or
+# rtprio). Here it is tried first: without the right, the launch is unchanged.
+# The right: root (CAP_SYS_NICE) on the host; "--ulimit rtprio=18" in the
+# containers (start-docker.sh, compose.yaml).
 #
-#   QOSMO_RT_PRIO=<1-99>  priorité SCHED_RR (défaut 1 : au-dessus de tout
-#                         SCHED_OTHER, sous le reste du temps réel)
-#   QOSMO_RT_PRIO=0       désactivé : SCHED_OTHER, comme avant
+#   QOSMO_RT_PRIO=<1-99>  SCHED_RR priority (default 1: above everything
+#                         SCHED_OTHER, below the rest of real time)
+#   QOSMO_RT_PRIO=0       disabled: SCHED_OTHER
 
-# Préfixe à placer devant la commande : « chrt -r <prio> », ou rien.
-# Se développe SANS guillemets :  setsid stdbuf -oL $(rt_prefixe) "$BIN" ...
-# chrt fait un exec : le pid lancé reste celui du binaire, et les threads
-# qu'il créera héritent de la politique.
+# Prefix to put in front of the command: "chrt -r <prio>", or nothing.
+# Expands WITHOUT quotes:  setsid stdbuf -oL $(rt_prefixe) "$BIN" ...
+# chrt does an exec: the launched pid remains the binary's, and the threads
+# it creates inherit the policy.
 rt_prefixe() {
     local prio="${QOSMO_RT_PRIO:-1}"
     [ "$prio" -gt 0 ] 2>/dev/null || return 0
@@ -33,7 +30,7 @@ rt_prefixe() {
     return 0
 }
 
-# Ordonnancement effectif d'un process, pour les journaux : « SCHED_RR 1 ».
+# Effective scheduling of a process, for the logs: "SCHED_RR 1".
 rt_etat() {   # $1 = pid
     LC_ALL=C chrt -p "$1" 2>/dev/null | awk -F': ' '/policy/ { p = $2 } /priority/ { print p, $2 }'
 }

@@ -14,7 +14,7 @@
 
 /* Forward decl: used by data_write() VECDUMP at MMR_PMST. */
 uint16_t prog_read(C54xState *s, uint32_t addr);
-uint16_t (prog_fetch)(C54xState *s, uint16_t pc);   /* [2026-09-23] entre parentheses : prog_fetch est aussi une macro (c54x_internal.h) */
+uint16_t (prog_fetch)(C54xState *s, uint16_t pc);   /* parenthesised: prog_fetch is also a macro (c54x_internal.h) */
 
 /* Propagated by D_BURST_D probe, consumed by A_CD-BY-BURST correlation. */
 uint16_t g_last_d_burst_d;
@@ -601,7 +601,7 @@ CorrReadEntry g_corr_read_hist[CORR_READ_HIST_MAX];
 unsigned    g_corr_read_used    = 0;
 int         g_corr_trace_enabled = -1; /* -1 uninit, 0 off, 1 on */;
 unsigned    g_corr_entry_count  = 0;
-unsigned    g_corr_entry_log_cap = 100000;  /* uncap : voir le par-frame post-+3s */;
+unsigned    g_corr_entry_log_cap = 100000;  /* uncap: see the per-frame post-+3s */;
 
 /* Set by calypso_trx.c when the ARM writes d_task_md=5 (FB command). The
  * D_TASK_MD-RD probe timestamps the DSP reads against this write, comparing

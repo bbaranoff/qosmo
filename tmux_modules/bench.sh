@@ -15,13 +15,13 @@ tmux_layout() {
         "$(_tail "'$L/osmocon.log'")" "$C_RADIO"
     _split radio "pont | transceiver du BTS#0 - bursts TRXD 5700-5702 <-> QEMU 4730/4731" \
         "$(_tail "'/dev/shm/pont.log'")" "$C_RADIO"
-    # [2026-10-19] trace asm de l'ARM quand elle est demandee (--asm / --assembly-logs)
+    # ARM asm trace when requested (--asm / --assembly-logs)
     if { [ -n "${QEMU_ASM:-}" ] && [ "${QEMU_ASM}" != 0 ]; } || [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then
         _split radio "asm | blocs ARM (-d ${QEMU_ASM_FLAGS:-in_asm}), 60 dernieres lignes, 2x/s - anneau : tbring-dump" \
             "$(_asm_watch)" "$C_RADIO"
     fi
     _fenetre_coeur
-    # [2026-10-24] MS1_LOG (osmo-operator, 09-mobile-cfg-tmux.sh) : rvinterf.log en Magnetite
+    # MS1_LOG (osmo-operator, 09-mobile-cfg-tmux.sh): rvinterf.log with Magnetite
     _w     ms1 "MS#1 | ${MS1_LOG_NOM:-mobile} du telephone emule - camp, LU, appels" \
         "$(_tail "'${MS1_LOG:-$L/mobile.log}'")" "$C_MS1"
     _split ms1 "BTS#0 | sa station de base - ARFCN ${PONT_ARFCN:-514}, unit-id 6001" \

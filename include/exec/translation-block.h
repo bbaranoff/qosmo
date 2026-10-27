@@ -142,8 +142,8 @@ struct TranslationBlock {
     uintptr_t jmp_list_next[2];
     uintptr_t jmp_dest[2];
 
-    /* [2026-10-19] -d exec : lookup_symbol(pc) resolu une fois a la
-     * traduction (bsearch dans la table ELF a chaque bloc execute, sinon). */
+    /* -d exec: lookup_symbol(pc) resolved once at translation time instead
+     * of a bsearch in the ELF table for every executed block. */
     const char *log_sym;
 };
 

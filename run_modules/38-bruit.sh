@@ -1,51 +1,52 @@
-# 38-bruit.sh - injecteur de bruit sur le sens DESCENDANT. INACTIF PAR DEFAUT.
+# 38-bruit.sh - noise injector on the DOWNLINK direction. OFF BY DEFAULT.
 #
-# [2026-10-03] Intercale tools/injecteur_bruit.py entre le pont et la couche 1
-# du QEMU de CE plan, quand l'operateur pose BRUIT_MODE (ou BRUIT_SNR_DB seul).
-# Numerote 38 : avant 40-qemu, parce que ce module pose dans l'environnement
-# des variables que QEMU doit heriter (CALYPSO_BSP_PORT, CALYPSO_BSP_SNR_DB).
+# Inserts tools/injecteur_bruit.py between the bridge and the layer 1 of THIS
+# plan's QEMU, when the operator sets BRUIT_MODE (or BRUIT_SNR_DB alone).
+# Numbered 38: before 40-qemu, because this module puts into the environment
+# variables that QEMU must inherit (CALYPSO_BSP_PORT, CALYPSO_BSP_SNR_DB).
 #
-#   BRUIT_MODE     ber | souple | iq | relais (vide = module desactive)
-#                    ber     bits inverses, taux BRUIT_BER (BRUIT_RAFALES=L :
-#                            en rafales de L bits, meme taux moyen)
-#                    souple  AWGN a BRUIT_SNR_DB puis decision dure (le flux
-#                            n'a pas de valeurs souples : bits durs ou octets L2)
-#                    iq      EXPERIMENTAL : bits -> I/Q GMSK + AWGN (BRUIT_SNR_DB)
-#                    relais  rien d'altere : verifie l'intercalation seule
-#   BRUIT_BER      taux d'inversion, 0..1            (mode ber)
-#   BRUIT_RAFALES  longueur moyenne d'une rafale, bits (mode ber, optionnel)
-#   BRUIT_SNR_DB   SNR en dB, P/(2 sigma^2) par echantillon (souple, iq)
-#                  POSE SANS BRUIT_MODE : pas d'injecteur ; le module exporte
-#                  CALYPSO_BSP_SNR_DB (AWGN du coeur C54x, calypso_c54x.c
-#                  c54x_bsp_load), qui n'agit que sur un QEMU construit avec
-#                  --enable-l1-dsp (le DSP externe, c54x_exe, le recoit de
+#   BRUIT_MODE     ber | souple | iq | relais (empty = module disabled)
+#                    ber     flipped bits, rate BRUIT_BER (BRUIT_RAFALES=L:
+#                            in bursts of L bits, same average rate)
+#                    souple  AWGN at BRUIT_SNR_DB then hard decision (the stream
+#                            has no soft values: hard bits or L2 bytes)
+#                    iq      EXPERIMENTAL: bits -> GMSK I/Q + AWGN (BRUIT_SNR_DB)
+#                    relais  nothing altered: checks the insertion alone
+#   BRUIT_BER      flip rate, 0..1                   (ber mode)
+#   BRUIT_RAFALES  average burst length, bits (ber mode, optional)
+#   BRUIT_SNR_DB   SNR in dB, P/(2 sigma^2) per sample (souple, iq)
+#                  SET WITHOUT BRUIT_MODE: no injector; the module exports
+#                  CALYPSO_BSP_SNR_DB (AWGN of the C54x core, calypso_c54x.c
+#                  c54x_bsp_load), which only acts on a QEMU built with
+#                  --enable-l1-dsp (the external DSP, c54x_exe, gets it from
 #                  c54x_exe/run.sh).
-#   BRUIT_PERTE    probabilite d'effacer un burst (dsp) / un bloc (grgsm)
-#   BRUIT_TN       intervalles a degrader, ex. 0 ou 1,2 (defaut tous)
-#   BRUIT_GRAINE   graine : meme graine + memes trames = memes erreurs ; sans
-#                  BRUIT_MODE, devient CALYPSO_BSP_BRUIT_GRAINE
-#   BRUIT_STATS    periode des statistiques dans bruit.log (10 s)
-#   BRUIT_OPTS     options supplementaires passees telles quelles
-#   BRUIT_CIBLE    auto (defaut) | dsp | grgsm : couche 1 du QEMU ; auto lit
+#   BRUIT_PERTE    probability of erasing a burst (dsp) / a block (grgsm)
+#   BRUIT_TN       timeslots to degrade, e.g. 0 or 1,2 (default all)
+#   BRUIT_GRAINE   seed: same seed + same frames = same errors; without
+#                  BRUIT_MODE, becomes CALYPSO_BSP_BRUIT_GRAINE
+#   BRUIT_STATS    statistics period in bruit.log (10 s)
+#   BRUIT_OPTS     extra options passed as is
+#   BRUIT_CIBLE    auto (default) | dsp | grgsm: QEMU layer 1; auto reads
 #                  build/meson-info (l1_dsp / l1_grgsm)
-#   BRUIT_PORT_GRGSM  port ou l'injecteur ecoute en grgsm (14730)
-#   BRUIT_PORT_DSP    port du BSP deplace en dsp (16702)
-#   BRUIT_PY       chemin de l'injecteur (defaut <QEMU_TREE>/tools/injecteur_bruit.py)
+#   BRUIT_PORT_GRGSM  port the injector listens on in grgsm (14730)
+#   BRUIT_PORT_DSP    port the BSP is moved to in dsp (16702)
+#   BRUIT_PY       path of the injector (default <QEMU_TREE>/tools/injecteur_bruit.py)
 #
-# OU IL S'INTERCALE
-#   L1 gr-gsm (le build de ce banc) : QEMU ecoute GSMTAP sur 127.0.0.1:4730 en
-#     dur (calypso_l1_grgsm.c). C'est le pont qui change de cible : pont/pont.py
-#     vise PONT_GSMTAP_PORT, que lui-meme met a BRUIT_PORT_GRGSM (14730) quand
-#     BRUIT_MODE vaut ber ou relais. Le pont est lance par start-native.sh, pas
-#     par ce plan : BRUIT_MODE doit donc etre dans l'environnement de
-#     start-native.sh (BRUIT_MODE=ber BRUIT_BER=0.01 ./start-native.sh --grgsm).
-#     Modes ber et relais seulement (blocs L2 deja decodes, cf. injecteur).
-#   L1 DSP dans QEMU (--enable-l1-dsp) : le BSP de QEMU ecoute BRUIT_PORT_DSP
-#     (CALYPSO_BSP_PORT, exporte ici avant 40-qemu), l'injecteur prend
-#     127.0.0.1:6702 et y recoit ce que le pont envoie a --dsp-port 6702.
-#   Montage DSP de start-native.sh (--dsp) : qemu est retire de ce plan, le
-#     module se saute ; c'est c54x_exe/run.sh qui intercale l'injecteur.
-# Journal de l'injecteur : $LOG_DIR/bruit.log. Detail :
+# WHERE IT IS INSERTED
+#   gr-gsm L1 (the build of this bench): QEMU listens for GSMTAP on
+#     127.0.0.1:4730, hard-coded (calypso_l1_grgsm.c). The bridge is what
+#     changes target: pont/pont.py aims at PONT_GSMTAP_PORT, which it sets
+#     itself to BRUIT_PORT_GRGSM (14730) when BRUIT_MODE is ber or relais. The
+#     bridge is started by start-native.sh, not by this plan: BRUIT_MODE must
+#     therefore be in the environment of start-native.sh
+#     (BRUIT_MODE=ber BRUIT_BER=0.01 ./start-native.sh --grgsm).
+#     Modes ber and relais only (L2 blocks already decoded, cf. injector).
+#   DSP L1 inside QEMU (--enable-l1-dsp): the QEMU BSP listens on BRUIT_PORT_DSP
+#     (CALYPSO_BSP_PORT, exported here before 40-qemu), the injector takes
+#     127.0.0.1:6702 and receives there what the bridge sends to --dsp-port 6702.
+#   DSP setup of start-native.sh (--dsp): qemu is removed from this plan, the
+#     module skips itself; c54x_exe/run.sh inserts the injector.
+# Injector log: $LOG_DIR/bruit.log. Details:
 # osmo-operator/wiki/Injecteur-bruit.md.
 MOD_REGISTER bruit "Injecteur de bruit (sens descendant)"
 MOD_REQUIRED[bruit]=0
@@ -64,7 +65,7 @@ _TM[en:bruit]="Noise injector (downlink)"
 _bruit_log() { printf '%s/bruit.log' "${LOG_DIR:-/tmp/calypso/logs}"; }
 _bruit_pidf() { printf '%s/bruit.pid' "${RUN_DIR:-/tmp/calypso}"; }
 
-# La couche 1 du QEMU de ce plan : BRUIT_CIBLE, sinon les options du build.
+# The layer 1 of this plan's QEMU: BRUIT_CIBLE, otherwise the build options.
 _bruit_l1() {
     case "${BRUIT_CIBLE:-auto}" in dsp|grgsm) printf '%s' "$BRUIT_CIBLE"; return 0 ;; esac
     local j
@@ -74,7 +75,7 @@ d = {o["name"]: o["value"] for o in json.load(open(sys.argv[1]))}
 print("dsp" if d.get("l1_dsp") == "enabled" else "grgsm", end="")' "$j" 2>/dev/null || printf 'grgsm'
 }
 
-# qemu est-il dans le plan joue ? (start-native.sh --dsp le retire : --skip qemu,...)
+# Is qemu in the plan being run? (start-native.sh --dsp removes it: --skip qemu,...)
 _bruit_qemu_au_plan() {
     local m
     for m in "${selected[@]:-}"; do [ "$m" = qemu ] && return 0; done
@@ -95,7 +96,7 @@ _bruit_args() {
     [ -n "${BRUIT_PERTE:-}" ]   && BRUIT_ARGS+=(--perte "$BRUIT_PERTE")
     [ -n "${BRUIT_TN:-}" ]      && BRUIT_ARGS+=(--tn "$BRUIT_TN")
     [ -n "${BRUIT_GRAINE:-}" ]  && BRUIT_ARGS+=(--graine "$BRUIT_GRAINE")
-    # shellcheck disable=SC2206 # BRUIT_OPTS : decoupage en mots voulu
+    # shellcheck disable=SC2206 # BRUIT_OPTS: word splitting intended
     [ -n "${BRUIT_OPTS:-}" ]    && BRUIT_ARGS+=($BRUIT_OPTS)
     return 0
 }
@@ -112,7 +113,7 @@ mod_bruit_check() {
         mod_skip "qemu hors du plan (montage DSP de start-native.sh) : c54x_exe/run.sh intercale l'injecteur"
         return $MOD_RC_SKIP
     fi
-    [ -n "${BRUIT_MODE:-}" ] || { mod_ok; return $MOD_RC_OK; }      # BRUIT_SNR_DB seul : rien a lancer
+    [ -n "${BRUIT_MODE:-}" ] || { mod_ok; return $MOD_RC_OK; }      # BRUIT_SNR_DB alone: nothing to start
     command -v python3 >/dev/null 2>&1 || { mod_fail "python3 introuvable"; return $MOD_RC_FAIL; }
     [ -r "$BRUIT_PY" ] || {
         mod_hint "posez BRUIT_PY=<chemin de injecteur_bruit.py>"
@@ -148,7 +149,7 @@ mod_bruit_status() { _bruit_vivant; }
 mod_bruit_start() {
     local l1; l1="$(_bruit_l1)"
     if [ -z "${BRUIT_MODE:-}" ]; then
-        # BRUIT_SNR_DB seul : le bruit « physique » du coeur C54x, en C.
+        # BRUIT_SNR_DB alone: the "physical" noise of the C54x core, in C.
         export CALYPSO_BSP_SNR_DB="${CALYPSO_BSP_SNR_DB:-$BRUIT_SNR_DB}"
         [ -n "${BRUIT_GRAINE:-}" ] && export CALYPSO_BSP_BRUIT_GRAINE="${CALYPSO_BSP_BRUIT_GRAINE:-$BRUIT_GRAINE}"
         if [ "$l1" = dsp ]; then

@@ -1,73 +1,75 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# injecteur_bruit.py - proxy UDP qui degrade le sens DESCENDANT entre le pont
-# (osmo-operator/pont) et la couche 1 du telephone emule.
+# injecteur_bruit.py - UDP proxy that degrades the DOWNLINK direction between the
+# bridge (osmo-operator/pont) and the layer 1 of the emulated phone.
 #
-# [2026-10-03] Cree pour le banc Calypso. Un seul fichier source :
+# Single source file:
 #   /opt/GSM/qosmo/tools/injecteur_bruit.py
-# (c54x_exe/run.sh le prend la, avec repli sur c54x_exe/tools/injecteur_bruit.py,
-# un lien vers ce fichier ; qosmo/run_modules/38-bruit.sh le lance pour le plan
-# de qosmo).
+# (c54x_exe/run.sh takes it from there, with a fallback on
+# c54x_exe/tools/injecteur_bruit.py, a link to this file;
+# qosmo/run_modules/38-bruit.sh starts it for the qosmo plan).
 #
-# OU IL S'INTERCALE
-#   cible dsp   : pont_dsp.py --dsp-port 6702 -> [injecteur 127.0.0.1:6702]
-#                 -> BSP de c54x_exe deplace sur CALYPSO_BSP_PORT (16702 par
-#                 defaut). Format : 8 octets d'en-tete [tn, fn BE32, att, 0, 0]
-#                 puis 148 octets de bits DURS 0/1 (pont/trx.py Trx.run_data ;
+# WHERE IT SITS
+#   dsp target  : pont_dsp.py --dsp-port 6702 -> [injector 127.0.0.1:6702]
+#                 -> c54x_exe BSP moved to CALYPSO_BSP_PORT (16702 by default).
+#                 Format: 8-byte header [tn, fn BE32, att, 0, 0] then 148
+#                 bytes of HARD bits 0/1 (pont/trx.py Trx.run_data;
 #                 calypso_bsp.c bsp_trxd_readable).
-#                 Le BSP apprend l'adresse de son pair montant sur l'emetteur du
-#                 descendant : une fois l'injecteur intercale, ce qu'il renvoie
-#                 (bursts UL TRXDv0, s'il en emet) arrive ici et repart SANS
-#                 MODIFICATION vers la source (le pont, 127.0.0.1:5702), depuis
-#                 le port d'ecoute -- exactement l'adresse qu'il avait avant.
-#   cible grgsm : pont.py -> GSMTAP [injecteur 127.0.0.1:14730] -> L1 gr-gsm de
-#                 QEMU (127.0.0.1:4730, port fige dans calypso_l1_grgsm.c).
-#                 Le pont y envoie si PONT_GSMTAP_PORT=14730 (pont/config.py ;
-#                 pont/pont.py le pose seul quand BRUIT_MODE vaut ber|relais).
-#                 Format : en-tete GSMTAP v2 de 16 octets puis le bloc L2 DEJA
-#                 DECODE (23 octets) -- PAS des bursts, PAS de valeurs souples.
-#                 Le SCH (4731, « SCH2 ») et la parole TCH (/dev/shm/calypso_tch_dl)
-#                 ne passent pas par ici et ne sont pas touches.
+#                 The BSP learns the address of its uplink peer from the sender
+#                 of the downlink: once the injector sits in between, what the
+#                 BSP sends back (UL TRXDv0 bursts, if any) arrives here and
+#                 leaves UNMODIFIED towards the source (the bridge,
+#                 127.0.0.1:5702), from the listening port -- exactly the
+#                 address the BSP had before.
+#   grgsm target: pont.py -> GSMTAP [injector 127.0.0.1:14730] -> gr-gsm L1 of
+#                 QEMU (127.0.0.1:4730, port fixed in calypso_l1_grgsm.c).
+#                 The bridge sends there when PONT_GSMTAP_PORT=14730
+#                 (pont/config.py; pont/pont.py sets it by itself when
+#                 BRUIT_MODE is ber|relais).
+#                 Format: 16-byte GSMTAP v2 header then the ALREADY DECODED L2
+#                 block (23 bytes) -- NOT bursts, NO soft values.
+#                 The SCH (4731, "SCH2") and TCH speech (/dev/shm/calypso_tch_dl)
+#                 do not go through here and are not touched.
 #
-# MODES (sens descendant seulement ; le montant est toujours relaye tel quel)
-#   relais  aucune alteration : sert a verifier que l'intercalation seule ne
-#           change rien.
-#   ber     inversion aleatoire de bits, taux moyen --ber. --rafales L : erreurs
-#           groupees (Gilbert-Elliott, rafales de L bits en moyenne, taux
-#           --ber-rafale dans une rafale), meme taux moyen.
-#           dsp : bits durs inverses (0<->1). grgsm : bits des octets L2 inverses
-#           APRES decodage -- non physique (ni code correcteur ni CRC ne
-#           protegent plus le bloc) ; --perte est le modele realiste en grgsm.
-#   souple  AWGN a --snr-db sur les valeurs souples. VERIFIE LE 2026-10-03 :
-#           aucun des deux flux n'en porte (dsp : bits durs 0/1 ; grgsm : octets
-#           L2). Sur des bits durs : modulation antipodale +-1, AWGN, decision
-#           dure -- BER = Q(sqrt(2 snr)), annonce au demarrage ; la sortie reste
-#           0/1, le seul format que le BSP sait lire. Si une source envoie un jour
-#           des valeurs souples int8 (convention TRXD : +127 = bit 1), elles sont
-#           bruitees et gardees souples. Refuse en grgsm.
-#   iq      EXPERIMENTAL. Bits -> GMSK BT=0.3 a 4 echantillons/symbole (meme
-#           modulateur que calypso_gmsk.c, instant 0,5) + AWGN a --snr-db, envoye
-#           en I/Q int16 entrelaces (IQ_PASSTHROUGH du BSP, decimation par 4).
-#           CONTOURNE la modulation reglee du BSP (sb_moduler pour le SCH :
-#           instant 0,35, elargissement 1,0, bruit propre ; gmsk_elargir 0,3 sur
-#           les NB -- seul ce dernier est imite ici, --iq-elargir).
-#           INCOMPATIBLE avec CALYPSO_BSP_STREAM=1 (le defaut de
-#           start-native.sh --dsp) : en STREAM le BSP range les 148 premiers
-#           octets du paquet comme des bits AVANT la branche IQ_PASSTHROUGH
-#           (calypso_bsp.c bsp_trxd_readable -> bsp_ts0_stocker). Refuse dans ce
-#           cas, sauf --forcer-iq. Necessite numpy.
-#   --perte P (tous modes) : un burst/bloc sur 1/P est efface. dsp : la charge
-#           est remplacee par des bits aleatoires (evanouissement : le BSP garde
-#           sa cadence, un burst jete le ferait attendre CALYPSO_BSP_ATTENTE_MS).
-#           grgsm : le bloc n'est pas transmis (= echec CRC cote L1).
+# MODES (downlink only; the uplink is always relayed as is)
+#   relais  no alteration: checks that the insertion alone changes nothing.
+#   ber     random bit inversion, mean rate --ber. --rafales L: clustered
+#           errors (Gilbert-Elliott, bursts of L bits on average, rate
+#           --ber-rafale inside a burst), same mean rate.
+#           dsp: hard bits inverted (0<->1). grgsm: bits of the L2 bytes
+#           inverted AFTER decoding -- not physical (neither the error
+#           correcting code nor the CRC protect the block any more); --perte
+#           is the realistic model for grgsm.
+#   souple  AWGN at --snr-db on the soft values. Neither stream carries any
+#           (dsp: hard bits 0/1; grgsm: L2 bytes). On hard bits: antipodal
+#           +-1 modulation, AWGN, hard decision -- BER = Q(sqrt(2 snr)),
+#           announced at start-up; the output stays 0/1, the only format the
+#           BSP can read. If a source sends int8 soft values (TRXD convention:
+#           +127 = bit 1), they are noised and kept soft. Refused for grgsm.
+#   iq      EXPERIMENTAL. Bits -> GMSK BT=0.3 at 4 samples/symbol (same
+#           modulator as calypso_gmsk.c, instant 0.5) + AWGN at --snr-db, sent
+#           as interleaved int16 I/Q (BSP IQ_PASSTHROUGH, decimation by 4).
+#           BYPASSES the BSP's tuned modulation (sb_moduler for the SCH:
+#           instant 0.35, widening 1.0, own noise; gmsk_elargir 0.3 on the
+#           NBs -- only the latter is imitated here, --iq-elargir).
+#           INCOMPATIBLE with CALYPSO_BSP_STREAM=1 (the default of
+#           start-native.sh --dsp): in STREAM the BSP stores the first 148
+#           bytes of the packet as bits BEFORE the IQ_PASSTHROUGH branch
+#           (calypso_bsp.c bsp_trxd_readable -> bsp_ts0_stocker). Refused in
+#           that case, unless --forcer-iq. Requires numpy.
+#   --perte P (all modes): one burst/block out of 1/P is erased. dsp: the
+#           payload is replaced by random bits (fading: the BSP keeps its pace,
+#           a dropped burst would make it wait CALYPSO_BSP_ATTENTE_MS).
+#           grgsm: the block is not transmitted (= CRC failure on the L1 side).
 #
-# DETERMINISME : chaque paquet tire son alea d'une graine derivee de
-# (--graine, fn, tn) : meme graine + memes trames = memes erreurs, quel que soit
-# l'ordre d'arrivee (sauf --rafales, dont l'etat suit l'ordre d'arrivee). Sans
-# --graine, une graine est tiree et ECRITE au demarrage pour pouvoir rejouer.
+# DETERMINISM: each packet draws its randomness from a seed derived from
+# (--graine, fn, tn): same seed + same frames = same errors, whatever the
+# arrival order (except --rafales, whose state follows the arrival order).
+# Without --graine, a seed is drawn and PRINTED at start-up so a run can be
+# replayed.
 #
-# Arret propre sur SIGTERM/SIGINT (statistiques finales), SIGUSR1 = statistiques
-# tout de suite. --verifier : controle la configuration et sort (0 = bon).
+# Clean stop on SIGTERM/SIGINT (final statistics), SIGUSR1 = statistics right
+# away. --verifier: checks the configuration and exits (0 = good).
 import argparse
 import logging
 import math
@@ -84,7 +86,7 @@ VERSION = "2026-10-03"
 log = logging.getLogger("bruit")
 
 PROFILS = {
-    # cible : (ecoute = la ou la source envoie, vers = la couche 1)
+    # target: (listen = where the source sends, to = the layer 1)
     "dsp": ("127.0.0.1:6702", "127.0.0.1:16702"),
     "grgsm": ("127.0.0.1:14730", "127.0.0.1:4730"),
 }
@@ -93,7 +95,7 @@ MODES_GRGSM = ("relais", "ber")
 
 DSP_HDR = 8              # [tn, fn BE32, att, 0, 0]
 NBITS = 148
-IQ_MIN_OCTETS = 4 * 146  # seuil de calypso_bsp.c pour lire la charge en I/Q
+IQ_MIN_OCTETS = 4 * 146  # calypso_bsp.c threshold to read the payload as I/Q
 GSMTAP_TYPE_UM = 0x01
 MASQUE64 = (1 << 64) - 1
 
@@ -117,7 +119,7 @@ def _q_gauss(x):
 
 
 def _geometrique(rng, p):
-    """Nombre d'essais jusqu'au premier succes (>= 1), succes de probabilite p."""
+    """Number of trials up to the first success (>= 1), success probability p."""
     if p >= 1.0:
         return 1
     if p <= 0.0:
@@ -127,13 +129,13 @@ def _geometrique(rng, p):
 
 
 class Rafales:
-    """Gilbert-Elliott : etat bon (aucune erreur) / mauvais (taux q), sejours
-    geometriques. Longueur moyenne d'une rafale L bits, taux moyen p."""
+    """Gilbert-Elliott: good state (no error) / bad state (rate q), geometric
+    sojourns. Mean burst length L bits, mean rate p."""
 
     def __init__(self, p, longueur, q):
         self.q = q
-        pi_m = p / q                          # fraction du temps en rafale
-        self.p_mb = 1.0 / longueur            # mauvais -> bon
+        pi_m = p / q                          # fraction of the time in a burst
+        self.p_mb = 1.0 / longueur            # bad -> good
         self.p_bm = self.p_mb * pi_m / (1.0 - pi_m) if pi_m < 1.0 else 1.0
         self.mauvais = False
         self.restant = None
@@ -156,7 +158,7 @@ class Rafales:
 
 
 def positions_iid(n, p, rng):
-    """Positions des bits inverses, independants de probabilite p (saut geometrique)."""
+    """Positions of the inverted bits, independent with probability p (geometric skip)."""
     if p <= 0.0:
         return []
     if p >= 1.0:
@@ -172,21 +174,21 @@ def positions_iid(n, p, rng):
 
 
 class ModulateurGmsk:
-    """GMSK BT=0.3 (45.004) a `sps` echantillons par symbole, comme
-    calypso_gmsk.c gmsk_moduler() : codage differentiel d_i = b_i ^ b_{i-1}
-    (b_{-1} = 1), alpha_i = 1 - 2 d_i, phase(t) = pi/2 * sum alpha_i q(t - i),
-    echantillon j a l'instant t = j/sps + decalage. Avec sps=4 et decalage=0,5,
-    les echantillons 4k (ceux que garde le BSP, decimation par 4) sont ceux de
+    """GMSK BT=0.3 (45.004) at `sps` samples per symbol, like calypso_gmsk.c
+    gmsk_moduler(): differential coding d_i = b_i ^ b_{i-1} (b_{-1} = 1),
+    alpha_i = 1 - 2 d_i, phase(t) = pi/2 * sum alpha_i q(t - i), sample j at
+    instant t = j/sps + decalage. With sps=4 and decalage=0.5, the samples 4k
+    (the ones the BSP keeps, decimation by 4) are those of
     gmsk_moduler(..., decalage=0.5)."""
 
     def __init__(self, np, sps=4, decalage=0.5):
         self.np = np
         self.sps = sps
-        # La table q(t) est calculee EXACTEMENT comme calypso_gmsk.c q_init() :
-        # somme de Riemann a gauche, pas T/16, normalisee, puis interpolation
-        # lineaire (q_de). Une integration plus fine donnerait une autre forme
-        # d'onde (q(0) = 0,500 au lieu de 0,477 : jusqu'a 0,05 rad d'ecart) et
-        # le mode iq ne serait plus « le meme modulateur » que le BSP.
+        # The q(t) table is computed EXACTLY like calypso_gmsk.c q_init():
+        # left Riemann sum, step T/16, normalised, then linear interpolation
+        # (q_de). A finer integration would give another waveform (q(0) =
+        # 0.500 instead of 0.477: up to 0.05 rad apart) and the iq mode would
+        # no longer be "the same modulator" as the BSP.
         bt, os_, lg = 0.3, 16, 3
         k = 2.0 * math.pi * bt / math.sqrt(math.log(2.0))
         dt = 1.0 / os_
@@ -209,7 +211,7 @@ class ModulateurGmsk:
                 return 1.0
             return tab[i] * (1.0 - f) + tab[i + 1] * f
 
-        # K(n) = q(n/sps + decalage) : 0 pour t <= -1,5, 1 pour t >= 1,5.
+        # K(n) = q(n/sps + decalage): 0 for t <= -1.5, 1 for t >= 1.5.
         n_lo = math.floor((-1.5 - decalage) * sps) + 1
         n_un = math.ceil((1.5 - decalage) * sps)
         self.n_lo = n_lo
@@ -239,19 +241,19 @@ class Stats:
         self.t0 = time.monotonic()
         self.t_prec = self.t0
         self.dl_prec = 0
-        self.dl = 0            # paquets descendants recus
-        self.relayes = 0       # paquets descendants envoyes vers la L1
-        self.alteres = 0       # paquets dont la charge a ete degradee
+        self.dl = 0            # downlink packets received
+        self.relayes = 0       # downlink packets sent to the L1
+        self.alteres = 0       # packets whose payload was degraded
         self.effaces = 0       # --perte
-        self.hors_tn = 0       # hors --tn, relayes tels quels
-        self.autres = 0        # format non reconnu, relayes tels quels
-        self.iq_deja = 0       # charge deja en I/Q, relayee telle quelle
-        self.iq_produits = 0   # bursts convertis en I/Q (mode iq)
-        self.souples = 0       # paquets a valeurs souples vus
-        self.bits = 0          # bits durs examines (ber, souple sur bits durs)
-        self.inverses = 0      # bits durs changes
-        self.ul = 0            # paquets montants relayes vers la source
-        self.ul_sans_dest = 0  # montant recu avant tout descendant
+        self.hors_tn = 0       # outside --tn, relayed as is
+        self.autres = 0        # unrecognised format, relayed as is
+        self.iq_deja = 0       # payload already in I/Q, relayed as is
+        self.iq_produits = 0   # bursts converted to I/Q (iq mode)
+        self.souples = 0       # packets with soft values seen
+        self.bits = 0          # hard bits examined (ber, souple on hard bits)
+        self.inverses = 0      # hard bits changed
+        self.ul = 0            # uplink packets relayed to the source
+        self.ul_sans_dest = 0  # uplink received before any downlink
         self.err_envoi = 0
 
     def ligne(self, final=False):
@@ -286,7 +288,7 @@ class Degradeur:
         x = (self.graine * 0x9E3779B97F4A7C15 + (fn + 1) * 0x100000001B3 + tn * 0x2545F491 + sel * 0x632BE5AB) & MASQUE64
         return random.Random(x)
 
-    # -- cible dsp ----------------------------------------------------------
+    # -- dsp target ---------------------------------------------------------
     def _dsp(self, pkt):
         st = self.stats
         if len(pkt) < DSP_HDR + NBITS:
@@ -303,7 +305,7 @@ class Degradeur:
         fn = struct.unpack_from(">I", pkt, 1)[0]
         rng = self._rng(fn, tn)
         ba = bytearray(pkt)
-        dur = not bytes(ba[DSP_HDR:]).translate(None, b"\x00\x01")   # que des 0/1 : bits durs
+        dur = not bytes(ba[DSP_HDR:]).translate(None, b"\x00\x01")   # only 0/1: hard bits
         if not dur:
             st.souples += 1
         efface = self.a.perte > 0.0 and rng.random() < self.a.perte
@@ -314,7 +316,7 @@ class Degradeur:
                     ba[i] = rng.getrandbits(1)
             else:
                 for i in range(DSP_HDR, len(ba)):
-                    ba[i] = 0                                  # souple : effacement = aucune information
+                    ba[i] = 0                                  # soft: erasure = no information
         mode = self.mode
         if mode == "relais":
             if efface:
@@ -327,7 +329,7 @@ class Degradeur:
                 for i in pos:
                     ba[DSP_HDR + i] ^= 1
             else:
-                for i in pos:                                  # souple : signe inverse
+                for i in pos:                                  # soft: sign inverted
                     v = ba[DSP_HDR + i]
                     v = v - 256 if v > 127 else v
                     ba[DSP_HDR + i] = min(127, -v) & 0xFF
@@ -338,10 +340,10 @@ class Degradeur:
         if mode == "souple":
             snr = self.snr_lin
             if dur:
-                # +-1 + N(0, sigma^2), sigma^2 = 1/(2 snr), puis decision dure :
-                # chaque bit change independamment avec la probabilite
-                # Q(1/sigma) = Q(sqrt(2 snr)). On tire donc directement ces
-                # positions -- meme loi, exactement, sans 148 gaussiennes.
+                # +-1 + N(0, sigma^2), sigma^2 = 1/(2 snr), then hard decision:
+                # each bit changes independently with probability
+                # Q(1/sigma) = Q(sqrt(2 snr)). Those positions are therefore
+                # drawn directly -- exactly the same law, without 148 gaussians.
                 n = len(ba) - DSP_HDR
                 pos = positions_iid(n, self.p_souple, rng)
                 for i in pos:
@@ -357,10 +359,10 @@ class Degradeur:
                     ba[DSP_HDR + k] = max(-127, min(127, w)) & 0xFF
             st.alteres += 1
             return bytes(ba)
-        # mode iq
+        # iq mode
         if dur:
             bits = list(ba[DSP_HDR:DSP_HDR + NBITS])
-        else:                                                  # souple int8 : decision dure (> 0 = 1)
+        else:                                                  # soft int8: hard decision (> 0 = 1)
             bits = [1 if 0 < v <= 127 else 0 for v in ba[DSP_HDR:DSP_HDR + NBITS]]
         return bytes(ba[:DSP_HDR]) + self._iq(bits, fn, tn)
 
@@ -371,9 +373,9 @@ class Degradeur:
         i_ = a.amp * np.cos(ph)
         q_ = a.amp * np.sin(ph)
         if a.iq_elargir and any(bits):
-            # Imite gmsk_elargir() du BSP sur les echantillons qu'il garde
-            # (voisins a +-1 symbole = +-sps echantillons) ; FCCH (tout a zero)
-            # laisse tel quel, comme le BSP.
+            # Imitates the BSP's gmsk_elargir() on the samples it keeps
+            # (neighbours at +-1 symbol = +-sps samples); FCCH (all zero)
+            # left as is, like the BSP.
             s, e = self.mod.sps, a.iq_elargir
             for v in (i_, q_):
                 w = v.copy()
@@ -392,7 +394,7 @@ class Degradeur:
         self.stats.alteres += 1
         return out.tobytes()
 
-    # -- cible grgsm --------------------------------------------------------
+    # -- grgsm target -------------------------------------------------------
     def _grgsm(self, pkt):
         st = self.stats
         if len(pkt) < 16 or pkt[0] != 2 or pkt[2] != GSMTAP_TYPE_UM:
@@ -410,7 +412,7 @@ class Degradeur:
         rng = self._rng(fn, tn, pkt[12])
         if self.a.perte > 0.0 and rng.random() < self.a.perte:
             st.effaces += 1
-            return None                                        # bloc perdu = echec CRC cote L1
+            return None                                        # lost block = CRC failure on the L1 side
         if self.mode == "relais":
             return pkt
         ba = bytearray(pkt)
@@ -467,7 +469,7 @@ def _parser():
 
 
 def _valider(a, p):
-    """Complete et controle les arguments ; rend numpy (mode iq) ou None."""
+    """Completes and checks the arguments; returns numpy (iq mode) or None."""
     ecoute, vers = PROFILS[a.cible]
     a.ecoute = _adresse(a.ecoute or ecoute, "--ecoute")
     a.vers = _adresse(a.vers or vers, "--vers")
@@ -512,7 +514,7 @@ def _valider(a, p):
         if a.cible != "dsp":
             p.error("mode iq : cible dsp seulement")
         try:
-            import numpy as np  # noqa: F811 - seul le mode iq en a besoin
+            import numpy as np  # noqa: F811 - only the iq mode needs it
         except ImportError:
             p.error("mode iq : numpy est necessaire et introuvable pour %s "
                     "(apt-get install python3-numpy, ou pip install numpy). "
@@ -594,8 +596,8 @@ def _annoncer(a, aval, np=None):
                  "contourne sb_moduler/gmsk_elargir du BSP", a.amp, a.iq_elargir,
                  ("AWGN %.2f dB" % a.snr_db) if a.snr_db is not None else "SANS AWGN")
         if a.snr_db is not None and np is not None:
-            # Ecretage int16 : a 30000 il ne reste que 2767 de marge. On l'estime
-            # pour l'annoncer (le C, CALYPSO_BSP_SNR_DB, ecrete de la meme facon).
+            # int16 clipping: at 30000 only 2767 of headroom remain. Estimated
+            # here to announce it (the C side, CALYPSO_BSP_SNR_DB, clips the same way).
             g = np.random.default_rng(0)
             m = 20000
             s = a.amp * np.exp(1j * g.uniform(0.0, 2.0 * math.pi, m))
@@ -662,7 +664,7 @@ def main(argv=None):
                     except (BlockingIOError, InterruptedError):
                         break
                     except OSError:
-                        st.err_envoi += 1            # ICMP remonte sur la socket : on continue
+                        st.err_envoi += 1            # ICMP reported on the socket: carry on
                         break
                     if cle.data == "dl":
                         source = adr
@@ -680,7 +682,7 @@ def main(argv=None):
                             st.ul_sans_dest += 1
                             continue
                         try:
-                            amont.sendto(pkt, dest)  # montant : tel quel
+                            amont.sendto(pkt, dest)  # uplink: as is
                             st.ul += 1
                         except OSError:
                             st.err_envoi += 1

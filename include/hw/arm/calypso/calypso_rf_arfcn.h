@@ -1,38 +1,39 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* [2026-10-21] FAUX AIR : l'ARFCN sur lequel le telephone est accorde, de QEMU vers c54x_exe.
+/* Fake air: the ARFCN the phone is tuned to, from QEMU to c54x_exe.
  *
- * Le synthetiseur (TRF6151, registres PLL/PWR) est programme par le TPU, donc dans QEMU
- * (calypso_tsp.c), alors que les bursts entrent dans le DSP dans c54x_exe (calypso_bsp.c).
- * QEMU ecrit chaque programmation (trame, position dans la trame en qbits, ARFCN) dans un
- * anneau en memoire partagee ; c54x_exe y retrouve l'ARFCN de la fenetre qu'il remplit et
- * livre du bruit hors de la frequence de la cellule (CALYPSO_FAUX_AIR=<arfcn>).
- * Un fichier par instance : chaque instance a son propre /dev/shm. */
+ * The synthesizer (TRF6151, PLL/PWR registers) is programmed by the TPU, hence in
+ * QEMU (calypso_tsp.c), while the bursts enter the DSP in c54x_exe (calypso_bsp.c).
+ * QEMU writes every programming (frame, position in the frame in qbits, ARFCN) into
+ * a ring in shared memory; c54x_exe looks up the ARFCN of the window it is filling
+ * and delivers noise away from the cell frequency (CALYPSO_FAUX_AIR=<arfcn>).
+ * One file per instance: each instance has its own /dev/shm. */
 #ifndef CALYPSO_RF_ARFCN_H
 #define CALYPSO_RF_ARFCN_H
 
 #include <stdint.h>
 
 #define CALYPSO_RF_ARFCN_SHM    "/dev/shm/calypso_rf_arfcn"
-#define CALYPSO_RF_ARFCN_MAGIC  0x52464132u   /* "RFA2" : + gain RX (2026-10-21) */
+#define CALYPSO_RF_ARFCN_MAGIC  0x52464132u   /* "RFA2": layout with RX gain */
 #define CALYPSO_RF_ARFCN_N      64u
 
 typedef struct {
-    uint32_t fn;        /* trame QEMU (celle du PONT_TICK) */
-    int16_t  qbit;      /* position du MOVE dans la trame (sequenceur TPU) */
-    int16_t  arfcn;     /* calypso_trf6151_arfcn(), -1 si inconnu */
-    /* [2026-10-21] gain RX total programme (calypso_trf6151_total_gain_db) : c54x_exe n'a pas les registres
-     * du TRF6151 (seul QEMU recoit le TSP), son modele de a_pm calculait avec le gain de reset et la L1 TI,
-     * qui convertit la PM de veille avec SON gain (l1ctl_pgc, used_il/used_lna), lisait la cellule au
-     * plancher : (1 54) -> (1 8), antenne perdue en veille. */
+    uint32_t fn;        /* QEMU frame (the PONT_TICK one) */
+    int16_t  qbit;      /* position of the MOVE in the frame (TPU sequencer) */
+    int16_t  arfcn;     /* calypso_trf6151_arfcn(), -1 if unknown */
+    /* Total programmed RX gain (calypso_trf6151_total_gain_db): c54x_exe does not
+     * have the TRF6151 registers (only QEMU receives the TSP), so its a_pm model
+     * needs the gain the TI L1 uses to convert the idle-mode PM (l1ctl_pgc,
+     * used_il/used_lna); with the reset gain the cell reads at the floor. */
     int16_t  gain_db;
-    /* [2026-10-23] calypso_trf6151_rf_flags() : bit 15 mode RX, bit 14 mode TX, bit 13 frequence MONTANTE
-     * (ARFCN dans les bits 0..10). 0 : QEMU d'avant (c54x_exe retombe sur `arfcn` seul). */
+    /* calypso_trf6151_rf_flags(): bit 15 RX mode, bit 14 TX mode, bit 13 UPLINK
+     * frequency (ARFCN in bits 0..10). 0: field unused (c54x_exe falls back to
+     * `arfcn` alone). */
     int16_t  reserve;
 } CalypsoRfProg;
 
 typedef struct {
     uint32_t magic;
-    volatile uint32_t widx;                    /* nombre total d'entrees ecrites */
+    volatile uint32_t widx;                    /* total number of entries written */
     CalypsoRfProg e[CALYPSO_RF_ARFCN_N];
 } CalypsoRfArfcnShm;
 

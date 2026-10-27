@@ -32,27 +32,27 @@ struct C54xState;
 void calypso_bsp_init(struct C54xState *dsp);
 
 void calypso_bsp_set_tpu_offset(int qbits);
-/* Canal dedie annonce par QEMU (PONT_DCCH) : genre 0 = SDCCH/4, 1 = SDCCH/8,
- * 0xFF (ou tn <= 0) = libere. Les bursts de cet intervalle remplacent ceux de
- * TS0 dans la fenetre livree au DSP. */
+/* Dedicated channel announced by QEMU (PONT_DCCH): kind 0 = SDCCH/4, 1 = SDCCH/8,
+ * 0xFF (or tn <= 0) = released. The bursts of that timeslot replace those of
+ * TS0 in the window delivered to the DSP. */
 void calypso_bsp_set_dedie(int tn, int genre, int ss);
 void calypso_bsp_toa_feedback(int toa);
 int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick);
-int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page);   /* [2026-10-20] mode TRX : bits exacts du burst montant dans la page de resultat (pont.c, phase A) */   /* [2026-10-20] mode TRX : offset fn/tick depuis le SB emis (pont.c) */
+int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page);   /* TRX mode: exact bits of the uplink burst in the result page (pont.c, phase A) */   /* TRX mode: fn/tick offset since the SB sent (pont.c) */
 int  calypso_bsp_service(uint32_t current_fn);
 int  calypso_bsp_sb_retenter(void);
 int  calypso_bsp_nb_retenter(void);
 void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn);
 unsigned calypso_bsp_dedie_entrees(void);
-void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d);   /* [2026-10-22] fn du mobile (d_fn) */
-/* [2026-10-22] reglage modifiable a chaud : NOM=valeur dans /dev/shm/calypso_reglages (relu quand il change),
- * sinon la variable d'environnement NOM, sinon defaut. */
+void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d);   /* mobile fn (d_fn) */
+/* Hot-tunable setting: NAME=value in /dev/shm/calypso_reglages (re-read when it
+ * changes), else the environment variable NAME, else the default. */
 int calypso_reglage(const char *nom, int defaut);
-int calypso_bsp_tch_dernier_fn(uint32_t *fn);              /* [2026-10-22] dernier burst TCH livre (0 hors TCH) */
-int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148]); /* [2026-10-22] ses bits, 64 trames d'historique */
-void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432);   /* [2026-10-22] RA_C de la trace L1 */   /* [2026-10-22] compteur d'entrees en dedie TI */   /* [2026-10-22] fn exact du dedie */
-int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* [2026-10-21] fn appris au dernier SB */   /* [2026-10-21] NB garde en dedie TI */
-void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH pendant n ticks ([sbwin]) */     /* [2026-09-29] relivre un SCH garde faute de DMA armee ; 1 si livre (pont.c, boucle de pompe) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
+int calypso_bsp_tch_dernier_fn(uint32_t *fn);              /* last TCH burst delivered (0 outside TCH) */
+int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148]); /* its bits, 64 frames of history */
+void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432);   /* RA_C from the L1 trace */   /* count of TI dedicated-mode entries */   /* exact fn of the dedicated channel */
+int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* fn learnt at the last SB */   /* NB kept in TI dedicated mode */
+void calypso_bsp_sb_trace(unsigned ticks);   /* trace every SCH for n ticks ([sbwin]) */     /* redeliver an SCH held back for lack of armed DMA; 1 if delivered (pont.c, pump loop) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
 
 /*
  * Receive a downlink burst.
@@ -62,7 +62,7 @@ void calypso_bsp_sb_trace(unsigned ticks);   /* [2026-09-29] tracer chaque SCH p
  *   iq       - interleaved int16 I,Q,I,Q,... in DSP-native (host) endianness
  *   n_int16  - number of int16 elements in iq[]  (= 2 * n_complex_samples)
  */
-FILE *calypso_bsp_enreg_fichier(void);   /* enregistreur du TCH, voir calypso_bsp.c */
+FILE *calypso_bsp_enreg_fichier(void);   /* TCH recorder, see calypso_bsp.c */
 void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                           const int16_t *iq, int n_int16);
 
@@ -123,12 +123,13 @@ bool calypso_bsp_fb_stream_next(uint16_t *outI, uint16_t *outQ);
  * a_pm = calib_RF(20*log10(MAV/MAV_REF) + RF_REF). It stands in for the ABB
  * power register the DSP reads, which the emulated ADC does not provide. */
 uint16_t calypso_bsp_rssi_apm(void);
-/* [2026-10-21] la k-ieme mesure de la trame (fenetres de mesure dans l'ordre), voir calypso_bsp.c */
+/* the k-th measurement of the frame (measurement windows in order), see calypso_bsp.c */
 uint16_t calypso_bsp_rssi_apm_k(int k);
 int calypso_bsp_pm_mav_texte(char *buf, size_t n);
 int calypso_bsp_pm_mav_fort(void);
 uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav);
-/* [2026-10-23] air realiste + AGC : le D_PM ecrit par le DSP (a_serv_demod[1]) ramene au niveau du dernier burst */
+/* realistic air + AGC: the D_PM written by the DSP (a_serv_demod[1]) brought back to the
+ * level of the last burst */
 uint16_t calypso_bsp_air_dpm(uint16_t val);
 int calypso_apm_trace_on(void);
 

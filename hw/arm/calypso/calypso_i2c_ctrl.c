@@ -1,20 +1,20 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_i2c_ctrl.c - le contrôleur I2C du Calypso, a sa vraie adresse
- * (0xFFFE2800, calypso/i2c.c du firmware), avec un vrai bus I2C QEMU dessous.
+ * calypso_i2c_ctrl.c - the Calypso I2C controller at its real address
+ * (0xFFFE2800, firmware calypso/i2c.c), backed by a real QEMU I2C bus.
  *
- * [2026-10-19] L'objet « calypso-i2c » de hw/ssi/calypso_i2c.c est mappe en
- * 0xFFFE1800 - c'est l'adresse de la RTC, pas de l'I2C - et ne fait rien. Il
- * est laisse tel quel (il repond 4 a l'offset 4, quelqu'un en depend peut-etre).
- * Ici : les dix registres octet du vrai contrôleur, et la commande START qui
- * rejoue la transaction sur le bus (adresse esclave, octet d'adresse interne,
- * puis la FIFO de 16 octets). Le seul esclave de la carte E88 est le LCD
- * ST7558 (0x3c), cree dans calypso_soc.c.
+ * The "calypso-i2c" object of hw/ssi/calypso_i2c.c is mapped at 0xFFFE1800
+ * (the RTC address, not the I2C one) and does nothing; it is kept as is (it
+ * answers 4 at offset 4). This file implements the ten byte registers of
+ * the real controller and the START command, which replays the transaction
+ * on the bus (slave address, internal address byte, then the 16-byte FIFO).
+ * The only slave on the E88 board is the ST7558 LCD (0x3c), created in
+ * calypso_soc.c.
  *
- * Registres (calypso/i2c.c) : 0 DEVICE, 1 ADDRESS, 2 DATA_WR, 3 DATA_RD,
+ * Registers (calypso/i2c.c): 0 DEVICE, 1 ADDRESS, 2 DATA_WR, 3 DATA_RD,
  * 4 CMD (bit0 soft reset, bit1 en_clk, bit2 START, bit3 rw_read), 5 CONF_FIFO
  * (len-1), 6 CONF_CLK, 7 CONF_CLK_FUNC_REF, 8 STATUS_FIFO, 9 STATUS_ACTIVITY
- * (bit2 = 1 tant que le transfert n'est pas fini : ici, toujours fini).
+ * (bit2 = 1 while the transfer is not finished: here, always finished).
  */
 
 #include "qemu/osdep.h"
@@ -92,7 +92,7 @@ static uint64_t i2c_ctrl_read(void *opaque, hwaddr offset, unsigned size)
     case REG_CONF_CLK:        return s->conf_clk;
     case REG_CONF_CLK_REF:    return s->conf_clk_ref;
     case REG_STATUS_FIFO:     return s->fifo_len;
-    case REG_STATUS_ACTIVITY: return s->status & ~STATUS_BUSY;  /* toujours oisif */
+    case REG_STATUS_ACTIVITY: return s->status & ~STATUS_BUSY;  /* always idle */
     default:                  return 0;
     }
 }

@@ -45,32 +45,33 @@ mod_qemu_start() {
     local qlog="${LOG_DIR}/qemu.log" qpid
     mod_say "machine  : calypso"
     mod_say "journal  : $qlog (plafond ${QEMU_LOG_MAX} o)"
-    # [2026-09-03] LANCEUR C `qosmo-grgsm` (tools/qosmo-launch, installe dans
-    # /usr/local/bin par `make install`). Meme ligne de commande que ci-dessous
-    # (-M calypso, -cpu arm946, -serial pty x2, -monitor, -kernel), lecture de
-    # l1s/last_rach dans l'ELF, relais de stdout+stderr de QEMU dans qemu.log
-    # (41-pty continue de lire « redirected to /dev/pts/N »), et deux liens
-    # stables : $RUN_DIR/modem.pty (serial0, celui d'osmocon) et $RUN_DIR/irda.pty.
-    # Il transmet SIGTERM a QEMU et meurt avec lui. Sans lanceur : ligne historique.
-    # [2026-09-03] gdbstub ARM ACTIF ici aussi (tcp::$CALYPSO_GDB_PORT, 1234) :
-    # QEMU ne s'arrete que si un client s'y connecte, donc aucun cout tant qu'on
-    # ne s'en sert pas. C'est ce que 44-gdb-telnet.sh attache a la demande
-    # (telnet localhost 44444, cible en marche). CALYPSO_GDB_PORT=off pour couper.
+    # C LAUNCHER `qosmo-grgsm` (tools/qosmo-launch, installed into
+    # /usr/local/bin by `make install`). Same command line as below
+    # (-M calypso, -cpu arm946, -serial pty x2, -monitor, -kernel), reads
+    # l1s/last_rach from the ELF, relays QEMU stdout+stderr into qemu.log
+    # (41-pty keeps reading "redirected to /dev/pts/N"), and two stable links:
+    # $RUN_DIR/modem.pty (serial0, the one of osmocon) and $RUN_DIR/irda.pty.
+    # It forwards SIGTERM to QEMU and dies with it. Without the launcher: the
+    # direct qemu-system-arm line.
+    # ARM gdbstub ACTIVE here too (tcp::$CALYPSO_GDB_PORT, 1234): QEMU only
+    # stops when a client connects, so no cost as long as it is unused. This
+    # is what 44-gdb-telnet.sh attaches on demand (telnet localhost 44444,
+    # target running). CALYPSO_GDB_PORT=off to disable.
     : "${CALYPSO_GDB_PORT:=1234}"
-    # [2026-09-05] -display none -parallel none, ICI COMME DANS LE LANCEUR.
-    # La machine calypso n'a pas d'ecran. Sans -display, QEMU prend son defaut
-    # graphique (SDL est compile) et cable ses peripheriques par defaut sur des
-    # consoles virtuelles ; les deux serie etant prises (-serial pty) et le
-    # moniteur aussi, il ne restait que le port parallele : une fenetre SDL vide
-    # intitulee « parallel0 », qui capte le clavier, pendant que le boot se passe
-    # sur les pty. -parallel none supprime en plus le chardev (`info chardev` le
-    # montrait encore en `vc` avec le seul -display none).
-    # icount / trace in_asm, désactivés par défaut (./run.sh --icount / --asm) :
+    # -display none -parallel none, HERE AS IN THE LAUNCHER.
+    # The calypso machine has no screen. Without -display, QEMU takes its
+    # graphical default (SDL is compiled in) and wires its default devices to
+    # virtual consoles; both serial ports being taken (-serial pty) and the
+    # monitor too, only the parallel port is left: an empty SDL window titled
+    # "parallel0", which grabs the keyboard, while the boot happens on the
+    # ptys. -parallel none also removes the chardev (`info chardev` still shows
+    # it as `vc` with -display none alone).
+    # icount / in_asm trace, off by default (./run.sh --icount / --asm):
     #   QEMU_ICOUNT=auto|shift=N,…   -> -icount
-    #   QEMU_ASM=1|FICHIER           -> -d in_asm -D FICHIER (défaut $LOG_DIR/qemu-asm.log)
-    #   QEMU_ASM_FLAGS=…             remplace in_asm (in_asm,exec,nochain : chaque execution, trop lent pour l'attach)
-    #   QEMU_ASM_FILTRE=…            ajoute -dfilter
-    # Passés après `--` au lanceur : marche aussi avec un lanceur installé plus ancien.
+    #   QEMU_ASM=1|FILE              -> -d in_asm -D FILE (default $LOG_DIR/qemu-asm.log)
+    #   QEMU_ASM_FLAGS=…             replaces in_asm (in_asm,exec,nochain: every execution, too slow for attach)
+    #   QEMU_ASM_FILTRE=…            adds -dfilter
+    # Passed after `--` to the launcher: also works with an older installed launcher.
     local -a qx=()
     case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) qx+=(-icount "$QEMU_ICOUNT") ;; esac
     case "${QEMU_ASM:-}" in

@@ -1,20 +1,20 @@
 # =============================================================================
-#  44-gdb-telnet — console gdb de l'ARM, servie en telnet, non bloquante
+#  44-gdb-telnet — gdb console of the ARM, served over telnet, non-blocking
 # =============================================================================
-#  RÔLE      Tenir un serveur (tools/gdb-telnet.py) qui, a chaque connexion
-#            `telnet localhost 44444`, attache un gdb-multiarch au gdbstub de
-#            QEMU (-gdb tcp::$CALYPSO_GDB_PORT) avec la cible EN MARCHE
-#            (`continue &`). Ctrl-C arrete l'ARM, `continue &` repart, quit
-#            ferme la session : gdb est tue et QEMU reprend l'ARM.
-#            Tant que personne n'est connecte, rien ne touche a la cible :
-#            on s'en sert quand on en a envie.
-#  PRÉREQUIS QEMU lance avec son gdbstub (module qemu ; le lanceur qosmo-dsp
-#            exporte CALYPSO_GDB_PORT et CALYPSO_GDB_ELF).
-#  SUCCÈS    Le port telnet ecoute.
-#  JOURNAL   $LOG_DIR/gdb-telnet.log
-#  RÉGLAGES  CALYPSO_GDB_TELNET_PORT (defaut 44444, 0 = pas de serveur)
-#            CALYPSO_GDB_TELNET_BIND (defaut 127.0.0.1 : une console gdb
-#            controle la machine, on n'expose pas ca au reseau sans le vouloir)
+#  ROLE      Keep a server (tools/gdb-telnet.py) which, on each
+#            `telnet localhost 44444` connection, attaches a gdb-multiarch to
+#            the QEMU gdbstub (-gdb tcp::$CALYPSO_GDB_PORT) with the target
+#            RUNNING (`continue &`). Ctrl-C stops the ARM, `continue &` resumes,
+#            quit closes the session: gdb is killed and QEMU resumes the ARM.
+#            As long as nobody is connected, nothing touches the target: it is
+#            used on demand.
+#  REQUIRES  QEMU started with its gdbstub (qemu module; the qosmo-dsp launcher
+#            exports CALYPSO_GDB_PORT and CALYPSO_GDB_ELF).
+#  SUCCESS   The telnet port is listening.
+#  LOG       $LOG_DIR/gdb-telnet.log
+#  SETTINGS  CALYPSO_GDB_TELNET_PORT (default 44444, 0 = no server)
+#            CALYPSO_GDB_TELNET_BIND (default 127.0.0.1: a gdb console
+#            controls the machine, it is not exposed to the network unwittingly)
 # -----------------------------------------------------------------------------
 MOD_REGISTER gdbtelnet "Console gdb ARM en telnet (non bloquante)"
 MOD_REQUIRED[gdbtelnet]=0
@@ -22,9 +22,9 @@ MOD_DEPS[gdbtelnet]="qemu"
 MOD_TIMEOUT[gdbtelnet]=10
 MOD_ENABLED_IF[gdbtelnet]='[ "${CALYPSO_GDB_TELNET_PORT:-44444}" != 0 ] && [ -n "${CALYPSO_GDB_PORT:-}" ]'
 
-# Le gdbstub QEMU est lui-meme non bloquant : QEMU tourne normalement tant que
-# personne n'y est connecte. 1234 = le port que le lanceur (qosmo-dsp/qosmo-grgsm)
-# passe a -gdb ; le poser ici garantit que 40-qemu et ce module parlent du meme.
+# The QEMU gdbstub is itself non-blocking: QEMU runs normally as long as nobody
+# is connected to it. 1234 = the port the launcher (qosmo-dsp/qosmo-grgsm)
+# passes to -gdb; setting it here guarantees 40-qemu and this module agree.
 : "${CALYPSO_GDB_PORT:=1234}"
 : "${CALYPSO_GDB_TELNET_PORT:=44444}"
 : "${CALYPSO_GDB_TELNET_BIND:=127.0.0.1}"

@@ -23,15 +23,15 @@ CalypsoUARTState *g_uart_irda;
 #define CALYPSO_IRAM_SIZE     (256 * 1024)
 #define CALYPSO_INTH_BASE     0xFFFFFA00
 #define CALYPSO_TIMER1_BASE   0xFFFE3800
-/* [2026-10-20] TIMER2 est a TIMER1 + 0x3000 (firmware calypso/timer.c TIMER2_OFFSET) : 0xFFFE6800, pas 0xFFFE3C00.
- * Mappe au mauvais endroit, timer_init() ecrivait dans le vide : jiffies restait a 0, timer_irq() ne tournait
- * jamais, donc ni keypad_poll() (clavier du C123 muet dans rssi/menu) ni les osmo_timers du firmware. */
+/* TIMER2 is at TIMER1 + 0x3000 (firmware calypso/timer.c TIMER2_OFFSET): 0xFFFE6800, not
+ * 0xFFFE3C00. timer_init() writes there; jiffies, timer_irq(), keypad_poll() and the firmware
+ * osmo_timers all depend on this mapping. */
 #define CALYPSO_TIMER2_BASE   0xFFFE6800
 #define CALYPSO_SPI_BASE      0xFFFE3000
 #define CALYPSO_I2C_BASE      0xFFFE1800
-#define CALYPSO_KEYPAD_BASE   0xFFFE4800    /* ARMIO : GPIO + clavier (calypso_armio.c) */
-#define CALYPSO_UWIRE_BASE    0xFFFE4000    /* uWire : ecran couleur du C139 sur CS0 (calypso_uwire.c) */
-#define CALYPSO_I2C_CTRL_BASE 0xFFFE2800    /* le vrai I2C (calypso_i2c_ctrl.c) ; 0xFFFE1800 est la RTC */
+#define CALYPSO_KEYPAD_BASE   0xFFFE4800    /* ARMIO: GPIO + keypad (calypso_armio.c) */
+#define CALYPSO_UWIRE_BASE    0xFFFE4000    /* uWire, C139 LCD on CS0 (calypso_uwire.c) */
+#define CALYPSO_I2C_CTRL_BASE 0xFFFE2800    /* real I2C (calypso_i2c_ctrl.c); 0xFFFE1800 is RTC */
 #define CALYPSO_IRQ_KEYPAD_GPIO 8
 #define CALYPSO_UART_IRDA     0xFFFF5000
 #define CALYPSO_UART_MODEM    0xFFFF5800
@@ -87,10 +87,10 @@ static void cntl_write(void *opaque, hwaddr offset, uint64_t value, unsigned siz
     s->extra_conf = (uint16_t)value;
     bool bootrom_enabled = (value >> 8) & 3;
     MemoryRegion *sysmem = get_system_memory();
-    /* [2026-10-21] Sur un C1xx le boot ROM est hors circuit par cablage
-     * (nIBOOT) : la flash reste a 0 quoi que le firmware ecrive ici. Magnetite
-     * ecrit 0x40 dans CNTL_ARM_CLK au demarrage ; sans ce garde l'IRAM (zeros =
-     * NOP ARM) recouvrait la flash et le CPU glissait jusqu'a 0x40000. */
+    /* On a C1xx the boot ROM is wired out (nIBOOT): the flash stays at 0
+     * whatever the firmware writes here. Magnetite writes 0x40 into
+     * CNTL_ARM_CLK at startup; without this guard the IRAM (zeros = ARM NOP)
+     * would overlay the flash. */
     if (s->flash_boot) {
         return;
     }
@@ -113,9 +113,9 @@ static const MemoryRegionOps cntl_ops = {
     .impl = { .min_access_size = 2, .max_access_size = 2 },
 };
 
-/* [2026-10-21] Chien de garde : dar_reset() (seul appelant de WATCHDOG_TIM_MODE = 0xFFFFF804)
- * ecrit 0x80F5 puis attend le reset materiel de l'ARM. Sans ce reset, le firmware boucle
- * dans dar_reset (« gel »). On emule le reset : redemarrage de la machine (flash conservee). */
+/* Watchdog: dar_reset() (the only caller of WATCHDOG_TIM_MODE = 0xFFFFF804) writes 0x80F5
+ * then waits for the hardware reset of the ARM; without it the firmware loops in dar_reset.
+ * The reset is emulated by restarting the machine (flash preserved). */
 static uint64_t wdt_read(void *opaque, hwaddr off, unsigned size)
 {
     return 0;
@@ -124,9 +124,9 @@ static uint64_t wdt_read(void *opaque, hwaddr off, unsigned size)
 static void wdt_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 {
     if (off == 0x04 && (val & 0xffff) == 0x80F5) {
-        /* [2026-10-22] cpu_reset seul pouvait boucler : 4628 resets de suite apres un dar_reset de Magnetite
-         * (SMS efface), l'ARM repartait sur des peripheriques dans leur etat d'avant et y retombait. Au-dela de
-         * 3 resets en 2 s, reset complet de la machine (qemu_system_reset_request). */
+        /* cpu_reset alone can loop (the ARM restarts on peripherals left in their previous
+         * state and falls back into dar_reset). Beyond 3 resets in 2 s, full machine reset
+         * (qemu_system_reset_request). */
         static int64_t t0; static int n;
         int64_t t = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         if (t - t0 > 2000) { t0 = t; n = 0; }
@@ -137,7 +137,7 @@ static void wdt_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
             return;
         }
         fprintf(stderr, "[wdt] chien de garde : 0x80F5 -> reset de l'ARM\n");
-        cpu_reset(first_cpu);   /* reset du CPU ARM : retour au vecteur de reset, boot repart */
+        cpu_reset(first_cpu);   /* ARM CPU reset: back to the reset vector, boot restarts */
     }
 }
 
@@ -247,10 +247,10 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
     calypso_trx_init(sysmem, irqs);
 #undef INTH_IRQ
 
-    /* [2026-10-19] ARMIO + clavier matriciel du C123 (calypso_armio.c), IRQ 8,
-     * et le vrai contrôleur I2C (calypso_i2c_ctrl.c) avec l'ecran ST7558 (0x3c,
-     * calypso_st7558.c) dessous : rssi.highram.elf, menu, trx affichent et
-     * lisent les touches. Avant : bouchon clavier a 0xFF, I2C jete au catchall. */
+    /* ARMIO + C123 matrix keypad (calypso_armio.c), IRQ 8, and the real I2C
+     * controller (calypso_i2c_ctrl.c) with the ST7558 LCD (0x3c,
+     * calypso_st7558.c) behind it: rssi.highram.elf, menu, trx display and
+     * read the keys. */
     {
         DeviceState *armio = qdev_new("calypso-armio");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(armio), &error_fatal);
@@ -261,9 +261,9 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
         DeviceState *i2cc = qdev_new("calypso-i2c-ctrl");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2cc), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2cc), 0, CALYPSO_I2C_CTRL_BASE);
-        /* [2026-10-21] CALYPSO_LCD=c139 : l'ecran couleur 96x64 du C139 sur
-         * uWire CS0 (FreeCalypso Magnetite, cible c139) a la place du ST7558 du
-         * C123 sur I2C. Le controleur uWire est la dans les deux cas. */
+        /* CALYPSO_LCD=c139: the 96x64 colour LCD of the C139 on uWire CS0
+         * (FreeCalypso Magnetite, c139 target) instead of the C123 ST7558 on
+         * I2C. The uWire controller is present in both cases. */
         const char *lcd = getenv("CALYPSO_LCD");
         bool c139 = lcd && !strcmp(lcd, "c139");
         if (!c139) {
@@ -274,7 +274,7 @@ static void calypso_soc_realize(DeviceState *dev, Error **errp)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(uwire), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(uwire), 0, CALYPSO_UWIRE_BASE);
     }
-    /* [2026-10-20] plus de bouchon en 0xFFFE6800 : c'est TIMER2 (CALYPSO_TIMER2_BASE), mappe plus haut */
+    /* no stub at 0xFFFE6800: that is TIMER2 (CALYPSO_TIMER2_BASE), mapped above */
     add_stub(sysmem, "calypso.mmio_80xx", 0xFFFE8000, &stub8_ops, 0x100);
     add_stub(sysmem, "calypso.conf", 0xFFFEF000, &stub16_ops, 0x100);
     add_stub(sysmem, "calypso.dpll", 0xFFFF9800, &stub16_ops, 0x100);

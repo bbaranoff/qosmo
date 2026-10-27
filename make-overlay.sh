@@ -1,25 +1,25 @@
 #!/bin/bash
-# make-overlay.sh — range dans un dossier les fichiers propres a qosmo.
+# make-overlay.sh — collects the files specific to qosmo into a directory.
 #
-#     QEMU vanilla (v$(cat VERSION))  +  overlay  =  qosmo
+#     vanilla QEMU (v$(cat VERSION))  +  overlay  =  qosmo
 #
-# « Propre a qosmo » = suivi par git ici ET (absent du QEMU vanilla OU different
-# de lui). Tout le reste est du QEMU d'origine et reste dehors. Les liens
-# symboliques ne comptent que si leur cible differe.
+# "Specific to qosmo" = tracked by git here AND (absent from vanilla QEMU OR
+# different from it). Everything else is original QEMU and stays out. Symbolic
+# links only count if their target differs.
 #
-# Le dossier est reconstruit a chaque passage (pas de fichier perime) et porte :
-#   MANIFEST.ajoutes   fichiers absents du vanilla
-#   MANIFEST.modifies  fichiers vanilla modifies par qosmo
-#   MANIFEST.retires   fichiers vanilla que qosmo ne suit pas (CI gitlab, roms/…),
-#                      pour information : l'overlay ne les supprime pas
+# The directory is rebuilt on each run (no stale file) and carries:
+#   MANIFEST.ajoutes   files absent from vanilla
+#   MANIFEST.modifies  vanilla files modified by qosmo
+#   MANIFEST.retires   vanilla files qosmo does not track (gitlab CI, roms/...),
+#                      for information: the overlay does not delete them
 #
-# Reconstituer l'arbre :  cp -a <vanilla> arbre && cp -a <overlay>/. arbre/
-#                         (puis rm arbre/MANIFEST.*)
+# Rebuilding the tree:  cp -a <vanilla> tree && cp -a <overlay>/. tree/
+#                       (then rm tree/MANIFEST.*)
 #
-# Le vanilla est pris dans $QEMU_GENUINE (defaut ../qemu-<VERSION>) ; absent, il
-# est clone (depth 1, tag v<VERSION>) depuis gitlab.com/qemu-project/qemu.
+# Vanilla is taken from $QEMU_GENUINE (default ../qemu-<VERSION>); if absent, it
+# is cloned (depth 1, tag v<VERSION>) from gitlab.com/qemu-project/qemu.
 #
-# Usage : ./make-overlay.sh [--dry-run] [DOSSIER]   (defaut ../qosmo-overlay)
+# Usage: ./make-overlay.sh [--dry-run] [DIR]   (default ../qosmo-overlay)
 set -euo pipefail
 DRY=0; [ "${1:-}" = "--dry-run" ] && { DRY=1; shift; }
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -34,7 +34,7 @@ fi
 [ "$(cat "$GEN/VERSION")" = "$VER" ] || {
     echo "!! $GEN est en $(cat "$GEN/VERSION"), qosmo en $VER" >&2; exit 1; }
 
-# Artefacts qui n'ont rien a faire dans un overlay, meme suivis par erreur.
+# Artifacts that do not belong in an overlay, even if tracked by mistake.
 exclu() {
     case "$1" in
         */__pycache__/*|*.pyc|*.o|*.d|*.orig|*.rej|*~|*.swp) return 0;;
@@ -42,7 +42,7 @@ exclu() {
     return 1
 }
 
-# Meme contenu ? Un lien se compare sur sa cible, pas sur ce qu'il pointe.
+# Same content? A link is compared on its target string, not on what it points to.
 pareil() {
     local a="$SRC/$1" b="$GEN/$1"
     if [ -L "$a" ] || [ -L "$b" ]; then
@@ -58,7 +58,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 : > "$tmp/ajoutes"; : > "$tmp/modifies"; skip=0
 while IFS= read -r f; do
     if exclu "$f"; then skip=$((skip+1)); continue; fi
-    [ -e "$SRC/$f" ] || [ -L "$SRC/$f" ] || continue   # suivi mais supprime du disque
+    [ -e "$SRC/$f" ] || [ -L "$SRC/$f" ] || continue   # tracked but removed from disk
     echo "$f" >> "$tmp/ajoutes"
 done < <(comm -13 "$tmp/vanilla" "$tmp/qosmo")
 while IFS= read -r f; do
@@ -77,7 +77,7 @@ echo "----"
 echo "$na ajoute(s), $nm modifie(s), $nr vanilla non suivi(s), $skip artefact(s) ecarte(s)"
 [ "$DRY" = 1 ] && { echo "DRY-RUN : rien d'ecrit."; exit 0; }
 
-# On ne vide que ce que ce script a lui-meme produit.
+# Only wipe what this script produced itself.
 if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT")" ] && [ ! -f "$OUT/MANIFEST.ajoutes" ]; then
     echo "!! $OUT existe, n'est pas vide et n'est pas un overlay qosmo : je n'y touche pas" >&2
     exit 1

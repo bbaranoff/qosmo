@@ -13,7 +13,7 @@ MOD_ENABLED_IF[modem-gprs]='[ "${MODEM_GPRS:-1}" = 1 ]'
 : "${OPERATOR_ID:=1}"
 : "${BSC_CFG:=${OSMOCOM_CFG:-/etc/osmocom}/osmo-bsc.cfg}"
 
-# Memes formules que 21-abonnes-hlr.sh, pour le 3e abonne (MODEM_MS_IDX).
+# Same formulas as 21-abonnes-hlr.sh, for the 3rd subscriber (MODEM_MS_IDX).
 _mg_mcc() { printf '%s\n' "${MCC:-$(core_cfg_field "$(core_cfg osmo-msc)" '^[[:space:]]*network country code[[:space:]]' 4 001)}"; }
 _mg_mnc() { printf '%s\n' "${MNC:-$(core_cfg_field "$(core_cfg osmo-msc)" '^[[:space:]]*mobile network code[[:space:]]' 4 01)}"; }
 _mg_imsi() { printf '%s%s%04d%06d\n' "$(_mg_mcc)" "$(_mg_mnc)" "$OPERATOR_ID" "$MODEM_MS_IDX"; }
@@ -26,7 +26,7 @@ _mg_node() {
     printf '%s' "$n"
 }
 _mg_msisdn() { echo $(( $(_mg_node) * 100000 + OPERATOR_ID * 100 + MODEM_MS_IDX )); }
-# L'ARFCN du BTS#1 tel que le BSC le declare (le radio-plan peut l'avoir change).
+# The ARFCN of BTS#1 as the BSC declares it (the radio plan may have changed it).
 _mg_arfcn() {
     local a; a="$(awk '/^ bts 1/{f=1} f && /^ *arfcn /{print $2; exit}' "$BSC_CFG" 2>/dev/null)"
     printf '%s' "${a:-$SC_ARFCN}"
@@ -78,14 +78,14 @@ mod_modem_gprs_start() {
     radio_dirs
     local log imsi; log="$(radio_log modem-gprs)"; imsi="$(_mg_imsi)"
 
-    # 1. L'abonne dans le HLR (idempotent : « create » d'un IMSI existant est refuse sans effet).
+    # 1. The subscriber in the HLR (idempotent: "create" of an existing IMSI is refused, no effect).
     core_vty_ask "$HLR_VTY_PORT" "enable" \
         "subscriber imsi $imsi create" \
         "subscriber imsi $imsi update msisdn $(_mg_msisdn)" \
         "subscriber imsi $imsi update aud2g comp128v1 ki $(_mg_ki)" "exit" >/dev/null 2>&1
-    # Presence : la base d'abord (comme 21-abonnes-hlr.sh), le VTY en repli -
-    # le dialogue VTY peut ne rien rendre (socat absent, delais) alors que
-    # l'abonne est bien la.
+    # Presence: the database first (as in 21-abonnes-hlr.sh), the VTY as a
+    # fallback - the VTY dialogue may return nothing (socat missing, delays)
+    # while the subscriber is there.
     _mg_present() {
         local n=""
         if command -v sqlite3 >/dev/null 2>&1; then
@@ -98,10 +98,10 @@ mod_modem_gprs_start() {
         || { mod_fail "abonne $imsi absent du HLR apres provisionnement (VTY $HLR_VTY_PORT)"; return $MOD_RC_FAIL; }
     mod_say "abonne GPRS : IMSI $imsi, MSISDN $(_mg_msisdn)"
 
-    # 2. La config du modem, reecrite a chaque lancement (elle suit le plan radio).
+    # 2. The modem config, rewritten on each launch (it follows the radio plan).
     _mg_write_cfg || { mod_fail "ecriture de $MODEM_CFG impossible"; return $MOD_RC_FAIL; }
 
-    # 3. Le modem. Il cree lui-meme $MODEM_TUN (root) une fois le PDP actif.
+    # 3. The modem. It creates $MODEM_TUN itself (root) once the PDP is active.
     wait_until 30 "socket L1CTL $MODEM_L2_SOCK" have_unix "$MODEM_L2_SOCK" || {
         mod_fail "socket L1CTL absente : $MODEM_L2_SOCK"; return $MOD_RC_FAIL; }
     ip link del "$MODEM_TUN" 2>/dev/null
@@ -120,7 +120,7 @@ mod_modem_gprs_wait() {
     wait_until 20 "VTY du modem ($MODEM_VTY_PORT)" have_port "$MODEM_VTY_PORT" || {
         modb_tail "$log" 20
         mod_fail "VTY $MODEM_VTY_PORT jamais en ecoute"; return $MOD_RC_FAIL; }
-    # L'attache GPRS puis le PDP : visibles quand le tun porte une adresse (celle du GGSN, 176.16.32.x).
+    # GPRS attach then PDP: visible when the tun carries an address (the GGSN's, 176.16.32.x).
     if wait_until "${MOD_TIMEOUT[modem-gprs]}" "PDP actif ($MODEM_TUN avec adresse)" \
             sh -c "ip -4 -o addr show '$MODEM_TUN' 2>/dev/null | grep -q inet"; then
         mod_say "pret - $(ip -4 -o addr show "$MODEM_TUN" | awk '{print $4}' | head -1) sur $MODEM_TUN (APN $MODEM_APN)"

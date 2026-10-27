@@ -6,10 +6,10 @@ _live=""
 if [ -n "$_pid_qemu" ] && [ -r "/proc/$_pid_qemu/environ" ]; then
     _live="$(tr '\0' '\n' < "/proc/$_pid_qemu/environ" 2>/dev/null | sed -n 's/^LOG_DIR=//p' | head -1)"
 fi
-# [2026-10-19] start-native.sh publie le chemin de mobile.log du run en cours
-# (/run/osmo-banc/mobile-log, OSMO_MOBILE_LOG) : son dossier fait foi avant
-# l'environnement de QEMU - en --dsp il n'y a pas de qemu-system-arm du fork,
-# et les journaux sont sous /tmp/c54x-pont.
+# start-native.sh publishes the path of the current run's mobile.log
+# (/run/osmo-banc/mobile-log, OSMO_MOBILE_LOG): its directory takes precedence
+# over the QEMU environment - with --dsp there is no qemu-system-arm from the
+# fork, and the logs are under /tmp/c54x-pont.
 _pub="${OSMO_MOBILE_LOG:-$(cat /run/osmo-banc/mobile-log 2>/dev/null)}"
 [ -n "$_pub" ] && [ -f "$_pub" ] && _live="$(dirname "$_pub")"
 LIVE_DIR="${LOG_DIR:-${_live:-/tmp/calypso/logs}}"

@@ -22,9 +22,9 @@ mod_sidecar_cfg_status() {
     _sc_bsc_declare && [ -r "$SC_BTS_CFG" ] && [ -r "$SC_MOBILE_CFG" ]
 }
 
-# Le Gb du BTS#1 : meme bloc que le BTS principal (nsei 10, bvci 12, udp 23001),
-# avec ses propres identifiants (_lib/modem.sh) pour que le SGSN y voie un second
-# NSE. Sans lui, « gprs mode none » : pas de PDCH servi, le second PCU n'a rien.
+# The Gb of BTS#1: same block as the main BTS (nsei 10, bvci 12, udp 23001),
+# with its own identifiers (_lib/modem.sh) so that the SGSN sees a second NSE.
+# Without it, "gprs mode none": no PDCH served, the second PCU has nothing.
 _sc_gprs_block() {
     if ! modem_enabled; then printf '  gprs mode none\n'; return; fi
     cat <<GPRS
@@ -95,7 +95,7 @@ $(for t in 0 1 2 3 4 5 6 7; do
     case "$t" in
       0) pchan='CCCH+SDCCH4' ;;
       1) pchan="${SC_TS1_PCHAN:-SDCCH8}" ;;
-      5|6|7) pchan="${SC_TS_PDCH_PCHAN:-PDCH}" ;;   # canaux paquet du modem GPRS (comme configs/osmo-bsc.cfg)
+      5|6|7) pchan="${SC_TS_PDCH_PCHAN:-PDCH}" ;;   # packet channels of the GPRS modem (as in configs/osmo-bsc.cfg)
       *) pchan='TCH/F' ;;
     esac
     printf '   timeslot %s\n    phys_chan_config %s\n    hopping enabled 0\n' "$t" "$pchan"

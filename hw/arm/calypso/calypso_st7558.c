@@ -1,28 +1,28 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_st7558.c - l'ecran du Motorola C123 : LCD Sitronix ST7558, 96x65
- * points monochromes, esclave I2C 0x3c (firmware : fb/fb_st7558.c).
+ * calypso_st7558.c - the Motorola C123 display: Sitronix ST7558 LCD, 96x65
+ * monochrome pixels, I2C slave 0x3c (firmware: fb/fb_st7558.c).
  *
- * [2026-10-19] Protocole, tel que le firmware le parle :
- *   - premier octet apres l'adresse = octet de controle : 0x00 -> commandes,
- *     0x40 -> donnees (RAM) ;
- *   - commandes : 0x40|page (adresse Y, 9 pages de 8 lignes), 0x80|x (adresse
- *     X, 0..101), 0x20/0x21 (jeu d'instructions normal/etendu), 0x0c video
- *     normale, 0x0d video inverse, 0x08 ecran eteint ; le reste (bias, V_OP,
- *     booster, miroirs) est accepte sans effet ;
- *   - donnees : un octet = 8 points verticaux (bit 0 en haut) de la colonne x
- *     de la page courante, x avance apres chaque octet.
- * fb_st7558_flush() envoie par paquets de 16 octets (la FIFO I2C) : l'ecran
- * est republie a la fin de chaque transaction qui a touche la RAM.
+ * Protocol, as the firmware speaks it:
+ *   - first byte after the address = control byte: 0x00 -> commands,
+ *     0x40 -> data (RAM);
+ *   - commands: 0x40|page (Y address, 9 pages of 8 rows), 0x80|x (X address,
+ *     0..101), 0x20/0x21 (normal/extended instruction set), 0x0c normal
+ *     video, 0x0d inverse video, 0x08 display off; the rest (bias, V_OP,
+ *     booster, mirrors) is accepted without effect;
+ *   - data: one byte = 8 vertical pixels (bit 0 on top) of column x of the
+ *     current page, x advances after each byte.
+ * fb_st7558_flush() sends in packets of 16 bytes (the I2C FIFO): the display
+ * is republished at the end of every transaction that touched the RAM.
  *
- * Deux sorties :
- *   - la console graphique QEMU (-display sdl : fenetre 96x65 agrandie x3) ;
- *   - un fichier image sous /dev/shm (CALYPSO_LCD_SHM, defaut
- *     /dev/shm/calypso_lcd, « none » pour ne rien ecrire) : en-tete de 32
- *     octets (magic "C123LCD", largeur, hauteur, pages, drapeaux bit0 inverse
- *     bit1 eteint, compteur de version) puis 96 x 9 octets de pages, ce que
- *     lit osmo-operator/tools/osmo-c123-gtk.py pour incruster l'ecran dans la
- *     photo du telephone.
+ * Two outputs:
+ *   - the QEMU graphical console (-display sdl: 96x65 window scaled x3);
+ *   - an image file under /dev/shm (CALYPSO_LCD_SHM, default
+ *     /dev/shm/calypso_lcd, "none" to write nothing): 32-byte header
+ *     (magic "C123LCD", width, height, pages, flags bit0 inverse bit1 off,
+ *     version counter) then 96 x 9 bytes of pages, which
+ *     osmo-operator/tools/osmo-c123-gtk.py reads to overlay the display on
+ *     the phone picture.
  */
 
 #include "qemu/osdep.h"
@@ -157,7 +157,7 @@ static void st7558_update_display(void *opaque)
     if (!s->redraw || surface_bits_per_pixel(surface) != 32) {
         return;
     }
-    /* vert-gris du LCD du C123 : points sombres sur fond clair */
+    /* grey-green of the C123 LCD: dark pixels on a light background */
     on = s->inverse ? 0xffc8d8b0u : 0xff1a2a1au;
     offc = s->inverse ? 0xff1a2a1au : 0xffc8d8b0u;
     if (s->off) {

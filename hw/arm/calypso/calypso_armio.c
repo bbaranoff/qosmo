@@ -1,33 +1,31 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_armio.c - ARMIO du Calypso (0xFFFE4800) : GPIO + clavier matriciel.
+ * calypso_armio.c - Calypso ARMIO (0xFFFE4800): GPIO + matrix keypad.
  *
- * [2026-10-19] Avant : un bouchon qui rendait 0xFF a toute lecture, donc un
- * clavier a jamais muet (KBR_LATCH = 0x1f, aucune touche). Ici le clavier du
- * Compal E88 / Motorola C123 est modelise comme le firmware le voit
- * (calypso/keypad.c) :
- *   - KBC (0x0c)        : colonnes pilotees, actives a 0 (bits 0-4) ; 0 = toutes
- *                          (etat de repos, c'est la que l'IRQ sert), 0xff = aucune ;
- *   - KBR_LATCH (0x0a)  : lignes lues, actives a 0 (bits 0-4) : une touche
- *                          (colonne c, ligne r) tire la ligne r a 0 quand la
- *                          colonne c est pilotee ;
- *   - IRQ_KEYPAD_GPIO (8) : niveau haut tant qu'une touche est enfoncee ET que
- *                          toutes les colonnes sont pilotees (KBC = 0). Le
- *                          firmware masque l'IRQ, balaie colonne par colonne,
- *                          puis la reactive quand tout est relache.
- * Numero de touche = colonne * 5 + ligne (board/compal/keymap.h : KEY_OK = 0,
+ * The Compal E88 / Motorola C123 keypad is modelled the way the firmware
+ * sees it (calypso/keypad.c):
+ *   - KBC (0x0c)        : driven columns, active low (bits 0-4); 0 = all
+ *                          (idle state, where the IRQ is useful), 0xff = none;
+ *   - KBR_LATCH (0x0a)  : rows read back, active low (bits 0-4): a key
+ *                          (column c, row r) pulls row r to 0 while column c
+ *                          is driven;
+ *   - IRQ_KEYPAD_GPIO (8) : high level as long as a key is pressed AND all
+ *                          columns are driven (KBC = 0). The firmware masks
+ *                          the IRQ, scans column by column, then re-enables
+ *                          it once everything is released.
+ * Key number = column * 5 + row (board/compal/keymap.h: KEY_OK = 0,
  * KEY_UP = 1, ..., KEY_1 = 15, KEY_0 = 13, KEY_POWER = 24).
  *
- * Deux entrees :
- *   - un socket Unix datagramme (CALYPSO_KEYS_SOCK, defaut /tmp/calypso_keys.sock,
- *     « none » pour ne pas l'ouvrir), une commande par datagramme :
- *         press <touche> | release <touche> | tap <touche> [ms]
- *     <touche> : 0-9, star, hash, menu, lsb, rsb, up, down, left, right, ok,
- *     power, ou k<N> (numero brut). C'est ce que parle osmo-operator/tools/
- *     osmo-c123-gtk.py (la photo du telephone, touches cliquables) ;
- *   - le clavier de la console graphique QEMU (-display sdl) : chiffres,
- *     fleches, Entree = menu, Entree pave = ok, Echap = power, F1/F2 = touches
- *     logicielles, s = *, h = #.
+ * Two input sources:
+ *   - a Unix datagram socket (CALYPSO_KEYS_SOCK, default /tmp/calypso_keys.sock,
+ *     "none" to not open it), one command per datagram:
+ *         press <key> | release <key> | tap <key> [ms]
+ *     <key>: 0-9, star, hash, menu, lsb, rsb, up, down, left, right, ok,
+ *     power, or k<N> (raw number). This is what osmo-operator/tools/
+ *     osmo-c123-gtk.py speaks (phone picture with clickable keys);
+ *   - the keyboard of the QEMU graphical console (-display sdl): digits,
+ *     arrows, Enter = menu, keypad Enter = ok, Esc = power, F1/F2 = soft
+ *     keys, s = *, h = #.
  */
 
 #include "qemu/osdep.h"
@@ -56,7 +54,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CalypsoArmioState, CALYPSO_ARMIO)
 
 #define KEYS_SOCK_DEFAULT   "/tmp/calypso_keys.sock"
 #define TAP_MS_DEFAULT      150
-#define KEY_BITS            25          /* 5 colonnes x 5 lignes */
+#define KEY_BITS            25          /* 5 columns x 5 rows */
 
 struct CalypsoArmioState {
     SysBusDevice parent_obj;
@@ -105,10 +103,10 @@ static const char *armio_key_name(int bit)
     return "?";
 }
 
-/* [2026-10-21] Le firmware Magnetite (driver kpd, BOARD 41) masque la source par AI_MaskIT (bit
- * ARMIO_MASKIT_KBD = 1 dans ARMIO_KBD_GPIO_MASKIT, 0x18) puis active un HISR qui lit la matrice.
- * Sans ce masque, la ligne restait levee : le CPU reprenait l'IRQ en boucle (622 000 fois) et le
- * HISR ne tournait jamais. La source est aussi reflétee dans ARMIO_GPIO_INT (0x16). */
+/* The Magnetite firmware (kpd driver, BOARD 41) masks the source through AI_MaskIT (bit
+ * ARMIO_MASKIT_KBD = 1 in ARMIO_KBD_GPIO_MASKIT, 0x18), then activates a HISR that reads the
+ * matrix. The mask must therefore gate the IRQ line, otherwise the CPU re-enters the IRQ in a
+ * loop and the HISR never runs. The source is also mirrored in ARMIO_GPIO_INT (0x16). */
 static void armio_update_irq(CalypsoArmioState *s)
 {
     int active = (s->keys != 0) && ((s->kbc & 0x1f) == 0);
@@ -242,7 +240,7 @@ static void armio_sock_open(CalypsoArmioState *s)
             s->sock_path);
 }
 
-/* ---- clavier de la console graphique QEMU (-display sdl) ---------------- */
+/* ---- keyboard of the QEMU graphical console (-display sdl) -------------- */
 
 static int armio_qcode_bit(int qcode)
 {

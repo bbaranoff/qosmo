@@ -6,124 +6,109 @@
 #include <stdbool.h>
 
 /* ═════════════════════════════════════════════════════════════════════════
- * LA COUTURE ENTRE LA PLATEFORME ET LA COUCHE 1
+ * THE SEAM BETWEEN THE PLATFORM AND LAYER 1
  * ═════════════════════════════════════════════════════════════════════════
  *
- * [2026-09-16] Ce dépôt (qosmo) est né du constat suivant : qosmo-grgsm et
- * qosmo-dsp, issus du split de qemu-calypso, modélisent le MÊME SoC de deux
- * façons qui avaient déjà divergé sur les 10 fichiers qu'ils ont en commun —
- * 9 sur 10, `calypso_trx.c` allant jusqu'à 478 lignes d'un côté contre 2478
- * de l'autre. Mesurée honnêtement, cette divergence n'était pas de la
- * plateforme : c'était le même squelette, préfixé différemment (`tpu_read`
- * vs `calypso_tpu_read`), plus DEUX fonctions qui sont la couche 1 déguisée
- * en accès mémoire — `api_read`/`api_write` sur la fenêtre 0xFFD00000.
+ * The platform (qosmo) models the Calypso and its board: ARM, SoC, TPU, TSP,
+ * SIM, ULPD, UART, timers, SPI/I²C, INTH, TRF6151, IOTA, RF3166, ASM4532,
+ * XIO, plus the TDMA clock and the API RAM window. It carries NO layer 1 and
+ * builds and boots on its own: the osmocom-bb firmware starts and never sees
+ * anything on the air. A layer 1 is a separate implementation plugged into
+ * this vtable:
  *
- * Les deux dépôts n'ayant pas de commit racine commun (6ee0024 contre
- * 472f69d), un correctif de plateforme ne pouvait pas voyager de l'un à
- * l'autre : ni merge, ni cherry-pick, ni base de fusion. Il fallait
- * réapplique à la main, donc en pratique il n'était appliqué qu'une fois.
+ *     l1-grgsm      calypso_l1_grgsm.c   (demodulation by gr-gsm, on the host)
+ *     l1-dsp        calypso_c54x.c ...   (real TI mask ROM on an emulated C54x)
  *
- * D'où le découpage :
+ * The layer 1 is otherwise reached only through direct calls into the
+ * symbols the platform exports; `api_read`/`api_write` on the 0xFFD00000
+ * window are the two places where layer 1 behaviour hides behind a memory
+ * access, hence the hooks below.
  *
- *     qosmo (ici)   le Calypso et sa carte. ARM, SoC, TPU, TSP, SIM, ULPD,
- *                   UART, timers, SPI/I²C, INTH, TRF6151, IOTA, RF3166,
- *                   ASM4532, XIO — plus l'horloge TDMA et la fenêtre API RAM.
- *                   AUCUNE couche 1. Se construit et boote seul : le firmware
- *                   osmocom-bb démarre, et ne voit jamais rien sur l'air.
+ * WHAT GOES THROUGH HERE, AND WHAT DOES NOT
  *
- *     qosmo-grgsm   + calypso_l1_grgsm.c   (démodulation par gr-gsm, hôte)
- *     qosmo-dsp     + calypso_c54x.c ...   (mask-ROM TI réelle sur C54x émulé)
- *
- * CE QUI PASSE PAR ICI, ET CE QUI N'Y PASSE PAS
- *
- * Cette vtable ne porte QUE le sens plateforme → L1 : les 9 endroits où le
- * matériel doit prévenir la couche 1 qu'il s'est passé quelque chose. Le sens
- * inverse — la L1 qui lit l'API RAM, la trame courante, qui se resynchronise —
- * reste en appels directs vers les symboles que la base exporte
+ * This vtable only carries the platform -> L1 direction: the 9 places where
+ * the hardware has to tell layer 1 that something happened. The opposite
+ * direction (the L1 reading the API RAM or the current frame, resynchronising)
+ * stays as direct calls into the symbols the platform exports
  * (`calypso_api_ram()`, `calypso_trx_get_fn()`, `calypso_trx_autosync_fn()`,
- * `calypso_tsp_move()`, `calypso_tpu_run_scenario()`). C'est volontaire : ces
- * symboles-là sont du matériel, ils ont une seule implémentation par
- * construction, et les indirecter n'achèterait rien.
+ * `calypso_tsp_move()`, `calypso_tpu_run_scenario()`). This is deliberate:
+ * those symbols are hardware, they have a single implementation by
+ * construction, and indirecting them would buy nothing.
  *
- * Ne sont PAS dans la vtable non plus les entrées `dcch_set`, `dcch_active`,
- * `dcch_is_tch` et `rach_conf` de l'ancien calypso_l1.h : vérifié le
- * 2026-09-16, leurs seuls appelants sont dans calypso_l1ctl_tap.c, c'est-à-dire
- * à l'intérieur de la L1 de grgsm. Elles sont internes au fork, pas à la
- * couture. Les faire remonter ici aurait imposé à qosmo-dsp d'implémenter des
- * fonctions que rien dans son chemin d'exécution n'appelle.
+ * The `dcch_set`, `dcch_active`, `dcch_is_tch` and `rach_conf` entries are
+ * NOT in the vtable either: their only callers are in calypso_l1ctl_tap.c,
+ * i.e. inside the grgsm L1. They are internal to that layer 1, not part of
+ * the seam; exposing them here would force the l1-dsp layer to implement
+ * functions nothing on its execution path calls.
  *
- * SI AUCUNE L1 N'EST ENREGISTRÉE
+ * IF NO L1 IS REGISTERED
  *
- * Tout est silencieusement inerte (voir calypso_l1_dispatch.c) et
- * `api_read_override` rend false, donc l'API RAM se comporte en RAM nue.
- * C'est l'état nominal de la base seule, pas une erreur : c'est ce qui rend
- * `qosmo` testable sans embarquer l'une ou l'autre couche 1.
+ * Everything is silently inert (see calypso_l1_dispatch.c) and
+ * `api_read_override` returns false, so the API RAM behaves as bare RAM.
+ * This is the nominal state of the platform alone, not an error: it is what
+ * makes `qosmo` testable without embedding either layer 1.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 typedef struct CalypsoL1Ops {
-    /* Nom court du fork, pour les traces : "grgsm", "c54x", ... */
+    /* Short name of the layer 1, for traces: "grgsm", "c54x", ... */
     const char *name;
 
-    /* Fin de calypso_machine_init(). `firmware_elf` est le -kernel de la ligne
-     * de commande (le layer1.highram.elf d'osmocom-bb), NULL si absent. */
+    /* End of calypso_machine_init(). `firmware_elf` is the -kernel of the
+     * command line (osmocom-bb's layer1.highram.elf), NULL if absent. */
     void (*init)(const char *firmware_elf);
 
-    /* Sur chaque abaissement de l'IRQ trame TPU, donc une fois par trame TDMA,
-     * depuis frame_irq_lower(). C'est le battement de la L1. */
+    /* On every lowering of the TPU frame IRQ, i.e. once per TDMA frame, from
+     * frame_irq_lower(). This is the heartbeat of the L1. */
     void (*frame_tick)(void);
 
-    /* Lecture 16 bits dans la fenêtre API RAM, AVANT que la valeur ne parte
-     * vers l'ARM. Rendre true et remplir `*out` pour imposer une valeur ;
-     * rendre false laisse passer le contenu réel de la RAM.
-     * `off` est l'offset dans la fenêtre, pas une adresse absolue. */
+    /* 16-bit read in the API RAM window, BEFORE the value goes to the ARM.
+     * Return true and fill `*out` to impose a value; returning false lets
+     * the real RAM content through.
+     * `off` is the offset in the window, not an absolute address. */
     bool (*api_read_override)(uint32_t off, uint16_t *out);
 
-    /* La L1 a-t-elle de quoi servir un bloc maintenant ? Consultée quand le
-     * firmware lit d_task_d et y trouve 0 : si true, la base répond
-     * ALLC_DSP_TASK plutôt que « rien à faire ». */
+    /* Does the L1 have a block to serve right now? Consulted when the
+     * firmware reads d_task_d and finds 0: if true, the platform answers
+     * ALLC_DSP_TASK instead of "nothing to do". */
     bool (*si_valid)(void);
 
-    /* Numéro de trame vu par la L1 (l1s). Sert à la base pour détecter une
-     * rupture de continuité dans l'anneau de bursts. */
+    /* Frame number as seen by the L1 (l1s). Used by the platform to detect
+     * a continuity break in the burst ring. */
     uint32_t (*l1s_fn)(void);
 
-    /* Le firmware vient d'écrire d_burst_d / d_rach / d_dsp_page. Ce sont les
-     * trois offsets dont la L1 gr-gsm a besoin, et longtemps les seuls trois
-     * que cette vtable portait. */
+    /* The firmware just wrote d_burst_d / d_rach / d_dsp_page. These are the
+     * three offsets the gr-gsm L1 needs. */
     void (*burst_written)(uint16_t d_burst_d);
     void (*rach_written)(uint16_t d_rach, uint32_t fn);
     void (*page_written)(uint16_t d_dsp_page);
 
-    /* [2026-09-16] TOUTE écriture 16 bits dans la fenêtre API RAM, après que la
-     * base l'a rangée. Ajouté en remontant la L1 C54x, qui a montré la limite
-     * de la vtable telle qu'elle avait été dessinée : gr-gsm ne s'intéresse
-     * qu'à trois offsets nommés, alors que le DSP décode la fenêtre entière —
-     * son calypso_dsp_write() fait 555 lignes. Trois hooks nommés ne pouvaient
-     * pas le porter.
+    /* EVERY 16-bit write in the API RAM window, after the platform has stored
+     * it. The C54x L1 decodes the whole window (its calypso_dsp_write()),
+     * whereas gr-gsm only cares about three named offsets.
      *
-     * Les trois ci-dessus SONT redondants avec celui-ci et restent malgré tout :
-     * une L1 qui ne veut que d_burst_d n'a pas à filtrer toute la fenêtre pour
-     * l'obtenir. Une L1 peut remplir les uns, l'autre, ou les deux ; l'ordre est
-     * api_write_observed() D'ABORD, puis le hook nommé s'il y en a un. */
+     * The three hooks above ARE redundant with this one and stay anyway: an
+     * L1 that only wants d_burst_d does not have to filter the whole window
+     * to get it. An L1 may fill either or both; the order is
+     * api_write_observed() FIRST, then the named hook if there is one. */
     void (*api_write_observed)(uint32_t off, uint16_t val, unsigned size);
 
-    /* Un octet est sorti par l'UART modem (sercomm). Optionnel : c'est le
-     * point d'accroche du tap L1CTL de qosmo-grgsm. NULL si le fork n'en veut
-     * pas — auquel cas l'UART se comporte en UART. */
+    /* A byte went out on the modem UART (sercomm). Optional: this is the hook
+     * point of the grgsm L1CTL tap. NULL if the layer 1 does not want it, in
+     * which case the UART behaves as a UART. */
     void (*uart_tx_byte)(uint8_t ch);
 } CalypsoL1Ops;
 
-/* À appeler par le fork depuis un constructeur ou son propre type_init, donc
- * AVANT calypso_machine_init(). Un second enregistrement écrase le premier et
- * le signale sur stderr : deux couches 1 dans le même binaire est une erreur
- * de meson.build, pas un mode de fonctionnement. */
+/* To be called by the layer 1 from a constructor or its own type_init, hence
+ * BEFORE calypso_machine_init(). A second registration overwrites the first
+ * and reports it on stderr: two layer 1s in the same binary is a meson.build
+ * error, not an operating mode. */
 void calypso_l1_register(const CalypsoL1Ops *ops);
 
-/* Le nom de la L1 active, ou "aucune". Pour les bannières et les traces. */
+/* Name of the active L1, or "aucune" (none). For banners and traces. */
 const char *calypso_l1_name(void);
 
-/* Les accesseurs que la plateforme utilise. Ils encapsulent le test « une L1
- * est-elle enregistrée ? » pour que les sites d'appel restent lisibles. */
+/* The accessors the platform uses. They wrap the "is an L1 registered?" test
+ * so that the call sites stay readable. */
 void calypso_l1_do_init(const char *firmware_elf);
 void calypso_l1_do_frame_tick(void);
 bool calypso_l1_do_api_read_override(uint32_t off, uint16_t *out);

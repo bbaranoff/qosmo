@@ -8,8 +8,8 @@
 #include <unistd.h>
 
 
-/* [2026-10-21] FAUX AIR : chaque programmation du synthetiseur part vers c54x_exe
- * (calypso_rf_arfcn.h). Ouvert a la premiere ecriture ; sans /dev/shm, rien. */
+/* Fake air: every synthesizer programming is sent to c54x_exe
+ * (calypso_rf_arfcn.h). Opened on the first write; without /dev/shm, nothing. */
 static void rf_arfcn_publier(uint32_t fn)
 {
     static CalypsoRfArfcnShm *m;
@@ -33,7 +33,7 @@ static void rf_arfcn_publier(uint32_t fn)
     e->qbit = (int16_t)calypso_tpu_qbit();
     e->arfcn = (int16_t)calypso_trf6151_arfcn();
     e->gain_db = (int16_t)calypso_trf6151_total_gain_db();
-    e->reserve = (int16_t)calypso_trf6151_rf_flags();   /* [2026-10-23] voir calypso_rf_arfcn.h */
+    e->reserve = (int16_t)calypso_trf6151_rf_flags();   /* see calypso_rf_arfcn.h */
     __atomic_store_n(&m->widx, m->widx + 1, __ATOMIC_RELEASE);
 }
 
@@ -81,9 +81,10 @@ void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn)
                        ((uint32_t)tsp.tx[2] << 8) | tsp.tx[3];
             }
             calypso_trf6151_tsp_write(dev_idx, dout);
-            /* [2026-10-22] TRACE A CHAUD (`touch /dev/shm/tsp_trace`, 6000 lignes) : toutes les ecritures TSP.
-             * En veille Magnetite, aucune programmation vers le voisin de la liste BA (277 cote L1 TI) n'est
-             * vue par le decodage TRF6151 : ses fenetres de mesure sont classees « cellule » par le faux air. */
+            /* Live trace (`touch /dev/shm/tsp_trace`, 6000 lines): every TSP write. In
+             * Magnetite idle mode, no programming towards the BA-list neighbour (277 on
+             * the TI L1 side) is seen by the TRF6151 decoding: its measurement windows
+             * are classified "cell" by the fake air. */
             {
                 static unsigned n_appels, n_lignes; static int on;
                 if (n_appels++ % 256 == 0) on = (access("/dev/shm/tsp_trace", F_OK) == 0);
@@ -94,7 +95,7 @@ void calypso_tsp_move(uint8_t addr, uint8_t data, uint32_t fn)
                             calypso_trf6151_arfcn(), calypso_trf6151_total_gain_db());
                 }
             }
-            /* TRF6151 RX (gain, 2026-10-21), PLL ou PWR (bande), TSPEN1 ou 2 */
+            /* TRF6151 RX (gain), PLL or PWR (band), TSPEN1 or 2 */
             if ((dev_idx == 1 || dev_idx == 2) && ((dout & 7) == 0 || (dout & 7) == 1 || (dout & 7) == 2)) {
                 rf_arfcn_publier(fn);
             }

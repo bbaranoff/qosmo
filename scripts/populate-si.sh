@@ -1,18 +1,17 @@
 #!/bin/bash
-# populate-si.sh — XXX TRANSITIONAL STUB (étape 2b, disposable).
+# populate-si.sh — static SI stub.
 #
-# Écrit les 5 SI hex blobs RSL-extracted (osmo-bsc → osmo-bts trace 2026-04-30)
-# dans /dev/shm/calypso_si.bin per doc/MMAP_SI_FORMAT.md v1.
+# Writes 5 fixed SI blobs (extracted from an osmo-bsc -> osmo-bts RSL trace)
+# into /dev/shm/calypso_si.bin per doc/MMAP_SI_FORMAT.md v1.
 #
-# Permet de valider l'interface mmap (étape 2a) sans dépendance sur le RSL
-# parser (étape 3). À supprimer dès que scripts/rsl_si_tap.py est opérationnel
-# en steady-state.
+# Lets the mmap interface be validated without depending on the RSL parser
+# (scripts/rsl_si_tap.py).
 #
 # Usage:
-#   ./populate-si.sh                              # défaut /dev/shm/calypso_si.bin
+#   ./populate-si.sh                              # default /dev/shm/calypso_si.bin
 #   CALYPSO_SI_MMAP_PATH=/tmp/foo ./populate-si.sh
 #
-# Vérification:
+# Check:
 #   xxd /dev/shm/calypso_si.bin | head           # check magic "CSI1" + slots
 
 set -e

@@ -1,93 +1,93 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_dsp_pont.h - le pont entre l'ARM sous QEMU et un DSP C54x hors
- * process (c54x_exe --arm).
+ * calypso_dsp_pont.h - the bridge between the ARM under QEMU and an
+ * out-of-process C54x DSP (c54x_exe --arm).
  *
- * [2026-09-16] Pourquoi un pont. c54x_exe fait tourner la mask-ROM TI seule,
- * en millisecondes ; la layer1 osmocom-bb, elle, est du code ARM et ne tourne
- * que sous QEMU. Pour les coupler sans recompiler le DSP dans QEMU, les deux
- * partagent l'API RAM (la fenetre 0xFFD00000 cote ARM, DARAM 0x0800 cote DSP)
- * par un segment /dev/shm, et se synchronisent trame par trame sur une socket
- * UNIX SOCK_SEQPACKET.
+ * Why a bridge: c54x_exe runs the TI mask ROM on its own, in milliseconds;
+ * the osmocom-bb layer1 is ARM code and only runs under QEMU. To couple them
+ * without compiling the DSP into QEMU, both share the API RAM (the
+ * 0xFFD00000 window on the ARM side, DARAM 0x0800 on the DSP side) through
+ * a /dev/shm segment, and synchronise frame by frame over a UNIX
+ * SOCK_SEQPACKET socket.
  *
- * Le protocole reproduit EXACTEMENT ce que qosmo-dsp/calypso_trx.c fait en
- * interne a chaque tdma_tick : DMA tick, boot du DSP jusqu'au premier IDLE,
- * interruption TPU-frame si l'IMR l'arme, un budget de c54x_run, et le front
- * « occupe -> IDLE » qui leve l'IRQ API (IRQ 15) cote ARM. Rien de plus, rien
- * de moins : ce qui diverge entre le pont et qosmo-dsp est un bug du pont.
+ * The protocol reproduces EXACTLY what the in-process calypso_trx.c does on
+ * every tdma_tick: DMA tick, DSP boot up to the first IDLE, TPU-frame
+ * interrupt if the IMR arms it, a c54x_run budget, and the "busy -> IDLE"
+ * edge that raises the API IRQ (IRQ 15) on the ARM side. Nothing more,
+ * nothing less: any divergence between the bridge and the in-process path
+ * is a bridge bug.
  *
- * Verrouillage en trame : QEMU envoie TICK et ATTEND DONE avant de lever
- * l'IRQ TPU-frame. Le DSP ne tourne donc jamais en roue libre - le protocole
- * ARM/DSP est synchrone (pages d'ecriture/lecture basculees sur l'IRQ trame).
+ * Frame lock-step: QEMU sends TICK and WAITS for DONE before raising the
+ * TPU-frame IRQ. The DSP therefore never free-runs; the ARM/DSP protocol is
+ * synchronous (write/read pages swapped on the frame IRQ).
  *
- * Ce fichier est inclus des deux cotes (QEMU et c54x_exe) : il ne depend de
- * rien d'autre que <stdint.h>.
+ * This file is included on both sides (QEMU and c54x_exe): it depends on
+ * nothing but <stdint.h>.
  */
 #ifndef CALYPSO_DSP_PONT_H
 #define CALYPSO_DSP_PONT_H
 
 #include <stdint.h>
 
-/* Segment partage : shm_open() de ce nom = /dev/shm/calypso_api_ram.
- * Taille = CALYPSO_API_SIZE (64 Ko, 32 K mots) ; cree par c54x_exe, ouvert
- * en lecture/ecriture par QEMU. */
+/* Shared segment: shm_open() of this name = /dev/shm/calypso_api_ram.
+ * Size = CALYPSO_API_SIZE (64 KiB, 32 K words); created by c54x_exe, opened
+ * read/write by QEMU. */
 #define CALYPSO_PONT_SHM        "/calypso_api_ram"
-/* Taille du segment : la fenetre API vue du DSP, C54X_API_SIZE = 0x2000 mots.
- * [2026-09-17] Le segment N'EST PAS une copie : cote c54x_exe il est mmap
- * MAP_FIXED PAR-DESSUS data[0x0800..0x27FF] du C54xState (data[] est alignee
- * sur une page pour ca), parce que le coeur ecrit sa fenetre API dans data[]
- * et ne recopie dans api_ram que sur certains chemins ; api_ram est alors
- * alias de &data[0x0800]. Cote QEMU, il couvre les 16 premiers Ko de la
- * fenetre ARM de 64 Ko. */
+/* Segment size: the API window as seen by the DSP, C54X_API_SIZE = 0x2000
+ * words. The segment is NOT a copy: on the c54x_exe side it is mmap'ed
+ * MAP_FIXED OVER data[0x0800..0x27FF] of the C54xState (data[] is page
+ * aligned for that), because the core writes its API window into data[]
+ * and only copies to api_ram on some paths; api_ram then aliases
+ * &data[0x0800]. On the QEMU side it covers the first 16 KiB of the 64 KiB
+ * ARM window. */
 #define CALYPSO_PONT_SHM_BYTES  0x4000
-/* Socket de synchronisation, cote c54x_exe = serveur. */
+/* Synchronisation socket, c54x_exe side = server. */
 #define CALYPSO_PONT_SOCK       "/tmp/calypso_dsp.sock"
 #define CALYPSO_PONT_MAGIC      0x43353458u   /* 'C54X' */
 
 enum CalypsoPontType {
-    PONT_HELLO    = 1,  /* QEMU -> DSP : a = mots d'API RAM attendus, b = magic */
-    PONT_HELLO_OK = 2,  /* DSP -> QEMU : a = mots d'API RAM servis,   b = magic */
-    PONT_RESET    = 3,  /* QEMU -> DSP : l'ARM a ecrit DL_STATUS (a = valeur)   */
-    PONT_TICK     = 4,  /* QEMU -> DSP : une trame TDMA, a = fn, b = d_dsp_page */
-    PONT_DONE     = 5,  /* DSP -> QEMU : trame jouee, a = drapeaux, b = insns    */
-    PONT_GO       = 6,  /* QEMU -> DSP : l1_sync de l'ARM finie, livrer le burst (2 phases) */
-    /* [2026-09-21] Canal dedie : a = TN, b = genre (0 SDCCH/4, 1 SDCCH/8,
-     * 0xFF libere), c = sous-voie. QEMU l'apprend du flux L1CTL du firmware
-     * (calypso_dcch_tap.c) et le DSP en a besoin pour savoir QUEL intervalle
-     * de temps livrer : le pont lui envoie les huit, mais il n'en joue qu'un
-     * par tick. Emis juste avant un TICK, jamais pendant l'attente d'un GO. */
+    PONT_HELLO    = 1,  /* QEMU -> DSP: a = API RAM words expected, b = magic   */
+    PONT_HELLO_OK = 2,  /* DSP -> QEMU: a = API RAM words served,   b = magic   */
+    PONT_RESET    = 3,  /* QEMU -> DSP: the ARM wrote DL_STATUS (a = value)     */
+    PONT_TICK     = 4,  /* QEMU -> DSP: one TDMA frame, a = fn, b = d_dsp_page  */
+    PONT_DONE     = 5,  /* DSP -> QEMU: frame played, a = flags, b = insns      */
+    PONT_GO       = 6,  /* QEMU -> DSP: ARM l1_sync done, deliver the burst (2 phases) */
+    /* Dedicated channel: a = TN, b = kind (0 SDCCH/4, 1 SDCCH/8, 0xFF
+     * released), c = subchannel. QEMU learns it from the firmware's L1CTL
+     * stream (calypso_dcch_tap.c) and the DSP needs it to know WHICH timeslot
+     * to deliver: the bridge sends it all eight, but it only plays one per
+     * tick. Sent just before a TICK, never while waiting for a GO. */
     PONT_DCCH     = 7,
-    /* [2026-09-23] BYE valait 6, comme GO (depuis 255cdd6, 21/09). Personne ne
-     * l'envoie ; mais un GO arrive apres le delai de 2 s de pont.c (« PONT_GO
-     * attendu ») retombait dans la boucle principale de c54x_exe, qui le lisait
-     * comme BYE et s'arretait. */
-    PONT_BYE      = 8,  /* l'un ou l'autre : fin propre                          */
+    /* Distinct from GO: a GO arriving after the 2 s timeout of pont.c
+     * ("PONT_GO attendu") falls back into the main loop of c54x_exe, which
+     * must not read it as BYE. */
+    PONT_BYE      = 8,  /* either side: clean end                               */
 };
 
-/* Drapeaux de PONT_DONE.a */
-#define PONT_DONE_API_IRQ   (1u << 0)   /* front occupe -> IDLE : lever IRQ 15 */
-#define PONT_DONE_IDLE      (1u << 1)   /* le DSP est en IDLE apres la trame   */
-#define PONT_DONE_INIT      (1u << 2)   /* boot termine (premier IDLE atteint) */
+/* PONT_DONE.a flags */
+#define PONT_DONE_API_IRQ   (1u << 0)   /* busy -> IDLE edge: raise IRQ 15     */
+#define PONT_DONE_IDLE      (1u << 1)   /* the DSP is in IDLE after the frame  */
+#define PONT_DONE_INIT      (1u << 2)   /* boot finished (first IDLE reached)  */
 #define PONT_DONE_RUNNING   (1u << 3)   /* dsp->running                         */
-/* TICK.b : bit 0 = page W annoncee par l'ARM (d_dsp_page & 1), bit 16 = l'ARM a
- * arme l'interruption trame du DSP (TPU_CTRL_DSP_EN, a usage unique) depuis le
- * tick precedent. Sans ce bit le DSP ne recoit pas d'interruption trame. */
+/* TICK.b: bit 0 = W page announced by the ARM (d_dsp_page & 1), bit 16 = the
+ * ARM armed the DSP frame interrupt (TPU_CTRL_DSP_EN, one-shot) since the
+ * previous tick. Without this bit the DSP gets no frame interrupt. */
 #define CALYPSO_PONT_TICK_IRQ_TRAME (1u << 16)
-/* [2026-09-21] TICK EN DEUX PHASES (bit 17). La ROM demodule le burst de la
- * trame N et ecrit la page R dans son ISR de trame N+1, PUIS lit la page W ;
- * l'ARM lit cette page R dans l1_sync(N+1) et poste la page W de N+2. L'ordre
- * silicium dans une trame est donc : ISR DSP (resultats + dispatch) ->
- * l1_sync ARM -> reception du burst. Avec ce bit le DSP joue l'ISR jusqu'a
- * l'armement de la fenetre RX, repond DONE|PONT_DONE_PHASE_A, et attend
- * PONT_GO (envoye quand l1_sync est finie) pour livrer le burst et finir. */
+/* TWO-PHASE TICK (bit 17). The ROM demodulates the burst of frame N and
+ * writes the R page in its frame N+1 ISR, THEN reads the W page; the ARM
+ * reads that R page in l1_sync(N+1) and posts the W page of N+2. The silicon
+ * order within a frame is therefore: DSP ISR (results + dispatch) ->
+ * ARM l1_sync -> burst reception. With this bit the DSP plays the ISR up to
+ * the arming of the RX window, answers DONE|PONT_DONE_PHASE_A, and waits for
+ * PONT_GO (sent when l1_sync is finished) to deliver the burst and finish. */
 #define CALYPSO_PONT_TICK_DEUX_PHASES (1u << 17)
-#define PONT_DONE_PHASE_A   (1u << 4)   /* ISR jouee, burst pas encore livre : attend PONT_GO */
+#define PONT_DONE_PHASE_A   (1u << 4)   /* ISR played, burst not delivered: waits for GO */
 
 typedef struct {
     uint32_t type;
     uint32_t a;
     uint32_t b;
-    uint32_t c;   /* [2026-09-17] TICK : tpu_offset (qbits) pour caler la fenetre RX du DSP */
+    uint32_t c;   /* TICK: tpu_offset (qbits) to align the DSP RX window */
 } CalypsoPontMsg;
 
 #endif

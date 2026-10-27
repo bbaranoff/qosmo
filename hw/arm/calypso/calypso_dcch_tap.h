@@ -4,9 +4,9 @@
 
 #include <stdint.h>
 
-/* Octet emis par le firmware sur l'UART modem (sercomm). */
+/* Byte emitted by the firmware on the modem UART (sercomm). */
 void calypso_dcch_tap_tx_byte(uint8_t ch);
-/* Le firmware a remis sa couche 1 a zero : le canal dedie est libere. */
+/* The firmware reset its layer 1: the dedicated channel is released. */
 void calypso_dcch_tap_reset(void);
 
 #endif

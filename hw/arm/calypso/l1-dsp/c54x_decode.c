@@ -7,7 +7,7 @@
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
-/* [2026-10-15] MMR operand of LDM / STLM / STM (SPRU131G 5.6 "Memory-mapped
+/* MMR operand of LDM / STLM / STM (SPRU131G 5.6 "Memory-mapped
  * register addressing", SPRU172C STM/STLM examples). Direct form: the 7 LSBs
  * of the opcode are the MMR address, DP/CPL ignored. Indirect form (bit 7 = 1,
  * only *ARx, *ARx-, *ARx+ allowed): the 7 LSBs of ARx give the MMR address,
@@ -41,10 +41,10 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         int mod = (opcode >> 3) & 0x0F;
         int nar = opcode & 0x07;
         int cur_arp = nar;
-        /* [2026-10-15] SPRU172C MAR / SPRU131G 5.5 : en mode compatibilite
-         * (CMPT = 1), un champ ARx = AR0 designe AR(ARP) et ne modifie pas l'ARP
-         * (exemple MAR *AR0- avec ARP = 4 : AR4 decremente, ARP reste 4).
-         * Sans effet en mode natif : la ROM ne met jamais CMPT a 1 (ST1 =
+        /* SPRU172C MAR / SPRU131G 5.5: in compatibility mode (CMPT = 1), an
+         * ARx field = AR0 designates AR(ARP) and does not modify the ARP
+         * (e.g. MAR *AR0- with ARP = 4: AR4 is decremented, ARP stays 4).
+         * No effect in native mode: the ROM never sets CMPT to 1 (ST1 =
          * 0x2900/0x6900). */
         bool cmpt_ar0 = (s->st1 & ST1_CMPT) && nar == 0;
         if (cmpt_ar0) cur_arp = arp(s);
@@ -151,11 +151,11 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
             s->lk_used = true;
             break;
         case 0xE: { /* *+AR(x)(lk)% - circular */
-            /* [2026-09-21] Same rule as modes 8-11: c54x_circ_ref (base on a 2^N
-             * boundary, index = AR & (2^N-1)). The old "base = AR - AR % BK" grid
-             * broke the xCCH deinterleaver (PROM0 0x9a15/0x9a34/0x9a59
-             * `mar *+AR4(57)%`, BK=456, buffer 0x2a00): AR4=0x2aab+57 gave
-             * 0x291c instead of 0x2ae4, so the odd-nibble half of every 456-bit
+            /* Same rule as modes 8-11: c54x_circ_ref (base on a 2^N boundary,
+             * index = AR & (2^N-1)). A "base = AR - AR % BK" grid would be wrong
+             * for the xCCH deinterleaver (PROM0 0x9a15/0x9a34/0x9a59
+             * `mar *+AR4(57)%`, BK=456, buffer 0x2a00): AR4=0x2aab+57 must give
+             * 0x2ae4, not 0x291c, or the odd-nibble half of every 456-bit
              * block landed below the buffer and the Viterbi saw stale words. */
             uint16_t lk = prog_fetch(s, s->pc + 1);
             s->ar[cur_arp] = c54x_circ_ref(s->ar[cur_arp], (int16_t)lk, s->bk);
@@ -219,10 +219,10 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
         return addr;
     } else {
         /* Direct addressing. SPRU131G 5.3: CPL=0 -> dma = DP:offset (DP<<7 | 7 bits);
-         * CPL=1 -> dma = SP + offset. [2026-09-20] CPL was ignored: the ROM runs its
-         * C tasks with CPL=1 (0x71d5 `stm #0x6900, ST1` before `cala A`) and clears
-         * it for the hand-written DSP kernels (0x7c20 `rsbx CPL`), so every
-         * SP-relative local in the C parts was read from page DP instead. */
+         * CPL=1 -> dma = SP + offset. CPL matters: the ROM runs its C tasks with
+         * CPL=1 (0x71d5 `stm #0x6900, ST1` before `cala A`) and clears it for the
+         * hand-written DSP kernels (0x7c20 `rsbx CPL`), so the SP-relative locals
+         * of the C parts depend on it. */
         *indirect = false;
         uint16_t offset = opcode & 0x7F;
         if (s->st1 & ST1_CPL) return (uint16_t)(s->sp + offset);
@@ -239,10 +239,10 @@ uint16_t resolve_smem(C54xState *s, uint16_t opcode, bool *indirect)
  * resolve_smem's MOD field decode (bits 6:3). */
 uint16_t resolve_lmem(C54xState *s, uint16_t opcode)
 {
-    /* [2026-09-20] The address is returned AS IS: the C54x reads the high word
-     * at the given address and the low word at address ^ 1 (SPRU172C DADD
-     * example, AR3 = 0101h: hi = data[0101h], lo = data[0100h]). Forcing the
-     * address even swapped the halves of every odd-addressed long operand. */
+    /* The address is returned AS IS: the C54x reads the high word at the
+     * given address and the low word at address ^ 1 (SPRU172C DADD example,
+     * AR3 = 0101h: hi = data[0101h], lo = data[0100h]). Forcing the address
+     * even would swap the halves of every odd-addressed long operand. */
     if (!(opcode & 0x80)) {
         /* Direct - dmad pair, no post-mod. CPL selects SP- or DP-relative. */
         uint16_t off = opcode & 0x7F;
@@ -334,7 +334,7 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
         int64_t acc = (cc & 0x08) ? sext40(s->b) : sext40(s->a);
         bool ov = (cc & 0x08) ? !!(s->st0 & (1 << 9))  /* OVB */
                               : !!(s->st0 & (1 << 8));  /* OVA */
-        /* [2026-09-21] OVA/OVB are cleared once a conditional tests them */
+        /* OVA/OVB are cleared once a conditional tests them */
         if ((cc & 0x70) == 0x70) { s->st0 &= (cc & 0x08) ? ~(1 << 9) : ~(1 << 8); return ov; }    /* AOV/BOV  */
         if ((cc & 0x70) == 0x60) { s->st0 &= (cc & 0x08) ? ~(1 << 9) : ~(1 << 8); return !ov; }   /* ANOV/BNOV */
         switch (cc & 0x07) {
@@ -347,11 +347,10 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
         default:   return true;
         }
     }
-    /* [2026-10-16] Group 2 conditions combine: binutils lets TC/NTC (0x30/0x20),
+    /* Group 2 conditions combine: binutils lets TC/NTC (0x30/0x20),
      * C/NC (0x0C/0x08) and BIO/NBIO (0x03/0x02) appear together (`bc 1000h,tc,nc,bio`,
      * SPRU172C BC example, isa_test 28) and the instruction runs only when ALL hold.
-     * Only the first field was tested before. BIO is not wired: the pin reads high
-     * (inactive), so BIO is false and NBIO true. */
+     * BIO is not wired: the pin reads high (inactive), so BIO is false and NBIO true. */
     bool r = true;
     if ((cc & 0x30) == 0x30) r = r &&  (s->st0 & ST0_TC);
     if ((cc & 0x30) == 0x20) r = r && !(s->st0 & ST0_TC);
@@ -380,7 +379,7 @@ bool c54x_cond_true(C54xState *s, uint8_t cc)
  *    BRINT0 steals the rare window and re-masks with INTM=1. */
 bool g_frame_it_level = false;
 
-/* [2026-07-30] IFR-CLEAR-WHO: name every site that clears an IFR bit.
+/* IFR-CLEAR-WHO: name every site that clears an IFR bit.
  *
  * All IFR clear sites funnel through here and pass their own name, because a
  * pending interrupt can vanish before the INTM=0 window opens: the window is

@@ -9,10 +9,10 @@ MOD_DEPS[sidecar-pcu]="sgsn sidecar-bts"
 MOD_TIMEOUT[sidecar-pcu]=30
 MOD_ENABLED_IF[sidecar-pcu]='[ "${NO_OSMO_START:-0}" != 1 ] && [ "${CORE_GPRS:-1}" = 1 ] && [ "${MODEM_GPRS:-1}" = 1 ]'
 
-# Un osmo-pcu ne sert qu'UN socket BTS. Le premier (18-pcu.sh) est sur
-# /tmp/pcu_bts, celui du BTS principal ; celui-ci prend /tmp/pcu_bts2, le socket
-# que le BTS#1 declare (osmo-bts-trx-bts1.cfg). Sa config est derivee de celle
-# du premier : meme politique, autre socket, autre journal, VTY sur 127.0.0.2.
+# One osmo-pcu serves only ONE BTS socket. The first one (18-pcu.sh) is on
+# /tmp/pcu_bts, the main BTS's; this one takes /tmp/pcu_bts2, the socket that
+# BTS#1 declares (osmo-bts-trx-bts1.cfg). Its config is derived from the first
+# one's: same policy, other socket, other log, VTY on 127.0.0.2.
 _scpcu_gen_cfg() {
     local src; src="$(core_cfg osmo-pcu)"
     [ -r "$src" ] || return 1
@@ -34,8 +34,8 @@ mod_sidecar_pcu_status() { core_alive "$SC_PCU_UNIT"; }
 
 mod_sidecar_pcu_start() {
     _scpcu_gen_cfg || { mod_fail "generation de $SC_PCU_CFG impossible"; return $MOD_RC_FAIL; }
-    # Le bloc « pcu » doit finir par pcu-socket : sed l'a retire s'il y etait,
-    # et on l'a reecrit en fin du bloc pcu (dernier noeud du fichier source).
+    # The "pcu" block must end with pcu-socket: sed removed it if present, and
+    # it is rewritten at the end of the pcu block (last node of the source file).
     grep -q "^ pcu-socket $SC_PCU_SOCKET" "$SC_PCU_CFG" || {
         mod_fail "pcu-socket absent de $SC_PCU_CFG"; return $MOD_RC_FAIL; }
     mod_say "osmo-pcu -c $SC_PCU_CFG (socket $SC_PCU_SOCKET, VTY $SC_PCU_VTY_HOST:$SC_PCU_VTY_PORT, nsei $SC_GPRS_NSEI)"
@@ -58,5 +58,5 @@ mod_sidecar_pcu_wait() {
     mod_ok
 }
 
-# Par pid seulement : « osmo-pcu -c » en motif tuerait aussi le premier PCU.
+# By pid only: "osmo-pcu -c" as a pattern would also kill the first PCU.
 mod_sidecar_pcu_stop() { core_svc_stop "$SC_PCU_UNIT" "osmo-pcu -c $SC_PCU_CFG"; }

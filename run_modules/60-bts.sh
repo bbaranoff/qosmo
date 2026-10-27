@@ -48,12 +48,12 @@ mod_bts_status() {
 mod_bts_start() {
     mkdir -p "${RUN_DIR:-/tmp/calypso}" "$(dirname "$BTS_LOG")" 2>/dev/null || true
     : > "$BTS_LOG" 2>/dev/null || true
-    # [2026-10-23] GARDIEN (BTS_GARDIEN=1 par defaut) : osmo-bts-trx SORT (exit 1) sur « PC clock skew too high »
-    # quand l'horloge du pont, cadencee par le DSP, cale plus de 50 trames (run du 23/10 17:37, Magnetite : apres
-    # une liberation SDCCH, BTS0 partie, plus aucune voie descendante, reseau perdu jusqu'a la relance du banc).
-    # La boucle la relance apres BTS_GARDIEN_PAUSE s ; elle attend si une autre BTS de la meme config tourne
-    # deja (c54x_exe/run.sh la relance aussi en --bts). Le pid du fichier est celui de la boucle : mod_bts_stop
-    # tue la boucle d'abord, puis la BTS.
+    # GUARD (BTS_GARDIEN=1 by default): osmo-bts-trx EXITS (exit 1) on "PC clock skew too high"
+    # when the bridge clock, paced by the DSP, stalls for more than 50 frames; without the guard
+    # BTS0 is gone, no more downlink, network lost until the bench is restarted.
+    # The loop restarts it after BTS_GARDIEN_PAUSE s; it waits if another BTS with the same config
+    # is already running (c54x_exe/run.sh also restarts it with --bts). The pid in the file is the
+    # loop's: mod_bts_stop kills the loop first, then the BTS.
     if [ "${BTS_GARDIEN:-1}" = 1 ]; then
         setsid bash -c '
             bin="$1" cfg="$2" log="$3" pause="$4"; shift 4

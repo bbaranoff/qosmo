@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-gdb-telnet.py — console gdb (ARM du Calypso emule) servie en telnet, NON BLOQUANTE.
+gdb-telnet.py — gdb console (ARM of the emulated Calypso) served over telnet, NON-BLOCKING.
 
     telnet localhost 44444
 
-Ce qu'on obtient : un gdb-multiarch attache au gdbstub de QEMU (-gdb tcp::1234),
-la cible EN MARCHE (`continue &`), et le prompt (gdb) disponible tout de suite.
-    Ctrl-C            arrete l'ARM (SIGINT -> gdb interrompt la cible), on inspecte
-    continue &        repart, sans bloquer le prompt
-    quit / Ctrl-]     la session se ferme, gdb est tue, QEMU reprend l'ARM
+What you get: a gdb-multiarch attached to the QEMU gdbstub (-gdb tcp::1234),
+the target RUNNING (`continue &`), and the (gdb) prompt available right away.
+    Ctrl-C            stops the ARM (SIGINT -> gdb interrupts the target), inspect
+    continue &        resumes, without blocking the prompt
+    quit / Ctrl-]     the session closes, gdb is killed, QEMU resumes the ARM
 
-Pourquoi un serveur maison et pas `socat ... EXEC:gdb,pty` : telnet reste en
-« ligne par ligne » face a un serveur muet, et Ctrl-C part alors en sequence
-IAC IP que gdb ne comprend pas. Ici on negocie ECHO+SGA (mode caractere) : le
-client envoie 0x03 brut, le pty (isig) le transforme en SIGINT pour gdb. Les
-sequences IAC restantes sont filtrees, IAC IP/BRK deviennent un 0x03.
+Why a home-made server and not `socat ... EXEC:gdb,pty`: telnet stays in
+"line by line" mode facing a silent server, and Ctrl-C then leaves as an
+IAC IP sequence that gdb does not understand. Here ECHO+SGA (character mode)
+is negotiated: the client sends a raw 0x03, the pty (isig) turns it into a
+SIGINT for gdb. The remaining IAC sequences are filtered, IAC IP/BRK become a 0x03.
 
-Une session a la fois : le gdbstub de QEMU n'accepte qu'un client. Tant que
-personne n'est connecte, aucun gdb ne tourne et l'ARM n'est jamais touche.
+One session at a time: the QEMU gdbstub accepts only one client. As long as
+nobody is connected, no gdb runs and the ARM is never touched.
 """
 import argparse, os, pty, select, signal, socket, sys, time
 
@@ -25,10 +25,10 @@ IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
 IP, BRK = 244, 243
 ECHO, SGA = 1, 3
 
-# Ctrl-C : quand la cible tourne EN ARRIERE-PLAN (continue &), un SIGINT au
-# prompt gdb ne l'arrete pas — readline repond juste « Quit ». Ce qui l'arrete,
-# c'est la commande `interrupt`. On efface la ligne en cours (Ctrl-U) puis on
-# l'envoie ; gdb affiche « Program received signal SIGINT » et la main revient.
+# Ctrl-C: when the target runs IN THE BACKGROUND (continue &), a SIGINT at the
+# gdb prompt does not stop it — readline just answers "Quit". What stops it is
+# the `interrupt` command. The current line is erased (Ctrl-U) then it is
+# sent; gdb prints "Program received signal SIGINT" and control comes back.
 CTRL_C = b'\x15interrupt\n'
 
 
@@ -37,7 +37,7 @@ def log(msg):
 
 
 def filter_telnet(data, state):
-    """Retire les commandes telnet, rend les octets destines a gdb."""
+    """Strips the telnet commands, returns the bytes meant for gdb."""
     out = bytearray()
     buf = state['pending'] + data
     i = 0
@@ -45,12 +45,12 @@ def filter_telnet(data, state):
         b = buf[i]
         if b == IAC:
             if i + 1 >= len(buf):
-                break                       # commande coupee : on attend la suite
+                break                       # truncated command: wait for the rest
             c = buf[i + 1]
             if c == IAC:
                 out.append(IAC); i += 2; continue
             if c in (IP, BRK):
-                out += CTRL_C; i += 2; continue           # Ctrl-C telnet -> interrupt
+                out += CTRL_C; i += 2; continue           # telnet Ctrl-C -> interrupt
             if c in (DO, DONT, WILL, WONT):
                 if i + 2 >= len(buf):
                     break
@@ -61,13 +61,13 @@ def filter_telnet(data, state):
                     break
                 i = j + 2; continue
             i += 2; continue
-        if b == 13:                          # Entree telnet : CR LF ou CR NUL -> CR
+        if b == 13:                          # telnet Enter: CR LF or CR NUL -> CR
             out.append(13)
             i += 2 if i + 1 < len(buf) and buf[i + 1] in (0, 10) else 1
             continue
         if b == 0:
             i += 1; continue
-        if b == 3:                           # Ctrl-C brut (mode caractere)
+        if b == 3:                           # raw Ctrl-C (character mode)
             out += CTRL_C; i += 1; continue
         out.append(b); i += 1
     state['pending'] = bytes(buf[i:])
@@ -84,8 +84,8 @@ def session(conn, args):
     pid, fd = pty.fork()
     if pid == 0:
         os.environ['TERM'] = 'vt100'
-        # readline sans bracketed-paste : sinon chaque prompt est encadre de
-        # sequences ESC[?2004h/l illisibles dans un telnet nu.
+        # readline without bracketed-paste: otherwise each prompt is wrapped in
+        # ESC[?2004h/l sequences, unreadable in a bare telnet.
         rc = '/tmp/gdb-telnet.inputrc'
         try:
             with open(rc, 'w') as f:
@@ -99,12 +99,12 @@ def session(conn, args):
                '-ex', 'set architecture armv5te',
                '-ex', f'target remote 127.0.0.1:{args.stub}',
                '-ex', 'continue &']
-        # panneau osmocom (tools/cmd.gdb, genere par gdb_cmd.sh) : source auto
+        # osmocom panel (tools/cmd.gdb, generated by gdb_cmd.sh): sourced automatically
         tools = os.path.dirname(os.path.abspath(__file__))
         panel = os.path.join(tools, 'cmd.gdb')
         if os.path.isfile(panel):
-            # [2026-10-19] cmd.gdb cherche demo-layer1.py d'abord ici : le chemin
-            # fige a sa generation peut etre celui d'un rootfs de build.
+            # cmd.gdb looks for demo-layer1.py here first: the path frozen at
+            # its generation may be that of a build rootfs.
             os.environ['OSMO_GDB_TOOLS'] = tools
             cmd += ['-x', panel]
         if args.elf:
@@ -125,9 +125,9 @@ def session(conn, args):
                 if not data:
                     break
                 if b'\x03' in data or bytes([IAC, IP]) in data or bytes([IAC, BRK]) in data:
-                    # vrai SIGINT a gdb : coupe une boucle (trace_*, every) ou une
-                    # execution en avant-plan ; le `interrupt` qui suit arrete
-                    # la cible si elle tournait en arriere-plan (continue &).
+                    # real SIGINT to gdb: breaks a loop (trace_*, every) or a
+                    # foreground execution; the following `interrupt` stops the
+                    # target if it was running in the background (continue &).
                     try:
                         os.killpg(os.getpgid(pid), signal.SIGINT)
                     except OSError:
@@ -150,7 +150,7 @@ def session(conn, args):
                 pid = 0; break
     finally:
         if pid:
-            # detach d'abord : la cible repart proprement meme si elle etait arretee
+            # detach first: the target resumes cleanly even if it was stopped
             try:
                 os.write(fd, b'\x03')
                 time.sleep(0.2)

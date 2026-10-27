@@ -1,6 +1,6 @@
-/* [2026-10-21] calypso_comp128.c — COMP128v1 pour la carte SIM emulee (calypso_sim.c, RUN GSM ALGORITHM).
- * Copie de libosmocore src/gsm/comp128.c (QEMU ne lie pas libosmogsm). Avant : SRES = RAND ^ 0xAA, Kc = 0,
- * la Ki chargee de mobile.cfg n etait jamais utilisee -> LOCATION UPDATING REJECT du MSC (COMP128v1). */
+/* calypso_comp128.c - COMP128v1 for the emulated SIM card (calypso_sim.c, RUN GSM ALGORITHM).
+ * Copy of libosmocore src/gsm/comp128.c (QEMU does not link libosmogsm), so that the Ki loaded
+ * from mobile.cfg yields the SRES/Kc the MSC expects (COMP128v1). */
 /*! \file comp128.c
  *  COMP128 v1; common/old GSM Authentication Algorithm (A3/A8).
  *

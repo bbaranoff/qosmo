@@ -199,7 +199,7 @@ void calypso_mbx_init(void)
         e = def;
     }
     if (calypso_mbx_suffixe && *calypso_mbx_suffixe) {
-        /* mailbox.log -> mailbox-arm.log ; sans « .log » : suffixe en queue */
+        /* mailbox.log -> mailbox-arm.log; without ".log": suffix appended */
         static char avec[600];
         size_t n = strlen(e);
         if (n > 4 && !strcmp(e + n - 4, ".log")) {

@@ -25,13 +25,12 @@ mod_sidecar_bts_check() {
 
 mod_sidecar_bts_status() { radio_alive sidecar-bts; }
 
-# [2026-10-26] LA BTS#1 SE SUICIDE, PERSONNE NE LA RELANCE. Run du 26/10 09:46:44 : « PC clock skew:
-# elapsed_us=238779 » puis « Shutting down BTS, exit 1, reason: PC clock skew too high » (garde-fou
-# d'osmo-bts, non reglable) ; le BSC perd l'OML, fake_trx recoit POWEROFF, MS#2 perd sa cellule et
-# reste en « No service » (C6, sync timeout) pour toujours : les essais ci-dessous ne jouent qu'au
-# demarrage. Ce chien de garde relance osmo-bts-trx tant que le marqueur d'arret n'existe pas
-# (pose par _stop). Le pid dans sidecar-bts.pid suit la BTS courante (radio_alive, status).
-# SC_BTS_RESPAWN=0 pour l'ancien comportement.
+# osmo-bts-trx exits (exit 1) on "PC clock skew too high" (an osmo-bts guard, not
+# tunable); the BSC then loses the OML, fake_trx receives POWEROFF and MS#2 loses
+# its cell and stays in "No service" (C6, sync timeout). The retries in _start
+# only apply at startup. This watchdog restarts osmo-bts-trx as long as the stop
+# marker does not exist (set by _stop). The pid in sidecar-bts.pid follows the
+# current BTS (radio_alive, status). SC_BTS_RESPAWN=0 disables the watchdog.
 _sc_bts_watchdog() {
     local log="$1" marqueur="$RUN_DIR/sidecar-bts.stop"
     rm -f "$marqueur"
@@ -92,7 +91,7 @@ mod_sidecar_bts_wait() {
 }
 
 mod_sidecar_bts_stop() {
-    touch "$RUN_DIR/sidecar-bts.stop" 2>/dev/null    # le chien de garde ne relance plus
+    touch "$RUN_DIR/sidecar-bts.stop" 2>/dev/null    # the watchdog stops restarting
     radio_kill sidecar-bts-watchdog
     radio_kill sidecar-bts
     return 0

@@ -1,59 +1,58 @@
 #!/bin/bash
 # =============================================================================
-#  install.sh - construit et installe qosmo (QEMU, machine Calypso)
+#  install.sh - builds and installs qosmo (QEMU, Calypso machine)
 # =============================================================================
 #
-#  Autonome : ce depot et quelques paquets apt suffisent, osmo-operator n est
-#  pas necessaire. C est aussi CE script qu appellent le Dockerfile
-#  d osmo-operator (stage qemu), son Dockerfile.run, start-docker.sh et l installation
-#  native (install_modules/45-calypso.sh) : une seule liste de commandes.
+#  Standalone: this repository and a few apt packages are enough, osmo-operator
+#  is not required. This is also the script called by the osmo-operator
+#  Dockerfile (qemu stage), its Dockerfile.run, start-docker.sh and the native
+#  install (install_modules/45-calypso.sh): a single list of commands.
 #
-#      ./install.sh                 tout, dans l ordre (voir --list)
-#      ./install.sh --check         prerequis et etat, NE MODIFIE RIEN
-#      ./install.sh --list          les etapes et les valeurs retenues
-#      ./install.sh --print-deps    les paquets apt, sur une ligne
-#      sudo ./install.sh --deps     installe les paquets apt manquants, rien d autre
-#      sudo ./install.sh --with-deps   les paquets manquants, puis tout
-#      ./install.sh --only build    une ou des etapes (liste a virgules)
-#      ./install.sh --skip bin      toutes sauf celles-la
-#      ./install.sh --reinstall     rejoue meme ce qui est deja fait (reconfigure)
-#      ./install.sh -v              la sortie des commandes a l ecran (sinon : journal)
+#      ./install.sh                 everything, in order (see --list)
+#      ./install.sh --check         prerequisites and state, CHANGES NOTHING
+#      ./install.sh --list          the steps and the values in effect
+#      ./install.sh --print-deps    the apt packages, on one line
+#      sudo ./install.sh --deps     install the missing apt packages, nothing else
+#      sudo ./install.sh --with-deps   the missing packages, then everything
+#      ./install.sh --only build    one or more steps (comma-separated list)
+#      ./install.sh --skip bin      all steps except those
+#      ./install.sh --reinstall     replay even what is already done (reconfigure)
+#      ./install.sh -v              command output on screen (otherwise: log file)
 #
-#  Etapes : venv configure build install bin verify
+#  Steps: venv configure build install bin verify
 #
-#  Options, et la variable qui fait la meme chose (l option l emporte) :
-#      --prefix DIR     PREFIX     $GSM_ROOT/qemu-install  ou `make install` pose QEMU
-#      --build-dir DIR  BUILD_DIR  $QOSMO/build            construire hors de l arbre
-#      --venv DIR       VENV       $HOME/.venv-qemu        venv de configure (tomli) ; none = python du systeme
-#      --bin-dir DIR    BIN_DIR    /usr/local/bin          copie de qemu-system-arm et qosmo ; none = aucune
-#      --destdir DIR    DESTDIR    (vide)                  installer sous une autre racine (rootfs d ISO)
-#      --cc NOM         QOSMO_CC   (vide)                  compilateur impose, ex. gcc-13 (build/ configure avec lui)
+#  Options, and the variable that does the same (the option wins):
+#      --prefix DIR     PREFIX     $GSM_ROOT/qemu-install  where `make install` puts QEMU
+#      --build-dir DIR  BUILD_DIR  $QOSMO/build            build out of tree
+#      --venv DIR       VENV       $HOME/.venv-qemu        venv for configure (tomli); none = system python
+#      --bin-dir DIR    BIN_DIR    /usr/local/bin          copy of qemu-system-arm and qosmo; none = no copy
+#      --destdir DIR    DESTDIR    (empty)                 install under another root (ISO rootfs)
+#      --cc NAME        QOSMO_CC   (empty)                 forced compiler, e.g. gcc-13 (build/ configured with it)
 #      -j N             JOBS       nproc
-#                       GSM_ROOT   /opt/GSM     QOSMO = l arbre a construire, ce depot par defaut
-#                       LOG_DIR    /tmp/qosmo-install (un journal par etape)
+#                       GSM_ROOT   /opt/GSM     QOSMO = the tree to build, this repository by default
+#                       LOG_DIR    /tmp/qosmo-install (one log per step)
 #
-#  Les lanceurs lisent $QOSMO/build/qemu-system-arm (c54x_exe/run.sh,
-#  environnement/bench.env) et c54x_exe / grgsm_exe compilent les sources de cet
-#  arbre : gardez l arbre ET build/.
+#  The launchers read $QOSMO/build/qemu-system-arm (c54x_exe/run.sh,
+#  environnement/bench.env) and c54x_exe / grgsm_exe compile the sources of this
+#  tree: keep the tree AND build/.
 #
-#  Correspondance avec osmo-operator/Dockerfile : chaque etape cite ses lignes,
-#  celles du Dockerfile au commit 4266c8b, quand il portait encore ces commandes
-#  (stage qemu, 691-705 ; paquets 156-205). Il appelle desormais ce script.
+#  Each step cites the osmo-operator/Dockerfile lines it mirrors (qemu stage,
+#  691-705; packages 156-205).
 # -----------------------------------------------------------------------------
 set -uo pipefail
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE CONTRAT - celui de osmo-operator/install_modules/_lib/inst.sh
+#  THE CONTRACT - the one of osmo-operator/install_modules/_lib/inst.sh
 # ═════════════════════════════════════════════════════════════════════════════
-#  Copie IDENTIQUE dans qosmo/install.sh, c54x_exe/install.sh et
-#  grgsm_exe/install.sh : chaque depot doit pouvoir s installer seul, sans
-#  osmo-operator. Une correction ici se reporte dans les deux autres.
+#  IDENTICAL copy in qosmo/install.sh, c54x_exe/install.sh and
+#  grgsm_exe/install.sh: each repository must install on its own, without
+#  osmo-operator. A fix here is carried over to the other two.
 #
-#  Quatre fonctions par etape, `run` seule obligatoire :
-#     inst_<etape>_check    prerequis, LECTURE SEULE        0 ok · 1 manque · 4 sans objet
-#     inst_<etape>_done     deja fait ?                     0 oui · 1 non
-#     inst_<etape>_run      fait le travail                 0 ok · 1 echec · 3 deja fait
-#     inst_<etape>_verify   controle APRES coup             0 ok · 1 echec
+#  Four functions per step, only `run` is mandatory:
+#     inst_<step>_check     prerequisites, READ ONLY        0 ok · 1 missing · 4 not applicable
+#     inst_<step>_done      already done?                   0 yes · 1 no
+#     inst_<step>_run       does the work                   0 ok · 1 failure · 3 already done
+#     inst_<step>_verify    check AFTERWARDS                0 ok · 1 failure
 # -----------------------------------------------------------------------------
 readonly INST_RC_OK=0 INST_RC_FAIL=1 INST_RC_DONE=3 INST_RC_NA=4
 declare -a INST_ORDER=()
@@ -72,16 +71,16 @@ inst_say()  { printf '%s\n' "$*"; }
 have_cmd()  { command -v "$1" >/dev/null 2>&1; }
 have_file() { [ -f "$1" ]; }
 have_pkg()  { dpkg -s "$1" >/dev/null 2>&1; }
-# Un chemin est inscriptible s il l est, ou si son plus proche parent existant
-# l est (on pourra le creer).
+# A path is writable if it is, or if its closest existing parent is (it can
+# then be created).
 ecrivable() { local d="$1"; while [ ! -e "$d" ] && [ "$d" != / ]; do d="$(dirname "$d")"; done; [ -w "$d" ]; }
-# Chemin absolu sans exiger qu il existe (configure, make -C et les --dest
-# changent de dossier : un chemin relatif n y voudrait plus rien dire).
+# Absolute path without requiring it to exist (configure, make -C and the --dest
+# options change directory: a relative path would mean nothing there).
 absolu() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$PWD/$1" ;; esac; }
 
-# exige "ce qu il faut" "conseil si absent" commande... : une condition de
-# prerequis. En --check elle est imprimee (ok / MANQUE + conseil) ; sinon elle
-# est memorisee, et la premiere qui manque donne la raison de l echec.
+# exige "what is needed" "advice if missing" command...: one prerequisite
+# condition. With --check it is printed (ok / MANQUE + advice); otherwise it is
+# recorded, and the first missing one gives the failure reason.
 _MANQUE=()
 exige() {
     local quoi="$1" conseil="$2"; shift 2
@@ -97,14 +96,14 @@ exige() {
     _MANQUE+=("$quoi")
     return 1
 }
-# Verdict d une fonction check qui a appele exige.
+# Verdict of a check function that called exige.
 bilan_exige() {
     [ ${#_MANQUE[@]} -eq 0 ] && { inst_ok; return $INST_RC_OK; }
     local plus=""; [ ${#_MANQUE[@]} -gt 1 ] && plus=" (+$(( ${#_MANQUE[@]} - 1 )) autre(s), --check)"
     inst_fail "manque : ${_MANQUE[0]}$plus"
 }
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE COMPOSANT - qosmo
+#  THE COMPONENT - qosmo
 # ═════════════════════════════════════════════════════════════════════════════
 COMPOSANT=qosmo
 : "${GSM_ROOT:=/opt/GSM}"
@@ -118,13 +117,13 @@ COMPOSANT=qosmo
 : "${JOBS:=$(nproc 2>/dev/null || echo 2)}"
 : "${LOG_DIR:=/tmp/qosmo-install}"
 
-# Paquets apt, repris de la liste unique d osmo-operator/Dockerfile :
-#   :159      build-essential git pkg-config        outils de build
+# apt packages, taken from the single list in osmo-operator/Dockerfile:
+#   :159      build-essential git pkg-config        build tools
 #   :166      python3
-#   :189      python3-venv python3-pip              le venv de configure (tomli)
+#   :189      python3-venv python3-pip              the configure venv (tomli)
 #   :190      libglib2.0-dev libpixman-1-dev libslirp-dev ninja-build
-#                                                   la cible arm-softmmu, meson
-#   :190      socat                                 run.sh / 40-qemu.sh parlent au moniteur QEMU
+#                                                   the arm-softmmu target, meson
+#   :190      socat                                 run.sh / 40-qemu.sh talk to the QEMU monitor
 PAQUETS=(build-essential git pkg-config python3 python3-venv python3-pip
          libglib2.0-dev libpixman-1-dev libslirp-dev ninja-build socat)
 
@@ -148,7 +147,7 @@ apres_options() {
     [ "$VENV" = none ]    || VENV="$(absolu "$VENV")"
     [ "$BIN_DIR" = none ] || BIN_DIR="$(absolu "$BIN_DIR")"
     [ -z "$DESTDIR" ]     || DESTDIR="$(absolu "$DESTDIR")"
-    # Dockerfile:698-699 - les options de configure, a l identique.
+    # Dockerfile:698-699 - the configure options, identical.
     CONFIGURE_ARGS=(--target-list=arm-softmmu --enable-l1-grgsm "--prefix=$PREFIX"
                     --disable-werror --disable-docs)
 }
@@ -160,10 +159,10 @@ resume_composant() {
     printf 'configure %s\n' "${CONFIGURE_ARGS[*]}"
 }
 
-# --cc : le PATH local de Dockerfile.run:183-185. build/ garde le compilateur
-# du configure (meson memorise « cc ») ; si ce cc n est plus le meme, ninja
-# echoue des la premiere unite. On place donc devant le PATH un dossier ou
-# cc/gcc (et c++/g++) designent le compilateur demande.
+# --cc: the local PATH of Dockerfile.run:183-185. build/ keeps the compiler
+# used by configure (meson records "cc"); if that cc is not the same any more,
+# ninja fails on the first unit. So a directory where cc/gcc (and c++/g++)
+# point to the requested compiler is put in front of PATH.
 _CCDIR=""
 avant_etapes() {
     [ -n "$QOSMO_CC" ] || return 0
@@ -176,7 +175,7 @@ avant_etapes() {
     [ -n "$cxx" ] && { ln -s "$cxx" "$_CCDIR/c++"; ln -s "$cxx" "$_CCDIR/g++"; }
     return 0
 }
-# avec_env COMMANDE... : le venv active (Dockerfile:695) et le --cc eventuel.
+# avec_env COMMAND...: the venv activated (Dockerfile:695) and the optional --cc.
 avec_env() {
     local p="$PATH"
     [ "$VENV" != none ] && [ -d "$VENV/bin" ] && p="$VENV/bin:$p"
@@ -193,7 +192,7 @@ apres_etapes() {
     printf '  ensuite         : c54x_exe/install.sh (le DSP) - wiki osmo-operator, Telephone-emule\n'
 }
 
-# ── venv : python de configure ────────────────────────────────────────────────
+# ── venv: python for configure ────────────────────────────────────────────────
 INST_REGISTER venv "Venv python de configure (tomli)"
 inst_venv_done() { [ "$VENV" != none ] && "$VENV/bin/python3" -c 'import tomli' 2>/dev/null; }
 inst_venv_check() {
@@ -205,7 +204,7 @@ inst_venv_check() {
     bilan_exige
 }
 inst_venv_run() {
-    # Dockerfile:694-696 : python3 -m venv /root/.venv-qemu, activate, pip install tomli
+    # Dockerfile:694-696: python3 -m venv /root/.venv-qemu, activate, pip install tomli
     python3 -m venv "$VENV" \
         && "$VENV/bin/pip" install --no-cache-dir tomli \
         || { inst_hint "pip a besoin du reseau (PyPI)"; inst_fail "venv $VENV ou pip install tomli en echec"; return $INST_RC_FAIL; }
@@ -215,9 +214,9 @@ inst_venv_verify() { inst_venv_done && inst_ok || inst_fail "tomli introuvable d
 
 # ── configure ─────────────────────────────────────────────────────────────────
 INST_REGISTER configure "configure --target-list=arm-softmmu --enable-l1-grgsm"
-# config.log garde la ligne d appel : « # Configured with: '../configure' '--...' ».
-# Deja fait = arbre configure AVEC les memes options (le 1er mot, le chemin de
-# configure, ne compte pas).
+# config.log keeps the invocation line: "# Configured with: '../configure' '--...'".
+# Already done = tree configured WITH the same options (the first word, the
+# path of configure, does not count).
 _cfg_attendu() { printf "'%s' " "${CONFIGURE_ARGS[@]}" | sed 's/ $//'; }
 _cfg_actuel()  { sed -n "s/^# Configured with: '[^']*' //p" "$BUILD_DIR/config.log" 2>/dev/null | head -1; }
 inst_configure_done() { [ -f "$BUILD_DIR/build.ninja" ] && [ "$(_cfg_actuel)" = "$(_cfg_attendu)" ]; }
@@ -232,13 +231,13 @@ inst_configure_check() {
     exige "glib-2.0 vu de pkg-config (libglib2.0-dev)" "apt-get install libglib2.0-dev" pkg-config --exists glib-2.0
     exige "pixman-1 vu de pkg-config (libpixman-1-dev)" "apt-get install libpixman-1-dev" pkg-config --exists pixman-1
     exige "$BUILD_DIR inscriptible" "--build-dir DIR, ou les droits sur $QOSMO" ecrivable "$BUILD_DIR"
-    # configure lance DEPUIS l arbre source cree ./build et EFFACE un build/ qu il
-    # a cree lui-meme (configure:16-45) : jamais de build dans l arbre source.
+    # configure run FROM the source tree creates ./build and DELETES a build/ it
+    # created itself (configure:16-45): never build inside the source tree.
     exige "BUILD_DIR distinct de l arbre source" "--build-dir $QOSMO/build" test "$BUILD_DIR" != "$QOSMO"
     bilan_exige
 }
 inst_configure_run() {
-    # Dockerfile:697-699 : mkdir -p build && cd build && ../configure <options>
+    # Dockerfile:697-699: mkdir -p build && cd build && ../configure <options>
     local conf="$QOSMO/configure"
     [ "$BUILD_DIR" = "$QOSMO/build" ] && conf=../configure
     mkdir -p "$BUILD_DIR" || { inst_fail "impossible de creer $BUILD_DIR"; return $INST_RC_FAIL; }
@@ -254,7 +253,7 @@ inst_configure_verify() {
 }
 
 # ── build ─────────────────────────────────────────────────────────────────────
-# Pas de « deja fait » : make est incremental, il ne refait que ce qui a bouge.
+# No "already done": make is incremental, it only redoes what changed.
 INST_REGISTER build "Compilation (make)"
 inst_build_check() {
     _MANQUE=()
@@ -267,8 +266,8 @@ inst_build_check() {
     bilan_exige
 }
 inst_build_run() {
-    # Dockerfile:700 : make -j$(nproc) dans build/ (le Makefile de QEMU mene ninja).
-    # Dockerfile.run:185 faisait `ninja` avec le PATH --cc : meme cible.
+    # Dockerfile:700: make -j$(nproc) in build/ (the QEMU Makefile drives ninja).
+    # Dockerfile.run:185 runs `ninja` with the --cc PATH: same target.
     avec_env make -C "$BUILD_DIR" -j"$JOBS" || { inst_fail "echec de compilation"; return $INST_RC_FAIL; }
     inst_ok
 }
@@ -276,7 +275,7 @@ inst_build_verify() {
     [ -x "$BUILD_DIR/qemu-system-arm" ] && inst_ok || inst_fail "$BUILD_DIR/qemu-system-arm absent apres make"
 }
 
-# ── install : make install dans le prefixe ───────────────────────────────────
+# ── install: make install into the prefix ────────────────────────────────────
 INST_REGISTER install "make install (prefixe, lanceur qosmo compris)"
 inst_install_done() {
     cmp -s "$BUILD_DIR/qemu-system-arm" "$DESTDIR$PREFIX/bin/qemu-system-arm" \
@@ -290,7 +289,7 @@ inst_install_check() {
     bilan_exige
 }
 inst_install_run() {
-    # Dockerfile:701 : make install (meson install ; DESTDIR respecte, cf. ISO)
+    # Dockerfile:701: make install (meson install; DESTDIR honoured, cf. ISO)
     if [ -n "$DESTDIR" ]; then
         avec_env env DESTDIR="$DESTDIR" make -C "$BUILD_DIR" install
     else
@@ -304,7 +303,7 @@ inst_install_verify() {
     inst_ok
 }
 
-# ── bin : copie dans le PATH ──────────────────────────────────────────────────
+# ── bin: copy into the PATH ───────────────────────────────────────────────────
 INST_REGISTER bin "qemu-system-arm et qosmo dans le PATH"
 inst_bin_done() {
     [ "$BIN_DIR" != none ] || return 1
@@ -320,9 +319,9 @@ inst_bin_check() {
     inst_ok
 }
 inst_bin_run() {
-    # Dockerfile:702-703 : cp qemu-install/bin/{qemu-system-arm,qosmo} /usr/local/bin/
-    # --remove-destination : un qemu-system-arm en cours d execution garde son
-    # inode, la copie ne bute pas sur « Text file busy ».
+    # Dockerfile:702-703: cp qemu-install/bin/{qemu-system-arm,qosmo} /usr/local/bin/
+    # --remove-destination: a running qemu-system-arm keeps its inode, the copy
+    # does not fail with "Text file busy".
     local b
     mkdir -p "$DESTDIR$BIN_DIR" || { inst_fail "impossible de creer $DESTDIR$BIN_DIR"; return $INST_RC_FAIL; }
     for b in qemu-system-arm qosmo; do
@@ -335,10 +334,10 @@ inst_bin_run() {
 }
 inst_bin_verify() { inst_bin_done && inst_ok || inst_fail "$DESTDIR$BIN_DIR differe de $DESTDIR$PREFIX/bin"; }
 
-# ── verify : la machine calypso, avec la couche 1 gr-gsm ──────────────────────
-# Le meme binaire sert aux deux montages : compile --enable-l1-grgsm, lance avec
-# CALYPSO_DSP_EXTERN=1 pour le DSP (Dockerfile:679-682). Sans la couche 1
-# gr-gsm, la description de la machine le dit (hw/arm/calypso/calypso_mb.c).
+# ── verify: the calypso machine, with the gr-gsm layer 1 ──────────────────────
+# The same binary serves both setups: built with --enable-l1-grgsm, run with
+# CALYPSO_DSP_EXTERN=1 for the DSP (Dockerfile:679-682). Without the gr-gsm
+# layer 1, the machine description says so (hw/arm/calypso/calypso_mb.c).
 INST_REGISTER verify "Controle : -M help liste calypso (couche 1 : grgsm)"
 inst_verify_run() {
     local q="$BUILD_DIR/qemu-system-arm" l
@@ -357,19 +356,19 @@ inst_verify_run() {
     inst_ok
 }
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE MOTEUR - copie IDENTIQUE dans les trois depots (voir LE CONTRAT)
+#  THE ENGINE - IDENTICAL copy in the three repositories (see THE CONTRACT)
 # ═════════════════════════════════════════════════════════════════════════════
-#  Meme deroule que osmo-operator/install.sh : pour chaque etape retenue,
-#  « deja fait ? » (sauf --reinstall), prerequis, travail, controle. Le premier
-#  echec arrete tout, dit pourquoi et montre la fin du journal de l etape.
-#  Le composant fournit : COMPOSANT, PAQUETS, LOG_DIR, les etapes, et les
-#  crochets options_composant / apres_options / resume_composant /
+#  Same flow as osmo-operator/install.sh: for each selected step,
+#  "already done?" (unless --reinstall), prerequisites, work, check. The first
+#  failure stops everything, says why and shows the end of the step's log.
+#  The component provides: COMPOSANT, PAQUETS, LOG_DIR, the steps, and the
+#  hooks options_composant / apres_options / resume_composant /
 #  avant_etapes / apres_etapes.
 # -----------------------------------------------------------------------------
 ACTION=install ONLY="" SKIP="" WITH_DEPS=0
 : "${REINSTALL:=0}" "${VERBOSE:=0}"
 _ARGS_ORIG=("$@")
-# _val OPTION [VALEUR] : une option qui attend une valeur doit l avoir.
+# _val OPTION [VALUE]: an option that expects a value must have one.
 _val() { [ $# -ge 2 ] && [ -n "$2" ] || { printf '%s : valeur attendue   (--help)\n' "$1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -406,7 +405,7 @@ end()   { [ $TTY -eq 1 ] && [ "$VERBOSE" != 1 ] && printf '\r\033[K'
           printf '[%s%s%s] %s' "$2" "$1" "$C_Z" "$3"
           [ -n "${4:-}" ] && printf ' %s(%s)%s' "$C_DIM" "$4" "$C_Z"; printf '\n'; }
 
-# --- selection des etapes (--only / --skip, listes a virgules) ---------------
+# --- step selection (--only / --skip, comma-separated lists) -----------------
 in_csv() { case ",$1," in *",$2,"*) return 0;; esac; return 1; }
 for _s in ${ONLY//,/ } ${SKIP//,/ }; do
     [ -n "${INST_DESC[$_s]+x}" ] || { printf 'etape inconnue : %s   (etapes : %s)\n' "$_s" "${INST_ORDER[*]}" >&2; exit 2; }
@@ -417,12 +416,12 @@ for _s in "${INST_ORDER[@]}"; do
     [ -n "$SKIP" ] && in_csv "$SKIP" "$_s" && continue
     SELECTED+=("$_s")
 done
-# Une etape qui produit ce qu une autre exige : en --check, on ne reproche pas
-# a la seconde l absence de ce que la premiere va justement fabriquer.
+# A step that produces what another one requires: with --check, the second is
+# not blamed for the absence of what the first one is about to build.
 etape_retenue() { in_csv "$(IFS=,; echo "${SELECTED[*]}")" "$1"; }
 
-# --- paquets apt --------------------------------------------------------------
-# rend la liste des absents ; code 2 sans dpkg (pas une Debian/Ubuntu)
+# --- apt packages -------------------------------------------------------------
+# prints the list of missing ones; code 2 without dpkg (not a Debian/Ubuntu)
 paquets_absents() {
     have_cmd dpkg || return 2
     local p; for p in "${PAQUETS[@]}"; do have_pkg "$p" || printf '%s ' "$p"; done
@@ -493,13 +492,13 @@ fi
 if [ "$VERBOSE" != 1 ]; then
     mkdir -p "$LOG_DIR" || { printf 'journal impossible : %s (LOG_DIR=...)\n' "$LOG_DIR" >&2; exit 1; }
 fi
-# _jouer FONCTION : la sortie va au journal de l etape, ou a l ecran en -v.
-# Pas de tube : la fonction tourne dans CE shell (sa raison d echec survit).
+# _jouer FUNCTION: output goes to the step's log, or to the screen with -v.
+# No pipe: the function runs in THIS shell (its failure reason survives).
 _jouer() { if [ "$VERBOSE" = 1 ]; then "$1"; else "$1" >>"$_log" 2>&1; fi; }
-_echec() {   # _echec ETAPE RAISON [journal] : dit tout ce qu on sait, et s arrete
+_echec() {   # _echec STEP REASON [journal]: says everything known, and stops
     end FAIL "$C_KO" "${INST_DESC[$1]}" "$2"
     [ -n "$_INST_HINT" ] && printf '       → %s\n' "$_INST_HINT"
-    # la fin du journal, quand c est le travail (run, verify) qui a echoue
+    # the end of the log, when the work itself (run, verify) failed
     if [ -n "${3:-}" ] && [ "$VERBOSE" != 1 ] && [ -s "$_log" ]; then
         printf '       %sjournal : %s (fin ci-dessous)%s\n' "$C_DIM" "$_log" "$C_Z"
         tail -n 25 "$_log" | sed 's/^/       | /'
@@ -534,7 +533,7 @@ for _s in "${SELECTED[@]}"; do
                          _nb_skip=$((_nb_skip + 1)); continue ;;
         *)               _echec "$_s" "${_INST_REASON:-echec}" journal ;;
     esac
-    # installer n est pas avoir installe : on controle apres coup
+    # installing is not having installed: check afterwards
     if declare -F "${_p}_verify" >/dev/null && ! _jouer "${_p}_verify"; then
         _echec "$_s" "faite, mais le controle echoue : ${_INST_REASON:-}" journal
     fi

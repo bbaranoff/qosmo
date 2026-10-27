@@ -81,7 +81,7 @@ static void seq_run(uint32_t fn)
     seq.active = false;
 }
 
-/* [2026-10-21] position courante du sequenceur dans la trame (calypso_tsp.c : faux air) */
+/* current position of the sequencer in the frame (calypso_tsp.c: fake air) */
 int calypso_tpu_qbit(void)
 {
     return seq.qbit;

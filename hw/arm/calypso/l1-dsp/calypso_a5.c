@@ -1,32 +1,30 @@
-/* calypso_a5.c - le coprocesseur A5 du DSP Calypso, sur le bus d'E/S du C54x.
+/* calypso_a5.c - the A5 coprocessor of the Calypso DSP, on the C54x I/O bus.
  *
- * [2026-09-23] POURQUOI. La mask-ROM ne chiffre pas en logiciel : elle confie
- * Kc et COUNT a un coprocesseur cable sur les ports 0x2800..0x2818 et relit le
- * flux de cle a l'interruption de fin. Rien ne repondait sur ces ports, PORTR
- * laissait la cellule telle quelle : le flux restait a zero et le DSP ne
- * dechiffrait RIEN. D'ou le dechiffrement du descendant par le pont (pensé
- * pour le shunt gr-gsm) et la SACCH du TCH jamais decodee (LOS apres ~20 s
- * d'appel). Lu dans PROM0 (tools/tic54x-dis.py, base 0x7000) :
+ * The mask-ROM does not cipher in software: it hands Kc and COUNT to a
+ * coprocessor wired on ports 0x2800..0x2818 and reads the key stream back
+ * in the completion interrupt. Without this model the ports are silent, the
+ * stream stays at zero and the DSP deciphers nothing. As read in PROM0
+ * (tools/tic54x-dis.py, base 0x7000):
  *
- *   0xb12c  programmation, a chaque trame dediee :
- *           PORTW 0x2800 <- 0                      arret
+ *   0xb12c  programming, at every dedicated frame:
+ *           PORTW 0x2800 <- 0                      stop
  *           PORTW 0x2803..0x2806 <- a_kc[0..3]      (NDB 0x0a3b..0x0a3e)
- *           PORTW 0x2807 <- a_a5fn[0] = T3<<5 | T2  (page W mot 12, via 0x3fc6)
- *           PORTW 0x2808 <- a_a5fn[1] = T1          (page W mot 13, via 0x3fc7)
- *           PORTW 0x2800 <- (d_a5mode << 2) | 0x12, puis | 0x0001 (depart)
- *           IMR |= 0x0800, PORTR 0x2802 : bit 0 = accepte, sinon nouvel essai
- *   0xb19d  ISR de fin (IFR bit 11, vecteur 27, relais 0x726c) :
- *           PORTR 0x2801 (trace seulement), PORTR 0x2809..0x2818 -> 0x3f93..0x3fa2,
- *           0x3f92 |= 0x1000 (flux pret), PORTW 0x2800 <- 0
- *   0x856b  descendant : mots 0x3f93..0x3f9a, bit 15 d'abord (T=24, LD TS,B
- *           puis SFTA B,1 ; SACCD BLT inverse le bit souple) -> 114 bits
- *   0x85d1  montant : mots 0x3f9b..0x3fa2 XORes sur la rafale empaquetee 0x3f8a
+ *           PORTW 0x2807 <- a_a5fn[0] = T3<<5 | T2  (page W word 12, via 0x3fc6)
+ *           PORTW 0x2808 <- a_a5fn[1] = T1          (page W word 13, via 0x3fc7)
+ *           PORTW 0x2800 <- (d_a5mode << 2) | 0x12, then | 0x0001 (start)
+ *           IMR |= 0x0800, PORTR 0x2802: bit 0 = accepted, otherwise retry
+ *   0xb19d  completion ISR (IFR bit 11, vector 27, relay 0x726c):
+ *           PORTR 0x2801 (trace only), PORTR 0x2809..0x2818 -> 0x3f93..0x3fa2,
+ *           0x3f92 |= 0x1000 (stream ready), PORTW 0x2800 <- 0
+ *   0x856b  downlink: words 0x3f93..0x3f9a, bit 15 first (T=24, LD TS,B
+ *           then SFTA B,1; SACCD BLT inverts the soft bit) -> 114 bits
+ *   0x85d1  uplink: words 0x3f9b..0x3fa2 XORed onto the packed burst 0x3f8a
  *
- * Le Kc arrive a l'envers (firmware dsp_load_ciph_param :
- * a_kc[0] = key[7] | key[6] << 8 ...), COUNT est deja T1/T3/T2. On calcule
- * donc avec osmo_a5() sur le fn reconstitue.
+ * Kc arrives reversed (firmware dsp_load_ciph_param:
+ * a_kc[0] = key[7] | key[6] << 8 ...), COUNT is already T1/T3/T2. The stream
+ * is therefore computed with osmo_a5() on the reconstructed fn.
  *
- * CALYPSO_A5=0 coupe le modele (les ports redeviennent muets, A/B). */
+ * CALYPSO_A5=0 disables the model (the ports become silent again, A/B). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,14 +50,14 @@ static struct {
     uint16_t ctrl, kc[4], cnt[2], etat;
     uint16_t flux[A5_N_FLUX];
     unsigned long n_calculs;
-    unsigned long n_recales;   /* COUNT recales sur dernier depot + 1 */
-    unsigned long n_dl_bsp;    /* [2026-10-22] flux descendant pris au fn du BSP */
-    uint32_t dernier_fn;       /* [2026-10-15] fn du dernier flux A5/1-2 calcule (couverture) */
+    unsigned long n_recales;   /* COUNTs realigned to last deposit + 1 */
+    unsigned long n_dl_bsp;    /* downlink stream taken at the BSP fn */
+    uint32_t dernier_fn;       /* fn of the last computed A5/1-2 stream (coverage) */
     unsigned dernier_algo;
 } a5;
 
-/* [2026-10-15] Pour la couverture (c54x_exe pont.c tx_tsp_publier) : vrai si le
- * coprocesseur a calcule un flux A5/1 ou A5/2, *fn = la trame de ce flux. */
+/* For coverage (c54x_exe pont.c tx_tsp_publier): true if the coprocessor has
+ * computed an A5/1 or A5/2 stream, *fn = the frame of that stream. */
 bool calypso_a5_dernier(uint32_t *fn)
 {
     if (!calypso_a5_on() || !a5.dernier_algo)
@@ -78,7 +76,7 @@ bool calypso_a5_on(void)
     return on;
 }
 
-/* 114 bits 0/1 -> 8 mots, bit 15 du premier mot = premier bit. */
+/* 114 bits 0/1 -> 8 words, bit 15 of the first word = first bit. */
 static void empaqueter(const ubit_t *b, uint16_t *w)
 {
     memset(w, 0, 8 * sizeof(*w));
@@ -95,35 +93,26 @@ static void a5_calculer(C54xState *s, unsigned algo)
         key[6 - 2 * i] = (uint8_t)(a5.kc[i] >> 8);
     }
     unsigned t2 = a5.cnt[0] & 0x1f, t3 = (a5.cnt[0] >> 5) & 0x3f, t1 = a5.cnt[1] & 0x7ff;
-    /* gsm_gsmtime2fn : T1, T2, T3 -> fn */
+    /* gsm_gsmtime2fn: T1, T2, T3 -> fn */
     uint32_t fn = 51u * 26u * t1 + 51u * (((int)t3 - (int)t2 + 26 * 3) % 26) + t3;
-    /* [2026-09-23] COUNT D'UNE TRAME EN RETARD : RECALE SUR LE DEPOT SUIVANT.
-     * Le firmware ecrit a_a5fn depuis l1s.next_time (calypso/dsp.c:553) : la
-     * trame que le BSP deposera au tick SUIVANT, soit dernier depot + 1 --
-     * l'ecart releve sur tout l'appel reussi de 20:22. Aux runs de 20:32, 21:08
-     * et 21:24, l'ecart tombe a 0 sur 100 % du TCH (et sur une partie du
-     * SDCCH) : la ROM a programme le coprocesseur avec l'a_a5fn de la tache
-     * PRECEDENTE, lu dans sa phase A avant que le l1_sync de l'ARM ait ecrit la
-     * page W suivante -- une course du pas-a-pas en deux phases, qui varie d'un
-     * run a l'autre. Le flux servait alors au burst d'apres : SACCH/TF ratee a
-     * chaque bloc (LOS ~15 s apres le decroche), parole a 15-90 erreurs par
-     * trame, SACCH/8 perdue un bloc sur deux. Hors DSP, les memes bursts se
-     * dechiffrent avec le COUNT de leur propre fn (34/52 blocs SACCH/TF, run de
-     * 21:08, contre 0 a +-1). CALYPSO_A5_RECALE=0 rend le COUNT brut. */
+    /* COUNT ONE FRAME LATE: REALIGN TO THE NEXT DEPOSIT.
+     * The firmware writes a_a5fn from l1s.next_time (calypso/dsp.c:553): the
+     * frame the BSP will deposit at the NEXT tick, i.e. last deposit + 1.
+     * When the ROM programs the coprocessor with the a_a5fn of the PREVIOUS
+     * task (read in its phase A before the ARM l1_sync has written the next
+     * page W, a race of the two-phase stepping), the offset is 0 and the
+     * stream would serve the following burst. CALYPSO_A5_RECALE=0 keeps the
+     * raw COUNT. */
     {
         static int recale = -1;
         if (recale < 0) { const char *e = getenv("CALYPSO_A5_RECALE"); recale = !(e && *e == '0'); }
         extern unsigned calypso_daram_last_fn;
-        /* [2026-09-23, 21:40] SUR LA SACCH SEULEMENT. Mesure par
-         * tools/comparer_parole.py (bursts du BSP dechiffres et decodes hors
-         * DSP, contre les trames rendues par la ROM) : au regime +1, parole
-         * exacte au bit pres (240/241) et FACCH identiques (15/15) ; au regime
-         * 0 recale partout, la parole devient du bruit (~95 bits faux sur 260,
-         * 537/734) et les FACCH echouent -- le son hache et le raccroche perdu
-         * de 21:29. Sans recalage au regime 0 (21:24), c'est la SACCH/TF qui
-         * echoue. Le trafic a donc le bon COUNT a l'ecart 0, la SACCH non : on
-         * ne recale que la trame SACCH/TF (fn%26 == 12 sur un TN pair, 25 sur
-         * un TN impair). */
+        /* ON THE SACCH ONLY. At offset 0 the traffic and FACCH frames carry
+         * the right COUNT (speech bit-exact, FACCH identical when compared
+         * with tools/comparer_parole.py against bursts deciphered outside the
+         * DSP) while the SACCH/TF does not: realigning everything would turn
+         * speech into noise and break the FACCH. Only the SACCH/TF frame is
+         * realigned (fn%26 == 12 on an even TN, 25 on an odd TN). */
         unsigned p26 = fn % 26u;
         if (recale && fn == calypso_daram_last_fn && (p26 == 12u || p26 == 25u)) {
             fn = (fn + 1u) % (2715648u);
@@ -132,12 +121,13 @@ static void a5_calculer(C54xState *s, unsigned algo)
         }
     }
 
-    /* [2026-10-22 12:55] FLUX DESCENDANT : LE FN DU BURST QUE LE BSP DEPOSE A CE TICK. La course decrite plus haut
-     * laisse a_a5fn une ou deux trames devant le burst selon les runs : SDCCH a « ecart +1 » (juste), TCH a
-     * « ecart +2 » (22/10 12:46) -> FACCH descendant (UA) en Fire KO, RR Assignment Failure. Le calage du BSP
-     * (calypso_bsp_fn_bts_du_tick) est exact pour la trame jouee au tick courant ; on le prend pour le flux
-     * descendant s'il est a 3 trames au plus. Le flux montant garde le COUNT du firmware (le montant marche).
-     * CALYPSO_A5_DL_BSP=0 : ancien comportement. */
+    /* DOWNLINK STREAM: THE FN OF THE BURST THE BSP DEPOSITS AT THIS TICK. The race
+     * described above leaves a_a5fn one or two frames ahead of the burst depending on
+     * the run: SDCCH at "offset +1" (right), TCH at "offset +2" (downlink FACCH (UA)
+     * fails Fire, RR Assignment Failure). The BSP timing (calypso_bsp_fn_bts_du_tick)
+     * is exact for the frame played at the current tick; it is used for the downlink
+     * stream when within 3 frames. The uplink stream keeps the firmware COUNT.
+     * CALYPSO_A5_DL_BSP=0: use the firmware COUNT for the downlink too. */
     uint32_t fn_dl = fn;
     {
         static int dl_bsp = -1;
@@ -147,8 +137,8 @@ static void a5_calculer(C54xState *s, unsigned algo)
         uint32_t ft;
         if (dl_bsp && calypso_bsp_fn_bts_du_tick(calypso_trx_get_fn(), &ft)) {
             int32_t d = (int32_t)ft - (int32_t)fn;
-            /* CALYPSO_A5_DL_DECAL : decalage ajoute au fn du BSP quand a_a5fn en differe (cas du TCH ; en SDCCH
-             * a_a5fn == fn du BSP et rien ne change). */
+            /* CALYPSO_A5_DL_DECAL: offset added to the BSP fn when a_a5fn differs from it (TCH
+             * case; on SDCCH a_a5fn == BSP fn and nothing changes). */
             static int dl_decal = 99;
             if (dl_decal == 99) { const char *e = getenv("CALYPSO_A5_DL_DECAL"); dl_decal = (e && *e) ? atoi(e) : 0; }
             if (d >= -3 && d <= 3 && d != 0) { fn_dl = (uint32_t)((int32_t)ft + dl_decal); a5.n_dl_bsp++; }
@@ -172,11 +162,11 @@ static void a5_calculer(C54xState *s, unsigned algo)
         a5.dernier_algo = algo;
     }
     a5.etat |= 0x0001;
-    /* [2026-09-23] Sur stdout (dsp.log) : le stderr de c54x_exe n'est pas lu.
-     * Les 8 premiers calculs, chaque changement de Kc, puis un releve toutes
-     * les 500 : fn du COUNT contre la derniere trame BTS deposee par le BSP
-     * (calypso_daram_last_fn). Le COUNT vise la trame de la tache, deposee au
-     * tick suivant : un ecart qui s'ecarte de +1 dit un COUNT faux. */
+    /* On stdout (dsp.log): the stderr of c54x_exe is not read.
+     * The first 8 computations, every Kc change, then a sample every 500:
+     * fn of the COUNT against the last BTS frame deposited by the BSP
+     * (calypso_daram_last_fn). The COUNT targets the frame of the task,
+     * deposited at the next tick: an offset other than +1 means a wrong COUNT. */
     {
         static uint8_t kc_prec[8]; static int kc_vu;
         bool change = !kc_vu || memcmp(kc_prec, key, 8) != 0;
@@ -191,14 +181,9 @@ static void a5_calculer(C54xState *s, unsigned algo)
         }
         memcpy(kc_prec, key, 8); kc_vu = 1;
     }
-    /* [2026-09-23] HISTOGRAMME DE L'ECART PAR POSITION DANS LA 26-MULTITRAME.
-     * Sur le TCH, la SACCH/TF (fn%26 == 12) echoue dans le DSP a chaque bloc,
-     * alors que les memes bursts, dechiffres hors DSP avec le COUNT de leur
-     * propre fn, se decodent (34/52, run de 21:08). Et l'ecart releve toutes
-     * les 500 passe de +1 (attendu) a +0 pendant les appels ratés, jamais sur
-     * l'appel reussi de 20:22. Pour savoir QUELLES trames sont visees a cote :
-     * compte de l'ecart (-1, 0, +1, +2, autre) par fn%26, une ligne toutes les
-     * 2000 operations. */
+    /* HISTOGRAM OF THE OFFSET BY POSITION IN THE 26-MULTIFRAME.
+     * Shows WHICH frames are targeted off by one: count of the offset
+     * (-1, 0, +1, +2, other) per fn%26, one line every 2000 operations. */
     {
         extern unsigned calypso_daram_last_fn;
         static unsigned long hist[26][5];
@@ -215,9 +200,9 @@ static void a5_calculer(C54xState *s, unsigned algo)
         }
     }
     a5.n_calculs++;
-    /* Fin de calcul : l'ISR 0xb19d releve le flux. IFR seul -- le coeur
-     * vectorise a l'instruction suivante (c54x_irq_level_check), jamais au
-     * milieu du PORTW en cours. */
+    /* End of computation: the 0xb19d ISR collects the stream. IFR only -- the
+     * core vectors at the next instruction (c54x_irq_level_check), never in
+     * the middle of the PORTW in progress. */
     if (s)
         s->ifr |= (uint16_t)(1u << A5_IT_BIT);
 }

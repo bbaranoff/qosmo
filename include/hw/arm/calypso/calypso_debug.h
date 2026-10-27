@@ -1,19 +1,19 @@
 /*
- * calypso_debug.h — env-gated probe output infrastructure
+ * calypso_debug.h - env-gated probe output infrastructure
  *
- * Per la règle "la mesure EST la maladie" : tous les probes diagnostic
- * sont SILENT par défaut. Activation via UNE seule env var :
+ * All diagnostic probes are SILENT by default. They are enabled through a
+ * single env var:
  *
- *   CALYPSO_DEBUG="probe1,probe2,probe3,..."    — allume liste
- *   CALYPSO_DEBUG=ALL                          — allume tout
- *   CALYPSO_DEBUG="ALL,..."                     — pareil
+ *   CALYPSO_DEBUG="probe1,probe2,probe3,..."    - enables the listed probes
+ *   CALYPSO_DEBUG=ALL                          - enables everything
+ *   CALYPSO_DEBUG="ALL,..."                     - same
  *
- * Le nom de probe est normalisé upper-case, avec '-' / ' ' / '.' / '/'
- * remplacés par '_'. Match insensitive : probe "IMR-W" matche entry
- * "imr-w" comme "IMR_W".
+ * The probe name is normalised to upper case, with '-' / ' ' / '.' / '/'
+ * replaced by '_'. Matching is case-insensitive: probe "IMR-W" matches the
+ * entry "imr-w" as well as "IMR_W".
  *
- * Cache : la liste est parsée UNE FOIS au premier appel et stockée.
- * Lookup = O(N) sur la liste (= ~50ns pour 10-20 probes typiques).
+ * Cache: the list is parsed ONCE on the first call and stored.
+ * Lookup = O(N) over the list (~50 ns for the typical 10-20 probes).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -23,13 +23,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-/* Master gate : caché, parsé une fois. Quand CALYPSO_DEBUG est vide,
- * calypso_debug_master == 0 et calypso_debug_enabled() retourne false en
- * inline, SANS aucun appel de fonction (supprime l'overhead per-instruction
- * des 76 call-sites dans la hot-loop DSP). Comportement identique sinon. */
+/* Master gate: cached, parsed once. When CALYPSO_DEBUG is empty,
+ * calypso_debug_master == 0 and calypso_debug_enabled() returns false
+ * inline, WITHOUT any function call (no per-instruction overhead at the
+ * call sites in the DSP hot loop). Identical behaviour otherwise. */
 extern int  calypso_debug_master;
 void        calypso_debug_master_init(void);
-bool        calypso_debug_enabled_(const char *probe_name);   /* impl réelle */
+bool        calypso_debug_enabled_(const char *probe_name);   /* real impl */
 
 static inline bool calypso_debug_enabled(const char *probe_name)
 {
@@ -42,8 +42,8 @@ static inline bool calypso_debug_enabled(const char *probe_name)
     return calypso_debug_enabled_(probe_name);
 }
 
-/* CALYPSO_DBG : gated fprintf. probe_name est string literal compile-time.
- * fmt inclut le préfixe (ex: "[c54x] IMR-W ...") et le \n final. */
+/* CALYPSO_DBG: gated fprintf. probe_name is a compile-time string literal.
+ * fmt includes the prefix (e.g. "[c54x] IMR-W ...") and the final \n. */
 #define CALYPSO_DBG(probe_name, fmt, ...) \
     do { \
         if (calypso_debug_enabled(probe_name)) { \
@@ -51,8 +51,8 @@ static inline bool calypso_debug_enabled(const char *probe_name)
         } \
     } while (0)
 
-/* Wrappers par composant — préfixe automatique + \n + gate sur le nom
- * de probe spécifique au composant ou un nom passé. */
+/* Per-component wrappers: automatic prefix + \n + gate on the probe name
+ * passed by the caller. */
 #define C54_DBG(probe, fmt, ...) \
     CALYPSO_DBG(probe, "[c54x] " fmt "\n", ##__VA_ARGS__)
 #define TRX_DBG(probe, fmt, ...) \
@@ -72,10 +72,10 @@ static inline bool calypso_debug_enabled(const char *probe_name)
 #define TWL3025_DBG(probe, fmt, ...) \
     CALYPSO_DBG(probe, "[twl3025] " fmt "\n", ##__VA_ARGS__)
 
-/* cdbg_env : shim retro-compat pour les sites qui testaient
- * getenv("CALYPSO_X")=="1". Retourne "1" si le token est actif dans
- * CALYPSO_DEBUG, NULL sinon. Migre un gate getenv vers un token en
- * changeant seulement l'appel getenv -> cdbg_env. */
+/* cdbg_env: compatibility shim for sites that test
+ * getenv("CALYPSO_X")=="1". Returns "1" if the token is active in
+ * CALYPSO_DEBUG, NULL otherwise. A getenv gate becomes a token by changing
+ * only the call getenv -> cdbg_env. */
 static inline const char *cdbg_env(const char *token)
 {
     return calypso_debug_enabled(token) ? "1" : NULL;
@@ -84,37 +84,30 @@ static inline const char *cdbg_env(const char *token)
 #endif /* HW_ARM_CALYPSO_DEBUG_H */
 
 /* =============================================================================
- *  calypso_gate() — UNE sémantique pour toutes les gardes par environnement
+ *  calypso_gate() - ONE semantics for every environment-driven switch
  * =============================================================================
  *
- *  POURQUOI. Le modèle utilisait TROIS idiomes concurrents pour la même
- *  question « cette option est-elle active ? » :
+ *  Every "is this option active?" question goes through this helper, so
+ *  that `X=0` and `X=` get the same answer everywhere (an idiom such as
+ *  `getenv("X") ? 1 : 0` would treat a variable declared EMPTY in an env
+ *  file as ACTIVE).
  *
- *      getenv("X") ? 1 : 0     103 sites   X=0 n'y coupe RIEN — seul `unset`
- *      e && *e == '1'           79 sites   X posée vide vaut 0
- *      atoi(getenv("X")) > 0    22 sites
+ *  SINGLE SEMANTICS:
  *
- *  Trois réponses différentes à « X=0 » et à « X= ». La documentation appelle
- *  cela « la première source d'erreur de manipulation », et le terrain lui donne
- *  raison : `CALYPSO_LDK8_SHIFT16` est déclarée VIDE dans opcodes.env, ce qui
- *  sous l'idiome EXISTS la rend ACTIVE — l'inverse de l'intention lisible.
+ *      variable absent                       -> `defaut`
+ *      "0" · "" · "no" · "off" · "false"     -> 0     (case-insensitive)
+ *      everything else                       -> 1
  *
- *  SÉMANTIQUE UNIQUE, celle que tout le monde suppose déjà :
+ *  So `X=0` ALWAYS disables, and `X=1` always enables. `defaut` makes
+ *  explicit, at the call site, what absence means.
  *
- *      variable absente                      -> `defaut`
- *      "0" · "" · "no" · "off" · "false"     -> 0     (insensible à la casse)
- *      tout le reste                         -> 1
- *
- *  Donc `X=0` coupe TOUJOURS, et `X=1` active toujours. `defaut` rend explicite,
- *  à l'appel, ce que vaut l'absence — l'information qui manquait le plus.
- *
- *  CE QUE CE HELPER N'EST PAS. Il répond par oui ou non. Les variables qui
- *  portent une VALEUR (adresse, longueur, cadence, chemin, liste) gardent leur
- *  `getenv` + `strtoul`/`atoi` : les convertir n'aurait aucun sens.
+ *  WHAT THIS HELPER IS NOT. It answers yes or no. Variables that carry a
+ *  VALUE (address, length, rate, path, list) keep their `getenv` +
+ *  `strtoul`/`atoi`.
  * ---------------------------------------------------------------------------- */
 int calypso_gate(const char *nom, int defaut);
 
-/* [2026-09-20] getenv() memoised by name. The C54x run loop and its probes
+/* getenv() memoised by name. The C54x run loop and its probes
  * consult the environment on hot paths (c54x_run is entered ~1200 times per
  * TDMA frame by the benches, c54x_exec_one 17k times), and glibc's getenv()
  * is a linear scan of the environment with a strncmp per entry: measured 40 %

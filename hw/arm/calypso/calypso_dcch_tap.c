@@ -1,24 +1,24 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * calypso_dcch_tap.c - quel canal dedie le mobile utilise, pour le pont.
+ * calypso_dcch_tap.c - which dedicated channel the mobile uses, for the bridge.
  *
- * pont.py ne lit pas lui-meme les IMMEDIATE ASSIGNMENT : sa classe Dedicated
- * (pont/state.py) attend qu'on lui dise le canal dans
- * /dev/shm/calypso_dcch_cfg, et tant que ce fichier n'existe pas,
- * uplink.py:_poll_sdcch() jette tous les blocs montants -- y compris le SABM
- * qui porte la LOCATION UPDATING REQUEST.
+ * pont.py does not read the IMMEDIATE ASSIGNMENT itself: its Dedicated class
+ * (pont/state.py) waits to be told the channel through
+ * /dev/shm/calypso_dcch_cfg, and as long as that file does not exist,
+ * uplink.py:_poll_sdcch() drops every uplink block, including the SABM that
+ * carries the LOCATION UPDATING REQUEST.
  *
- * En montage gr-gsm c'est l1-grgsm/calypso_l1ctl_tap.c qui l'ecrit, branche
- * par la vtable de la couche 1 (uart_tx_byte). Sous CALYPSO_DSP_EXTERN=1
- * cette couche 1 est desactivee (calypso_l1_disable), donc plus personne ne
- * l'ecrivait : mesure du 2026-09-21, le bloc SABM etait bien capture par
- * c54x_exe (src/montant.c) et publie dans /dev/shm/calypso_sdcch_ul, mais le
- * pont ne l'emettait jamais.
+ * In the gr-gsm setup, l1-grgsm/calypso_l1ctl_tap.c writes it, hooked through
+ * the layer 1 vtable (uart_tx_byte). Under CALYPSO_DSP_EXTERN=1 that layer 1
+ * is disabled (calypso_l1_disable), so the file must be written from here:
+ * the SABM block is captured by c54x_exe (src/montant.c) and published in
+ * /dev/shm/calypso_sdcch_ul, and the bridge only emits it once it knows the
+ * channel.
  *
- * Ce tap-ci ne depend d'aucune couche 1 : il renifle le flux sercomm que le
- * firmware envoie a osmocon et n'en retient que le numero de canal des
- * L1CTL_DATA_CONF / DATA_IND. Il ne publie que le side-band ; les reactions
- * propres a la couche 1 gr-gsm (fenetre a_cd, garde DCCH) restent chez elle.
+ * This tap depends on no layer 1: it sniffs the sercomm stream the firmware
+ * sends to osmocon and only keeps the channel number of the
+ * L1CTL_DATA_CONF / DATA_IND. It publishes only the side-band; the reactions
+ * specific to the gr-gsm layer 1 (a_cd window, DCCH guard) stay there.
  */
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
@@ -35,20 +35,21 @@
 #define L1CTL_DATA_IND      0x03
 #define L1CTL_RACH_CONF     0x0c
 #define L1CTL_DATA_CONF     0x0f
-/* [2026-10-15] PDCH : le firmware GPRS (layer1 l1gprs_fw.c) ne remonte pas de
- * DATA_IND sur un PDTCH mais des L1CTL_GPRS_DL_BLOCK_IND (hdr fn BE32 + tn). */
+/* PDCH: the GPRS firmware (layer1 l1gprs_fw.c) does not report DATA_IND on a
+ * PDTCH but L1CTL_GPRS_DL_BLOCK_IND (hdr fn BE32 + tn). */
 #define L1CTL_GPRS_DL_BLOCK_IND 0x23
 #define L1CTL_GPRS_UL_BLOCK_CNF 0x26
 
-/* [2026-10-15] COMPTEUR PDTCH DESCENDANT, pour separer les pertes de la ROM des
- * autres causes de T3190/T3168 (banc-max « data »). Le firmware (l1gprs_fw.c
- * l1gprs_fw_dl_block) remonte TOUS les blocs du PDCH : payload = l1ctl_hdr(4) fn(4)
- * tn(1) pad(3) ber10k(2) ci(2) rx_lev(1) usf(1) [+ 23 octets si CRC bon ET TFI a nous
- * ou bloc de controle]. usf != 0xff seulement si le CRC est bon. D'ou :
- *   donnees   = 41 octets (hors PTCCH)      autre_tfi = 18 octets, usf != 0xff
- *   crc_ko    = 18 octets, usf == 0xff, fn%104 != 12 (bloc perdu par la ROM)
+/* Downlink PDTCH counter, to separate the ROM losses from the other causes of
+ * T3190/T3168 (banc-max "data"). The firmware (l1gprs_fw.c l1gprs_fw_dl_block)
+ * reports ALL the PDCH blocks: payload = l1ctl_hdr(4) fn(4) tn(1) pad(3)
+ * ber10k(2) ci(2) rx_lev(1) usf(1) [+ 23 bytes if CRC good AND our TFI or a
+ * control block]. usf != 0xff only if the CRC is good. Hence:
+ *   donnees   = 41 bytes (PTCCH excluded)   autre_tfi = 18 bytes, usf != 0xff
+ *   crc_ko    = 18 bytes, usf == 0xff, fn%104 != 12 (block lost by the ROM)
  *   ptcch     = fn%104 == 12                ul_cnf    = L1CTL_GPRS_UL_BLOCK_CNF
- * Ligne « [pdtch] » sur stderr (qemu.log) tous les 100 blocs et a chaque PDCH arme. */
+ * A "[pdtch]" line on stderr (qemu.log) every 100 blocks and whenever a PDCH is
+ * armed. */
 static struct {
     unsigned donnees, autre_tfi, crc_ko, ptcch, ul_cnf;
     unsigned long ber_ko;
@@ -64,10 +65,10 @@ static void pdtch_journal(const char *pourquoi)
 #define SHM_DCCH_CFG        "/dev/shm/calypso_dcch_cfg"
 #define DCCH_RELEASED       0xFF
 
-/* Combien de trames doivent separer le dernier bloc du canal dedie d'un bloc
- * sur une voie commune avant de conclure que le canal est libere. Un bloc CCCH
- * en retard, delivre juste apres la bascule, porte un numero de trame proche
- * de ceux du canal dedie : il ne doit pas liberer quoi que ce soit. */
+/* How many frames must separate the last block of the dedicated channel from a
+ * block on a common channel before concluding that the channel is released. A
+ * late CCCH block, delivered just after the switch, carries a frame number
+ * close to those of the dedicated channel: it must not release anything. */
 #define DCCH_LIBERE_APRES_TRAMES  100
 
 static struct {
@@ -76,23 +77,23 @@ static struct {
     int len;
     uint8_t dernier_chan_nr;
     uint32_t seq;
-    uint32_t fn_dedie;       /* derniere trame vue sur le canal dedie */
+    uint32_t fn_dedie;       /* last frame seen on the dedicated channel */
     bool     fn_dedie_vue;
-    uint8_t  trx_chan_nr;    /* dernier SDCCH (ou 0xFF) dit a calypso_trx */
+    uint8_t  trx_chan_nr;    /* last SDCCH (or 0xFF) told to calypso_trx */
 } tap = { .dernier_chan_nr = 0xFF, .trx_chan_nr = 0xFF };
 
-/* [2026-09-23] Genres du TCH. Les lecteurs qui ne connaissaient que 0/1/0xFF
- * (montant.c scruter_dcch, pont/dsp/dedicated.py) ont ete adaptes ; pont.py
- * grgsm ne lit jamais ce tap (sa couche 1 ecrit le fichier elle-meme). */
+/* TCH kinds. The readers (montant.c scruter_dcch, pont/dsp/dedicated.py)
+ * understand them in addition to 0/1/0xFF; the grgsm pont.py never reads this
+ * tap (its layer 1 writes the file itself). */
 #define DCCH_TCH_F          2
 #define DCCH_TCH_H          3
-/* [2026-10-15] genre 4 = PDCH (chan_nr 0b11000TTT, extension Osmocom) : le BSP
- * joue TOUTES les trames de l intervalle, comme un TCH (calypso_bsp.c). */
+/* kind 4 = PDCH (chan_nr 0b11000TTT, Osmocom extension): the BSP plays ALL the
+ * frames of the timeslot, like a TCH (calypso_bsp.c). */
 #define DCCH_PDCH           4
 
-/* 16 octets, comme les attend pont/state.py:Dedicated.read() :
+/* 16 bytes, as expected by pont/state.py:Dedicated.read():
  * seq(4) kind(1) ss(1) tn(1) chan_nr(1). kind 0 = SDCCH/4, 1 = SDCCH/8,
- * 2 = TCH/F, 3 = TCH/H (ss = demi-debit), 0xFF = canal libere. */
+ * 2 = TCH/F, 3 = TCH/H (ss = half-rate subslot), 0xFF = channel released. */
 static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
 {
     uint8_t b[16] = {0};
@@ -111,12 +112,11 @@ static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
         return;
     }
     close(fd);
-    /* [2026-09-23] calypso_trx (PONT_DCCH -> pont.c -> calypso_bsp_set_dedie)
-     * n'entend que ce qu'il entendait avant : un SDCCH nouveau ou la
-     * liberation. Le TCH ne lui est pas dit -- la bascule du BSP sur le TCH
-     * est l'affaire de montant.c (suivre_tache_tch), qu'un PONT_DCCH genre 2
-     * court-circuiterait -- et le retour sur le MEME SDCCH apres le TCH
-     * (ASSIGNMENT FAILURE) non plus, comme quand le tap ignorait le TCH. */
+    /* calypso_trx (PONT_DCCH -> pont.c -> calypso_bsp_set_dedie) is only told
+     * about a new SDCCH or the release. The TCH is not passed on: switching
+     * the BSP to the TCH is the job of montant.c (suivre_tache_tch), which a
+     * PONT_DCCH of kind 2 would bypass. The return to the SAME SDCCH after
+     * the TCH (ASSIGNMENT FAILURE) is not passed on either. */
     if (kind != DCCH_TCH_F && kind != DCCH_TCH_H && chan_nr != tap.trx_chan_nr) {
         tap.trx_chan_nr = kind == DCCH_RELEASED ? 0xFF : chan_nr;
         calypso_trx_dcch(kind, ss, chan_nr & 0x07);
@@ -144,14 +144,14 @@ static void trame_complete(void)
     int plen = tap.len - 2;
     uint8_t type = charge[0];
     if (type == L1CTL_RACH_CONF && plen >= 12) {
-        /* La trame d'emission du RACH, telle que le firmware la remonte. */
+        /* The RACH transmit frame, as reported by the firmware. */
         calypso_trx_rach_conf(ldl_be_p(charge + 8));
         return;
     }
     if (type == L1CTL_GPRS_DL_BLOCK_IND && plen >= 9) {
-        /* [2026-10-15] bloc PDTCH descendant : l1ctl_hdr(4) fn(4, BE) tn(1). Le
-         * firmware est sur le PDCH de ce TN : le BSP doit en jouer toutes les
-         * trames. Meme logique « publier au changement » que les canaux dedies. */
+        /* Downlink PDTCH block: l1ctl_hdr(4) fn(4, BE) tn(1). The firmware is on
+         * the PDCH of this TN: the BSP must play all its frames. Same
+         * "publish on change" logic as the dedicated channels. */
         uint8_t tn = charge[8] & 0x07;
         uint8_t chan_nr = 0xC0 | tn;
         {
@@ -184,24 +184,23 @@ static void trame_complete(void)
         return;
     }
     if (type == L1CTL_GPRS_UL_BLOCK_CNF) {
-        pdtch.ul_cnf++;     /* ne touche pas dernier_chan_nr (relecture du 15/10) */
+        pdtch.ul_cnf++;     /* does not touch dernier_chan_nr */
         return;
     }
     if ((type != L1CTL_DATA_CONF && type != L1CTL_DATA_IND) || plen < 5) {
         return;
     }
-    /* chan_nr, 44.004 8.3 : 0b001SSTTT = SDCCH/4, 0b01SSSTTT = SDCCH/8,
+    /* chan_nr, 44.004 8.3: 0b001SSTTT = SDCCH/4, 0b01SSSTTT = SDCCH/8,
      * 0b00001TTT = TCH/F, 0b0001STTT = TCH/H.
      *
-     * [2026-09-23] LE TCH EST UN CANAL DEDIE COMME UN AUTRE. Le tap ne
-     * reconnaissait que le SDCCH : a l'assignation (DM_EST_REQ chan_nr=0x0a,
-     * TCH/F TS2), les DATA_IND/CONF de la FACCH et de la SACCH/T portent 0x0a,
-     * classe « ni dedie ni commun », ignore. calypso_dcch_cfg annoncait donc
-     * SDCCH/8 TS1 pendant tout l'appel. Il annonce maintenant le TCH (genre
-     * 2/3) ; le SDCCH quitte n'est pas « libere » (0xFF reste la fin de la
-     * connexion : pont/dsp/uplink.py _poll_release, montant.c) et les
-     * lecteurs le gardent en memoire pour l'ASSIGNMENT FAILURE, ou le
-     * firmware y revient et ou le tap le republie (chan_nr change). */
+     * The TCH is a dedicated channel like any other: after the assignment
+     * (DM_EST_REQ chan_nr=0x0a, TCH/F TS2), the DATA_IND/CONF of the FACCH
+     * and of the SACCH/T carry 0x0a, and the tap announces the TCH (kind
+     * 2/3). The SDCCH that was left is not "released" (0xFF remains the end
+     * of the connection: pont/dsp/uplink.py _poll_release, montant.c) and
+     * the readers keep it in memory for the ASSIGNMENT FAILURE case, where
+     * the firmware returns to it and the tap republishes it (chan_nr
+     * changes). */
     uint8_t chan_nr = charge[4];
     int kind = -1, ss = 0;
     if ((chan_nr & 0xE0) == 0x20) {
@@ -226,36 +225,27 @@ static void trame_complete(void)
         }
         return;
     }
-    /* [2026-09-21] LA LIBERATION SE LIT ICI, pas sur d_dsp_page.
+    /* The release is detected here, not on d_dsp_page: the firmware does an
+     * l1s_dsp_abort() (sync.c:308) precisely when it switches to the
+     * dedicated channel ("resetting scheduler" in the mobile log, right
+     * after the IMMEDIATE ASSIGNMENT), so d_dsp_page returning to 0 does not
+     * mean the channel is released.
      *
-     * Premiere version : publier « libere » quand le firmware remet
-     * d_dsp_page a 0, comme le l1_reset() de la couche 1 gr-gsm. Faux : le
-     * firmware fait justement un l1s_dsp_abort() (sync.c:308) au moment ou il
-     * bascule vers le canal dedie -- « resetting scheduler » dans le journal
-     * du mobile, juste apres l'IMMEDIATE ASSIGNMENT. On annoncait donc
-     * « arme » puis « libere » dans la seconde, pont.py voyait un canal
-     * libere, et jetait le SABM : lchan en WAIT_RLL_RTP_ESTABLISH puis
-     * Timeout. Avant que le SABM ne soit publie une seule fois, le defaut
-     * etait masque, une republication finissait par tomber dans une fenetre
-     * ou le canal etait arme.
-     *
-     * Signal juste : un bloc recu ou emis sur un canal NON dedie (BCCH, CCCH)
-     * veut dire que le mobile est revenu sur les voies communes. En mode
-     * dedie il n'en lit aucun, donc ca ne peut pas arriver au milieu d'une
-     * connexion. */
-    /* Et seulement pour un VRAI canal commun : 44.004 8.3 donne 0x80 BCCH,
-     * 0x88 RACH, 0x90 PCH/AGCH. Un chan_nr de 0x00 n'est pas un canal, et
-     * c'est pourtant ce qu'on voyait passer -- releve du 2026-09-21 :
-     * « arme » et « libere » en alternance des dizaines de fois par seconde
-     * pendant la connexion, le BSP basculant entre TS0 et TS1 a chaque bloc,
-     * donc aucune descente dediee decodable. */
+     * The reliable signal is a block received or sent on a NON-dedicated
+     * channel (BCCH, CCCH): the mobile is back on the common channels. In
+     * dedicated mode it reads none, so this cannot happen in the middle of a
+     * connection. */
+    /* And only for a REAL common channel: 44.004 8.3 gives 0x80 BCCH,
+     * 0x88 RACH, 0x90 PCH/AGCH. A chan_nr of 0x00 is not a channel and must
+     * not release anything, otherwise the BSP would switch between TS0 and
+     * TS1 at every block during the connection and no dedicated downlink
+     * would be decodable. */
     if (tap.dernier_chan_nr != 0xFF && (chan_nr & 0xE0) == 0x80) {
-        /* [2026-09-21] Et pas au premier bloc CCCH venu : la couche 1 en
-         * delivre encore un ou deux juste apres la bascule vers le canal
-         * dedie. Liberer la, c'est couper la descente dediee en plein
-         * etablissement -- mesure : tous les blocs a 110/98/87 erreurs
-         * jusqu'au MDL-ERROR-IND, aucun UA. On exige donc que le bloc commun
-         * soit nettement POSTERIEUR au dernier bloc du canal dedie. */
+        /* And not at the first CCCH block that comes: layer 1 still delivers
+         * one or two of them just after the switch to the dedicated channel.
+         * Releasing there would cut the dedicated downlink in the middle of
+         * the establishment, so the common block is required to be clearly
+         * LATER than the last block of the dedicated channel. */
         uint32_t ecart = tap.fn_dedie_vue ? ((fn - tap.fn_dedie) % 2715648u) : 0xFFFFFFFFu;
         if (!tap.fn_dedie_vue || (ecart >= DCCH_LIBERE_APRES_TRAMES && ecart < 2715648u / 2)) {
             tap.dernier_chan_nr = 0xFF;
