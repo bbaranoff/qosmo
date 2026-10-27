@@ -1,85 +1,41 @@
-# `environnement/` — la configuration, par domaine
+# `environnement/` - bench configuration
 
-`calypso.env` mélangeait 312 variables : chemins d'installation, cadences du modèle, sondes de
-mesure et contournements, sans distinction. Ce répertoire les sépare **par ce qu'elles font**,
-pour qu'on sache ce qu'on a le droit de toucher.
-
-| Fichier | Domaine | Touchez-y ? |
-|---|---|---|
-| `paths.env` | où sont les dépendances sur **votre** machine | **oui**, c'est le premier à régler |
-| `modes.env` | les profils prêts à l'emploi (le mode qui campe, le mode natif…) | **oui**, choisissez-en un |
-| `bsp.env` | BSP / DMA / DARAM / feed I-Q / horloge TDMA | si vous savez ce que vous faites |
-| `dsp.env` | cœur c54x : interruptions, IMR, cadence d'exécution | idem |
-| `fbsb.env` | FB / FBSB / corrélateur / démodulateur | idem |
-| `shunt.env` | canaux shunt DL/UL, injections | idem |
-| `rf.env` | TPU / TSP / RF / AFC | idem |
-| `debug.env` | sondes et traces — **sans effet** sur l'émulation | **oui**, librement |
-| `fixes.env` | le sas `CALYPSO_FIXES` : correctifs en attente de validation | temporairement |
-| `crutches.env` | **les béquilles** — contournements de branches non implémentées | **non**, sauf pour diagnostiquer |
-
-## Trois choses à savoir avant de modifier quoi que ce soit
-
-**1. La vérité est le manifeste, pas la ligne de commande.**
-```bash
-grep "calypso-manifest" /root/qemu.log
-```
-Certaines variables en reposent d'autres silencieusement : `CALYPSO_NATIVE_HELPED=1` allume aussi
-`FB_CORR_ENTRY`, `FB_ENERGY` et `FB_IQ_*`. Retirer l'une d'elles de la ligne de commande ne la
-supprime pas — elle revient à son défaut.
-
-**2. `=0` ne coupe pas tout.** Quatre idiomes de gate coexistent :
-
-| Idiome | Actif quand | Comment couper |
-|---|---|---|
-| `getenv("X") ? 1 : 0` | la variable **existe**, même à `0` | **`unset X`** |
-| `atoi(...) > 0` | valeur > 0 | `X=0` |
-| `*e == '1'` | exactement `"1"` | toute autre valeur |
-| défaut ON + `X_OFF` | par défaut | poser `X_OFF` |
-
-**3. `:=` contre `=`.** Dans ces fichiers, `: "${VAR:=valeur}"` laisse la ligne de commande gagner ;
-`VAR=valeur` la **verrouille**. N'utilisez `=` que pour ce qui ne doit jamais être surchargé.
-
-## Référence complète
-
-Les 312 variables, avec défaut, effet mesuré, mode, idiome, catégorie et dépendances :
-`../hw/arm/calypso/doc/VARIABLES_ENVIRONNEMENT.md`.
-
-
-## Comment ça se charge
-
-Tout passe par `load.env`, sourcé par `start-clean.sh` :
+`run.sh` sources `bench.env` with `set -a` before running the steps in
+`run_modules/`. Every value uses `: "${VAR:=default}"`, so a value given on the
+command line or in the caller's environment always wins:
 
 ```bash
-set -a ; . ./environnement/load.env ; set +a
+LOG_DIR=/var/tmp/calypso ENCRYPTION="a5 1" ./run.sh
+./run.sh --check-paths        # check the paths below on this machine
 ```
 
-L'ordre compte. Tous les fichiers utilisent `:=` (« si pas déjà défini »), donc **le premier qui
-pose une valeur gagne** :
+## Variables in `bench.env`
 
-1. la **ligne de commande** — `VAR=x ./run.sh` gagne toujours ;
-2. `modes.env` — le profil choisi ;
-3. les fichiers par domaine — les défauts ;
-4. `calypso.env` — l'ancien monolithe, conservé le temps de la migration. Il n'utilise que `:=`,
-   donc il ne peut rien écraser : il ne fournit que ce qui n'a pas encore été réparti. À vider
-   progressivement.
+| Group | Variables |
+|---|---|
+| Paths | `GSM_ROOT`, `QEMU_TREE`, `QEMU_BIN`, `QEMU_CFGS`, `FIRMWARE_DIR`, `FIRMWARE_ELF`, `FIRMWARE_BIN`, `OSMOCOM_BB`, `OSMOCON`, `OSMOCOM_CFG`, `OSMOCOM_HOME`, `NITB_ROOT` |
+| Run and logs | `RUN_DIR` (default `$XDG_RUNTIME_DIR/calypso`), `LOG_DIR`, `CAPTURE_DIR`, `TMUX_SESSION` |
+| Core network | `ENCRYPTION` (default `a5 0`) |
+| Mobiles | `CALYPSO_MOBILE_DEBUG` (log categories), `CALYPSO_PULSE_LATENCY_MSEC` |
+| Display | `CALYPSO_LANG` (`en`), `CALYPSO_NO_ATTACH` (`1` = do not attach tmux) |
 
-## Les fichiers hérités
+`FIRMWARE_ELF` defaults to `layer1.highram_patched.elf` when it exists (B_BFI
+frames, FACCH steals included, passed at zero gain and masked by the GAPK ECU),
+otherwise to `layer1.highram.elf`.
 
-`calypso.env`, `calypso_hack.env`, `calypso_native*.env`, `calypso_shunt_*.env`, `calypso_wire.env`
-datent d'avant ce découpage. Ils sont conservés — on ne détruit pas ce qui marche — mais la
-configuration nouvelle vit dans les fichiers par domaine.
+The noise injector variables (`BRUIT_*`) are not set here; see the "Downlink
+noise injector" section of the repository README.
 
-## Ce que contient chaque domaine
+## Gate idioms in the C code
 
-| Fichier | Variables | dont béquilles |
+A `CALYPSO_*` variable does not always turn off with `=0`:
+
+| Idiom | Active when | How to turn off |
 |---|---|---|
-| `bsp.env` | 52 | 10 |
-| `dsp.env` | 52 | 15 |
-| `fbsb.env` | 52 | 25 |
-| `shunt.env` | 58 | 34 |
-| `armdsp.env` | 47 | 16 |
-| `opcodes.env` | 50 | 16 |
+| `getenv("X") ? 1 : 0` | the variable **exists**, even as `0` | `unset X` |
+| `atoi(...) > 0` | value > 0 | `X=0` |
+| `*e == '1'` | exactly `"1"` | any other value |
+| default ON + `X_OFF` | by default | set `X_OFF` |
 
-**116 béquilles sur 311 variables** — plus d'un tiers du projet est du contournement. Chacune est
-annotée à son site de lecture dans le code (`grep -rn "@BEQUILLE" hw/arm/calypso/`), avec ce
-qu'elle masque et la condition qui la rendrait inutile.
+QEMU logs the effective configuration as `calypso-manifest` lines in `qemu.log`;
+check there rather than trusting the command line.
