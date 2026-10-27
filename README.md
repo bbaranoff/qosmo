@@ -1,310 +1,189 @@
-# qosmo — QEMU Calypso, une seule base, deux couches 1
+# qosmo - QEMU model of the TI Calypso baseband
 
-Modèle QEMU du **baseband GSM TI Calypso** (Compal E88 / Motorola C1xx). Le
-firmware [osmocom-bb](https://osmocom.org/projects/baseband) d'origine, non
-patché, y boote et y tourne.
-
-La couche 1 se choisit **au `configure`**, pas en changeant de dépôt :
+QEMU machine for the **TI Calypso GSM baseband** (Compal E88 / Motorola C1xx).
+The unmodified [osmocom-bb](https://osmocom.org/projects/baseband) firmware
+boots and runs on it. One platform, with the layer 1 selected at configure time:
 
 ```bash
-../configure --target-list=arm-softmmu                      # plateforme nue
-../configure --target-list=arm-softmmu --enable-l1-grgsm    # démod par gr-gsm
-../configure --target-list=arm-softmmu --enable-l1-dsp      # mask-ROM TI sur C54x
+../configure --target-list=arm-softmmu                      # bare platform, no L1
+../configure --target-list=arm-softmmu --enable-l1-grgsm    # gr-gsm demodulation
+../configure --target-list=arm-softmmu --enable-l1-dsp      # TI mask ROM on an emulated C54x
 ```
 
-## Pourquoi ce dépôt existe
+The two `--enable-l1-*` options are mutually exclusive; meson rejects the combination.
 
-`qemu-calypso` avait été scindé le 2026-09-01 en deux forks — `qosmo-grgsm` et
-`qosmo-dsp` — pour répondre à deux questions différentes : *la pile marche-t-elle
-de bout en bout ?* et *le vrai DSP acquiert-il ?* Le problème n'était pas la
-scission, c'était sa forme : **deux dépôts sans commit racine commun**
-(`6ee0024` contre `472f69d`). Ni merge, ni cherry-pick, ni base de fusion. Un
-correctif de plateforme devait être réappliqué à la main dans l'autre arbre —
-donc, en pratique, ne l'était pas.
+## Build and install
 
-Résultat mesuré le 2026-09-16, deux semaines après le split : **9 des 10
-fichiers communs à `hw/arm/calypso/` avaient divergé**, `calypso_trx.c` allant
-jusqu'à 478 lignes d'un côté contre 2478 de l'autre. Seul `Kconfig` était resté
-identique.
-
-Mais cette divergence, mesurée en retirant les deux couches 1, n'était presque
-pas de la plateforme. C'était le même squelette préfixé différemment
-(`tpu_read` contre `calypso_tpu_read`, `cpu_kick` contre `calypso_kick_cb`),
-plus **deux fonctions qui sont la couche 1 déguisée en accès mémoire** :
-`api_read`/`api_write` sur la fenêtre `0xFFD00000`. Le SoC, lui, était le même
-des deux côtés — il l'est toujours, c'est le même silicium.
-
-D'où ce dépôt : une plateforme, une couture explicite, deux L1 qui cohabitent
-et ne se disputent qu'une ligne de `configure`.
-
-## La couture
-
-Neuf points d'appel, une structure : [`calypso_l1_ops.h`](include/hw/arm/calypso/calypso_l1_ops.h).
-
-```c
-static const CalypsoL1Ops mes_ops = {
-    .name              = "grgsm",
-    .init              = ma_l1_init,           /* fin de machine_init */
-    .frame_tick        = ma_l1_frame_tick,     /* 1× par trame TDMA */
-    .api_read_override = ma_l1_read_override,  /* lecture API RAM */
-    .si_valid          = ma_l1_si_valid,
-    .l1s_fn            = ma_l1s_fn,
-    .burst_written     = ma_l1_burst_written,  /* d_burst_d */
-    .rach_written      = ma_l1_rach_written,   /* d_rach */
-    .page_written      = ma_l1_page_written,   /* d_dsp_page */
-    .uart_tx_byte      = mon_tap_l1ctl,        /* optionnel */
-};
-static void enregistrer(void) { calypso_l1_register(&mes_ops); }
-type_init(enregistrer)
+```bash
+./install.sh --check          # prerequisites and state, changes nothing
+sudo ./install.sh --with-deps # missing apt packages, then every step
+./install.sh --list           # steps (venv configure build install bin verify) and values
 ```
 
-Elle ne porte **que** le sens plateforme → L1. Le sens inverse reste en appels
-directs vers ce que la base exporte (`calypso_api_ram()`,
-`calypso_trx_get_fn()`, `calypso_trx_autosync_fn()`, `calypso_tsp_move()`,
-`calypso_tpu_run_scenario()`) : c'est du matériel, il n'en existe qu'une
-implémentation par construction, l'indirecter n'achèterait rien.
+Main options (and their environment variables): `--prefix` (`PREFIX`, default
+`$GSM_ROOT/qemu-install`), `--build-dir` (`BUILD_DIR`), `--venv` (`VENV`),
+`--bin-dir` (`BIN_DIR`, default `/usr/local/bin`), `--destdir` (`DESTDIR`),
+`--cc` (`QOSMO_CC`). `./install.sh --help` lists them all.
 
-Le test du découpage a été de faire passer la L1 de `qosmo-grgsm` dessous :
-`calypso_l1_grgsm.c` et `calypso_l1ctl_tap.c` sont repris **sans aucune
-modification** hors le chemin de leurs deux `#include` privés. Tout le coût
-d'adaptation tient dans
-[`calypso_l1_grgsm_register.c`](hw/arm/calypso/l1-grgsm/calypso_l1_grgsm_register.c),
-qui ne fait que remplir la structure. Si la couture avait été mal placée, il
-aurait fallu retoucher la L1 elle-même.
-
-La couture sait aussi se retirer : `calypso_l1_disable(why)`
-([`calypso_l1_ops.h:138`](include/hw/arm/calypso/calypso_l1_ops.h)) neutralise
-la L1 liée quand `CALYPSO_DSP_EXTERN` est posé. Le tap DCCH
-([`calypso_dcch_tap.c`](hw/arm/calypso/calypso_dcch_tap.c)), qui ne dépend
-d'aucune L1, remplace alors `calypso_l1ctl_tap.c` pour publier le canal dédié.
-
-## Le pont DSP externe
-
-C'est le chemin **réellement utilisé** sur le banc : la mask-ROM tourne dans
-`c54x_exe`, hors de QEMU, et `calypso_trx.c` lui parle par
-[`calypso_dsp_pont.h`](include/hw/arm/calypso/calypso_dsp_pont.h).
-
-- `CALYPSO_DSP_EXTERN=1` (ou un chemin de socket) désactive la L1 liée
-  (`calypso_l1_disable`) et branche QEMU sur `c54x_exe --arm`, **à lancer
-  d'abord** — sinon `shm_open(...) ... lancez d'abord c54x_exe --arm` et
-  `exit(1)`.
-- API RAM partagée par `/dev/shm/calypso_api_ram` (16 Ko), synchronisation
-  trame par trame sur `/tmp/calypso_dsp.sock` (`SOCK_SEQPACKET`).
-- Messages : `HELLO`/`HELLO_OK` (magic `'C54X'`), `RESET` (écriture de
-  `DL_STATUS`), `TICK` (a = fn, b = page), `DONE` (drapeaux IRQ/IDLE/INIT),
-  `GO`, `DCCH`.
-- `TICK.b` bit 16 : IRQ trame DSP armée par l'ARM — `TPU_CTRL_DSP_EN` est à
-  usage unique (`36efec9`, 2026-09-20) ; sans lui le DSP ne reçoit pas
-  d'interruption trame.
-- `TICK.b` bit 17 : TICK en deux phases (`255cdd6`, 2026-09-21) — ISR de la
-  ROM, `DONE|PONT_DONE_PHASE_A`, IRQ trame ARM et `l1_sync()`, puis `PONT_GO`
-  et seulement alors le burst. Avant, la page R du burst N écrasait le burst
-  N-2 sous l'ARM (`EMPTY` / `BURST ID n!=m`).
-- `PONT_DCCH` porte TN, genre et sous-voie du canal dédié — SDCCH/4 (0),
-  SDCCH/8 (1) ou libéré (`0xFF`) seulement. Il est appris par
-  `calypso_dcch_tap.c`, qui renifle les `L1CTL_DATA_CONF`/`DATA_IND` du flux
-  sercomm et publie `/dev/shm/calypso_dcch_cfg` ; ce fichier, lui, annonce
-  aussi le TCH (genre 2 = TCH/F, 3 = TCH/H, 2026-09-23), mais le TCH n'est pas
-  relayé par `PONT_DCCH` : la bascule du BSP sur le TCH suit la tâche du
-  firmware côté `c54x_exe`.
-
-Les sources de `l1-dsp/` se compilent aussi hors QEMU grâce à
-[`contrib/hors-qemu/cales-qemu.c`](contrib/hors-qemu/cales-qemu.c) :
-équivalents POSIX des quelques symboles QEMU dont le DSP dépend, plus les
-en-têtes de `contrib/hors-qemu/doublures/`. C'est ainsi que `c54x_exe` les
-construit, sans les recopier (`QOSMO ?= /opt/GSM/qosmo` dans son `Makefile`).
-
-### Variables d'environnement côté QEMU
-
-| variable (sur `qemu-system-arm`) | effet |
-|---|---|
-| `CALYPSO_DSP_EXTERN` | `1` ou chemin de socket : pont vers `c54x_exe` |
-| `CALYPSO_PONT_LOCKSTEP=1` | QEMU attend `DONE` à chaque trame — indispensable, le C54x émulé est plus lent que le temps réel |
-| `CALYPSO_PONT_ARM_FIRST=0` | ancien ordre, sans les deux phases |
-| `CALYPSO_PONT_RETRY_DIV` | relance vers le DSP toutes les trame/N (défaut 16, jugé sans effet dans `calypso_trx.c`) ; `c54x_exe/run.sh` pose 64 depuis le 2026-09-23 (latence de la phase A et du GO, mesurée par `[chrono]` en TCH) |
-| `CALYPSO_CPU_KICK_NS` | période du kick CPU, réglage de mesure (défaut 5 ms, mesuré sans effet) |
-| `CALYPSO_PACER_RATTRAPAGE` | trames de retard rattrapées par le pacer TDMA (20 par défaut) ; `0` = ancienne grille stricte, qui sautait des trames |
-
-`CALYPSO_BSP_STREAM`, `CALYPSO_A5`, `CALYPSO_SONDES`, `CALYPSO_C54X_OVM`,
-`CALYPSO_MVKD_DMAD_AVANT`, `CALYPSO_HACK_SOFT_SCALE` sont lus par le code de
-`l1-dsp/` : avec le DSP externe, ils se posent sur **`c54x_exe`** (le
-processus du DSP), pas sur QEMU, où ils sont sans effet.
-
-## Vérifier
+Manual build:
 
 ```bash
 mkdir build && cd build
 ../configure --target-list=arm-softmmu --disable-werror
 ninja qemu-system-arm
-./qemu-system-arm -M help | grep calypso
+./qemu-system-arm -M help | grep calypso   # names the linked L1: none, grgsm or c54x
 ```
 
-La machine **nomme la L1 réellement liée** — c'est la façon la plus courte de
-savoir ce qu'on a construit :
+Without an L1 the firmware boots and scans but never finds a cell. This is the
+expected way to test the platform alone: boot, IRQs, TDMA, UART and SIM.
 
-| configure | `-M help` affiche |
-|---|---|
-| (rien) | `couche 1 : aucune` |
-| `--enable-l1-grgsm` | `couche 1 : grgsm` |
-| `--enable-l1-dsp` | `couche 1 : c54x` |
+## Running the bench
 
-Sans L1, le firmware boote, balaie et ne trouve jamais de cellule : le modem ne
-reçoit rien. Ce n'est pas une panne, c'est ce qui rend la plateforme — boot,
-IRQ, TDMA, UART, SIM — testable sans traîner gr-gsm ni le C54x.
+`run.sh` starts the full bench (Osmocom core network, Asterisk, QEMU, osmocon,
+mobile, BTS side-cars) through the numbered steps in `run_modules/`, and lays
+out the panes with `tmux_modules/`. Its environment comes from
+`environnement/bench.env` (see `environnement/README.md`).
 
-Les deux options sont exclusives, et `meson` le refuse explicitement plutôt que
-de laisser le second `calypso_l1_register()` écraser le premier en silence :
+## Layer-1 interface (`CalypsoL1Ops`)
 
+[`calypso_l1_ops.h`](include/hw/arm/calypso/calypso_l1_ops.h) defines nine
+callbacks from the platform to the L1:
+
+```c
+static const CalypsoL1Ops my_ops = {
+    .name              = "grgsm",
+    .init              = my_l1_init,           /* end of machine_init */
+    .frame_tick        = my_l1_frame_tick,     /* once per TDMA frame */
+    .api_read_override = my_l1_read_override,  /* API RAM read */
+    .si_valid          = my_l1_si_valid,
+    .l1s_fn            = my_l1s_fn,
+    .burst_written     = my_l1_burst_written,  /* d_burst_d */
+    .rach_written      = my_l1_rach_written,   /* d_rach */
+    .page_written      = my_l1_page_written,   /* d_dsp_page */
+    .uart_tx_byte      = my_tap_l1ctl,         /* optional */
+};
+static void reg(void) { calypso_l1_register(&my_ops); }
+type_init(reg)
 ```
-$ ../configure --enable-l1-grgsm --enable-l1-dsp
-ERROR: calypso: --enable-l1-grgsm et --enable-l1-dsp sont exclusives.
-```
 
-## État
+The L1 calls the platform directly (`calypso_api_ram()`, `calypso_trx_get_fn()`,
+`calypso_trx_autosync_fn()`, `calypso_tsp_move()`, `calypso_tpu_run_scenario()`).
+`calypso_l1_disable(why)` turns the linked L1 off when `CALYPSO_DSP_EXTERN` is
+set; the DCCH tap ([`calypso_dcch_tap.c`](hw/arm/calypso/calypso_dcch_tap.c))
+then publishes the dedicated channel.
 
-| | |
+## External DSP bridge
+
+This is the mode used on the bench: the TI mask ROM runs in `c54x_exe`, outside
+QEMU, and `calypso_trx.c` talks to it through
+[`calypso_dsp_pont.h`](include/hw/arm/calypso/calypso_dsp_pont.h).
+
+- Start `c54x_exe --arm` first, then QEMU with `CALYPSO_DSP_EXTERN=1` (or a
+  socket path). QEMU exits if the shared memory does not exist yet.
+- API RAM shared through `/dev/shm/calypso_api_ram` (16 KiB); frame-by-frame
+  synchronisation on `/tmp/calypso_dsp.sock` (`SOCK_SEQPACKET`).
+- Messages: `HELLO`/`HELLO_OK` (magic `'C54X'`), `RESET`, `TICK` (a = fn,
+  b = page and flags), `DONE` (IRQ/IDLE/INIT flags), `GO`, `DCCH`.
+- `TICK.b` bit 16: frame IRQ armed by the ARM (`TPU_CTRL_DSP_EN`).
+  Bit 17: two-phase tick (ROM ISR, `DONE|PONT_DONE_PHASE_A`, ARM frame IRQ and
+  `l1_sync()`, then `PONT_GO` and the burst).
+- `PONT_DCCH` carries TN, type and sub-channel of SDCCH/4 (0), SDCCH/8 (1) or
+  released (`0xFF`). `calypso_dcch_tap.c` learns it from the L1CTL stream and
+  also publishes `/dev/shm/calypso_dcch_cfg`, which announces TCH/F (2) and
+  TCH/H (3); the TCH switch itself follows the firmware task in `c54x_exe`.
+
+The `l1-dsp/` sources also build outside QEMU with
+[`contrib/hors-qemu/cales-qemu.c`](contrib/hors-qemu/cales-qemu.c) and the
+headers in `contrib/hors-qemu/doublures/`; `c54x_exe` and `grgsm_exe` compile
+them from this tree (`QOSMO ?= /opt/GSM/qosmo`).
+
+### QEMU-side environment variables
+
+| Variable (on `qemu-system-arm`) | Effect |
 |---|---|
-| plateforme (SoC, TPU, TSP, SIM, ULPD, UART, timers, SPI/I²C, INTH, TRF6151, `calypso_l1_dispatch.c`, `calypso_dcch_tap.c`) | ✅ construit et boote seule ; l'INTH compte la fin de service (`IRQ_CTRL` bit 0 après `IRQ_NUM`=4) pour le TICK en deux phases |
-| couture `CalypsoL1Ops` | ✅ 9 points d'appel, vérifiée avec la L1 gr-gsm |
-| `--enable-l1-grgsm` | ✅ |
-| `--enable-l1-dsp` (C54x dans QEMU) | 🔧 les ~28 600 lignes de `l1-dsp/` compilent et se lient ; la vtable reste vide (seul `.name = "c54x"`) |
-| DSP externe (`CALYPSO_DSP_EXTERN`) | ✅ mask-ROM dans `c54x_exe`, couplée à l'ARM par le pont ; SCH (BSIC/FN), BCCH SI1-4 et LU sur SDCCH atteints sur le banc ; appels TCH/F de bout en bout, parole décodée par la ROM (runs du 2026-09-23 20:22 et 20:32) ; toutes les trames de parole marquées `B_BFI`, un LOS en appel à 20:32 — voir ci-dessous |
-| devices de la carte E88 | 🔧 présents, compilent, pas branchés — voir ci-dessous |
+| `CALYPSO_DSP_EXTERN` | `1` or socket path: bridge to `c54x_exe` |
+| `CALYPSO_PONT_LOCKSTEP=1` | QEMU waits for `DONE` each frame (required: the emulated C54x is slower than real time) |
+| `CALYPSO_PONT_ARM_FIRST=0` | single-phase tick |
+| `CALYPSO_PONT_RETRY_DIV` | resend to the DSP every frame/N (default 16; `c54x_exe/run.sh` sets 64) |
+| `CALYPSO_CPU_KICK_NS` | CPU kick period (default 5 ms) |
+| `CALYPSO_PACER_RATTRAPAGE` | late frames the TDMA pacer catches up (default 20; `0` = strict grid) |
 
-Neuf devices (`calypso_iota.c`, `calypso_rf3166.c`, `calypso_asm4532.c`,
-`calypso_xio.c`, `calypso_debug.c`, `calypso_invariants.c`, `fw_console.c`,
-`sercomm_gate.c`, `l1ctl_sock.c`) sont construits **sous `--enable-l1-dsp`
-seulement**, parce que leur unique point d'entrée est
-`calypso_pcb_init()`, qui vit dans
-[`l1-dsp/calypso_full_pcb.c`](hw/arm/calypso/l1-dsp/calypso_full_pcb.c) —
-désormais dans ce dépôt, avec `calypso_rif.c`, `calypso_rhea_dma.c`,
-`calypso_tint0.c` et `calypso_twl3025.c`, construit sous `--enable-l1-dsp` —
-lequel prend toujours un `C54xState*` (passé en `void *`) et n'est toujours appelé par personne
-(rien dans `calypso_soc_realize()`). Les activer donnerait neuf fichiers de code mort — mesuré, aucun
-appelant hors de l'îlot fermé que forment `calypso_asm4532.c` et
-`calypso_rf3166.c`, qui ne s'appellent que l'un l'autre.
+`CALYPSO_BSP_STREAM`, `CALYPSO_A5`, `CALYPSO_SONDES`, `CALYPSO_C54X_OVM`,
+`CALYPSO_MVKD_DMAD_AVANT` and `CALYPSO_HACK_SOFT_SCALE` are read by `l1-dsp/`:
+with the external DSP, set them on `c54x_exe`, not on QEMU.
 
-L'ordre pour les débloquer est dans
-[`hw/arm/calypso/meson.build`](hw/arm/calypso/meson.build) — dont le bloc
-« RESTENT DANS qosmo-dsp » est périmé depuis que ces cinq fichiers sont dans
-`l1-dsp/`.
+## Downlink noise injector
 
-### Cœur C54x : correctifs récents
+Off by default. [`tools/injecteur_bruit.py`](tools/injecteur_bruit.py) is a
+transparent UDP proxy between the bridge and the L1 that degrades the downlink;
+the uplink passes unchanged. [`run_modules/38-bruit.sh`](run_modules/38-bruit.sh)
+starts it before `40-qemu` when `BRUIT_MODE` is set; `c54x_exe/run.sh` does the
+same for the external DSP.
 
-- **2026-09-18/19** — `calypso_c54x.c` découpé en `c54x_exec`, `c54x_decode`,
-  `c54x_mem`, `c54x_irq`, `c54x_probes`.
-- **2026-09-20** — ROL/ROR sur 32 bits (SPRU172C, c'était une rotation 40 bits),
-  tous les modes Lmem par `resolve_lmem`, CPL respecté en adressage direct :
-  le SCH décode (`15c0d45`). `getenv()` mémoïsé sur les chemins chauds
-  (6,7 → 3,7 ms/trame, `d68baaf`) ; chemin rapide `c54x_rapide` et file BSP de
-  8192 bursts (`54d8320`) ; modulation GMSK partagée `calypso_gmsk.c`
-  (`d8e5fef`).
-- **2026-09-21** — OVA/OVB et saturation OVM (`CALYPSO_C54X_OVM=0` pour
-  revenir), MPYR/MACR/MASR, `0xA1xx` = `ADD Xmem,Ymem` (pas `SQDST`),
-  `*+ARx(lk)%` circulaire, retenue SFTA au bit 40-SHIFT : le BCCH décode,
-  SI1-4 (`4771f91`).
-- **2026-09-23** — sondes coupées par défaut (`CALYPSO_SONDES=1` ou
-  `CALYPSO_DEBUG` pour les rallumer) ; `RPT *(lk)` avance de 1 + `lk_used`
-  (crash TCH `SP-CORRUPT`) ; `MVKD`/`MVDK` longs lisent `lk` avant `dmad`
-  (SACCH du TCH, pointeur `0x3d89` ; `CALYPSO_MVKD_DMAD_AVANT=1` = ancien
-  ordre) ; coprocesseur A5 sur les ports XIO `0x2800..0x2818`
-  ([`calypso_a5.c`](hw/arm/calypso/l1-dsp/calypso_a5.c), `osmo_a5()`).
-
-### Banc DSP : runs du 2026-09-23 20:22 et 20:32
-
-Montage pont DSP (`c54x_exe`), mobile DSP = MS 1 (MSISDN 100101). Journaux :
-`osmo-*.log`, archives du pont `20260923-202448` et `20260923-203413`.
-
-Constaté :
-
-- **Parole TCH/F décodée par la ROM.** Appel MO vers l'écho 600 à 20:22
-  (ACTIVE 20:22:55, DISCONNECT 20:23:27, ~32 s ; TCH dl=1607 ul=1601
-  trames), appel MT 100102 → 100101 (ACTIVE 20:24:28, release normal
-  20:24:32), appel MO à 20:33:39 → DISCONNECT 20:34:06 au run suivant. La ROM
-  TI fait démodulation, égalisation, désentrelacement et Viterbi TCH/F
-  descendant ; codec (GAPK FR) et codage canal montant tournent sur l'hôte.
-  Audible dans les deux sens.
-- **Ordre `MVKD`/`MVDK` / SACCH `0x3d89`** : à 20:22, les deux appels vont
-  jusqu'à la libération normale sans LOS (plus de LOS après ~20 s). Pas
-  vrai du premier appel de 20:32, voir plus bas.
-- **Coprocesseur A5** : journal `[a5]` actif sur les deux runs (Kc lu sur
-  les ports XIO, `NOUVEAU Kc` à chaque changement) ; chiffrement descendant
-  confirmé par la BTS 5 fois à 20:22 (LU, appel 600, SMS MT, SMS MO, appel
-  MT : chaque établissement) et 3 fois à 20:32.
-- **Temps réel** : 29 513 trames à 20:22 (28 441 à 20:32), un seul tick
-  sauté par run, au boot (`fn=0`). Marge : en TCH, `[chrono]` à 20:22
-  (fn 5997-11997) A 0,32-0,34 + go 0,39-0,49 + B 0,15-0,16 + après DONE
-  3,37-3,68 ms ; à 20:32 A 0,29-0,33 + go 0,40-0,50 + B 0,11-0,16 + après
-  DONE 3,33-3,59 ms. Soit ~4,2-4,6 ms de travail DSP pour 4,62 ms de trame ;
-  l'attente de QEMU tombe à 0,04-0,45 ms. Hors TCH ~0,6-2 ms. Tenu, mais
-  sans réserve : c'est aussi une alerte.
-
-Anomalies ouvertes, par ordre d'importance :
-
-1. **`B_BFI` sur toutes les trames de parole.** Sonde `[a_dd]` à 20:32 :
-   `vues=2200 bfi=2200`. Sur les 42 lignes échantillonnées : 19 × `c214`
-   err=0, toutes parmi les 20 premières après la bascule (la 18e est un
-   `8084` err=58), puis 17 × `c204` err=15..80 et 5 × `80c4` err=81..93
-   (`err` = `a_dd_0[2]`, `num_biterr`). Premier appel (fn 5839-9306, celui
-   du LOS) : err 58 à 93 hors `c214` ; appel de 20:33:39 (fn 21248-26881) :
-   `c204` err=15..38. Ce n'est donc pas « bits bons, BFI faux » :
-   la ROM mesure ~3 à 20 % d'erreurs sur 456 bits codés et le FR reste
-   intelligible (le firmware ne remonte pas le BFI, GAPK décode tel quel).
-   Origine à trancher : signal (BSP, IQ, égalisation) ou cœur C54x
-   (Viterbi, recodage qui compte les erreurs). Comparaison bit à bit avec
-   les trames BTS à faire. Le `ko=376` de la sonde compte `B_FIRE1`, sans
-   sens défini sur la parole.
-2. **LOS en appel à 20:32.** Appel MO ACTIVE 20:32:30 ; le compteur ACCH
-   descend de 31 à 0 sans remonter (aucun SACCH descendant accepté) et le
-   mobile jette ~400 blocs en 15 s (« Dropping frame with 54..111 bit
-   errors », `mobile.log` de l'archive `20260923-203413`) ; « LOS during
-   dedicated mode » à 20:32:45. La tentative suivante (20:32:57) reste sans
-   réponse jusqu'à 20:33:13, celle de 20:33:26 est relâchée aussitôt ;
-   l'appel de 20:33:36 va au bout. Non reproduit à 20:22.
-3. **SACCH descendant du SDCCH/8** : ~la moitié des blocs jetés (7 entre
-   20:22:42 et 20:22:47 sur le LU). Suspect : la table 45.002 du BSP pour
-   le SACCH/8 sur 102 trames.
-
-Pas une anomalie : les échecs CRC du moniteur TCH descendant du pont tant que
-le RTP ne coule pas (décodage du pont, indépendant du DSP) ; le `ko` de
-`[a_dd]` ; le tick sauté à `fn=0`.
-
-Reste à valider : rattrapage du pacer pour la parole
-(`CALYPSO_PACER_RATTRAPAGE`), rien dans les journaux de ces runs.
-
-## Injecteur de bruit (sens descendant)
-
-Inactif par défaut. [`tools/injecteur_bruit.py`](tools/injecteur_bruit.py) est un proxy UDP
-transparent entre le pont et la couche 1 qui dégrade le descendant ; le montant est relayé tel
-quel. Le module [`run_modules/38-bruit.sh`](run_modules/38-bruit.sh) le lance (avant `40-qemu`)
-quand `BRUIT_MODE` est posé ; `c54x_exe/run.sh` fait de même pour le DSP externe (étape b).
-
-| variable | effet |
+| Variable | Effect |
 |---|---|
-| `BRUIT_MODE` | `ber` (bits inversés), `souple` (AWGN + décision dure), `iq` (I/Q GMSK + AWGN, **expérimental**, DSP seulement, refusé sous `CALYPSO_BSP_STREAM=1`), `relais` (rien) |
-| `BRUIT_BER`, `BRUIT_RAFALES` | taux d'inversion 0..1 ; longueur moyenne des rafales en bits (Gilbert-Elliott) |
-| `BRUIT_SNR_DB` | SNR en dB, P/(2σ²) par échantillon complexe ; **sans** `BRUIT_MODE` : exporte `CALYPSO_BSP_SNR_DB`, l'AWGN du cœur C54x (`l1-dsp/calypso_c54x.c`, `c54x_bsp_load`), sans effet sur la L1 gr-gsm |
-| `BRUIT_PERTE`, `BRUIT_TN`, `BRUIT_GRAINE` | effacements (dsp : bits aléatoires ; gr-gsm : bloc non transmis), intervalles visés, graine (sans mode : `CALYPSO_BSP_BRUIT_GRAINE`) |
-| `BRUIT_STATS`, `BRUIT_OPTS`, `BRUIT_PY` | période des statistiques (10 s), options en plus, chemin de l'injecteur |
-| `BRUIT_CIBLE`, `BRUIT_PORT_DSP`, `BRUIT_PORT_GRGSM` | L1 du QEMU (`auto` : `build/meson-info`) ; ports déplacés (16702, 14730) |
+| `BRUIT_MODE` | `ber` (bit flips), `souple` (AWGN + hard decision), `iq` (GMSK I/Q + AWGN, experimental, DSP only, refused with `CALYPSO_BSP_STREAM=1`), `relais` (pass-through) |
+| `BRUIT_BER`, `BRUIT_RAFALES` | flip rate 0..1; mean burst length in bits (Gilbert-Elliott) |
+| `BRUIT_SNR_DB` | SNR in dB; without `BRUIT_MODE` it exports `CALYPSO_BSP_SNR_DB` (AWGN in the C54x core) |
+| `BRUIT_PERTE`, `BRUIT_TN`, `BRUIT_GRAINE` | erasures, targeted timeslots, random seed |
+| `BRUIT_STATS`, `BRUIT_OPTS`, `BRUIT_PY` | statistics period (10 s), extra options, injector path |
+| `BRUIT_CIBLE`, `BRUIT_PORT_DSP`, `BRUIT_PORT_GRGSM` | target L1 (`auto` reads `build/meson-info`); relocated ports (16702, 14730) |
 
-Avec la L1 gr-gsm, QEMU écoute GSMTAP sur 4730 **en dur** : c'est le pont qui vise
-`PONT_GSMTAP_PORT` (osmo-operator `pont/config.py`), que `pont/pont.py` met lui-même à 14730 quand
-`BRUIT_MODE` vaut `ber` ou `relais` ; le flux est fait de blocs L2 déjà décodés, d'où ces deux modes
-seulement. Avec la L1 DSP, le module exporte `CALYPSO_BSP_PORT=16702` pour QEMU et l'injecteur prend
-6702. En montage DSP de `start-native.sh` (`qemu` retiré du plan), le module se saute.
-Journal : `$LOG_DIR/bruit.log`. Détail : `osmo-operator/wiki/Injecteur-bruit.md`.
+With the gr-gsm L1, QEMU listens for GSMTAP on port 4730; the bridge then sends
+to 14730 and only `ber` and `relais` apply (the stream carries decoded L2
+blocks). With the DSP L1 the module exports `CALYPSO_BSP_PORT=16702` and the
+injector takes 6702. Log: `$LOG_DIR/bruit.log`.
 
-## Documentation liée
+## Status
 
-- [`hw/arm/calypso/doc/SONDES.md`](hw/arm/calypso/doc/SONDES.md) — les sondes
-  du cœur C54x (2026-09-18).
-- [`tools/rapport-run.sh`](tools/rapport-run.sh) — rapport des journaux
-  qemu/osmocon/mobile/bts/pont d'un run ; `LOG_DIR` est lu dans l'environ du
-  QEMU vivant.
+| Part | State |
+|---|---|
+| Platform (SoC, TPU, TSP, SIM, ULPD, UART, timers, SPI/I2C, INTH, TRF6151, L1 dispatch, DCCH tap) | Builds and boots alone |
+| `CalypsoL1Ops` interface | 9 callbacks, used by the gr-gsm L1 |
+| `--enable-l1-grgsm` | Working |
+| `--enable-l1-dsp` (C54x inside QEMU) | `l1-dsp/` compiles and links; the ops table is empty except `.name = "c54x"` |
+| External DSP (`CALYPSO_DSP_EXTERN`) | SCH, BCCH SI1-4, location update, SMS and TCH/F calls end to end; A5 ciphering on the XIO ports |
+| E88 board devices (`calypso_iota.c`, `calypso_rf3166.c`, `calypso_asm4532.c`, `calypso_xio.c`, `calypso_debug.c`, `calypso_invariants.c`, `fw_console.c`, `sercomm_gate.c`, `l1ctl_sock.c`) | Built only with `--enable-l1-dsp`; not wired: their entry point `calypso_pcb_init()` (in `l1-dsp/calypso_full_pcb.c`) is not called from `calypso_soc_realize()` |
 
-## Licence
+## Known issues
 
-Code dérivé de QEMU 9.2.4 : GPL-2.0-or-later (en-têtes SPDX, `COPYING`).
-Le dépôt porte aussi, depuis le 2026-09-23, un `LICENSE` GPLv3 (« qosmo
-Copyright (C) 2026 Bastien Baranoff »).
+1. **`B_BFI` on every speech frame** with the external DSP. The ROM reports
+   roughly 3 to 20 % bit errors on the 456 coded bits; FR speech stays
+   intelligible because the firmware does not forward the BFI. Unknown whether
+   the cause is the signal path (BSP, I/Q, equalisation) or the C54x core
+   (Viterbi, re-encoding); a bit-by-bit comparison with the BTS frames is needed.
+2. **Occasional LOS during a call**: the SACCH downlink stops being accepted,
+   the ACCH counter drops to 0 and the mobile reports "LOS during dedicated mode".
+   Not reproducible on every run.
+3. **SDCCH/8 SACCH downlink**: about half of the blocks are dropped. Suspect:
+   the 45.002 table of the BSP for SACCH/8 over 102 frames.
+4. **Real-time margin**: in TCH the DSP work takes about 4.2 to 4.6 ms of the
+   4.62 ms frame, which leaves almost no headroom.
+5. Pacer catch-up (`CALYPSO_PACER_RATTRAPAGE`) is not validated for speech.
+6. The "kept in qosmo-dsp" block in `hw/arm/calypso/meson.build` is outdated.
+
+## Repository layout
+
+| Path | Content |
+|---|---|
+| `hw/arm/calypso/` | Calypso platform devices, L1 dispatch, DCCH tap |
+| `hw/arm/calypso/l1-grgsm/` | gr-gsm layer 1 and its registration |
+| `hw/arm/calypso/l1-dsp/` | C54x core (exec, decode, mem, irq, probes), BSP, A5, mailbox, full PCB |
+| `hw/arm/calypso/doc/SONDES.md` | C54x core probes |
+| `include/hw/arm/calypso/` | Public headers (`calypso_l1_ops.h`, `calypso_dsp_pont.h`, ...) |
+| `hw/intc/calypso_inth.c` | Interrupt controller |
+| `contrib/hors-qemu/` | POSIX shims to build `l1-dsp/` outside QEMU |
+| `run.sh`, `run_modules/` | Bench launcher and its numbered steps |
+| `tmux_modules/` | tmux layout of the bench panes |
+| `environnement/` | Bench environment file (`bench.env`) |
+| `cfgs/` | mobile configuration for group runs |
+| `opt-gsm-scripts/` | Helper scripts installed into `/opt/GSM` |
+| `tools/` | `injecteur_bruit.py`, `rapport-run.sh` (run report), `qosmo-launch`, gdb helpers |
+| `install.sh` | Build and install script |
+| `make-overlay.sh`, `tout-en-un.py` | Source overlay and single-file dump helpers |
+| everything else | Upstream QEMU 9.2.4 |
+
+## License
+
+Derived from QEMU 9.2.4: GPL-2.0-or-later (SPDX headers, `COPYING`). The
+repository also carries a GPLv3 `LICENSE` ("qosmo Copyright (C) 2026 Bastien Baranoff").
