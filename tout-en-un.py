@@ -12,10 +12,9 @@ directories into ONE Markdown file, shortened WITHOUT LOSS:
   * ANSI colour codes and carriage returns removed (the only loss, deliberate).
 
     ./tout-en-un.py [dir...]      default: the qosmo overlay (rebuilt by make-overlay.sh
-                                  unless run from the overlay) and the latest /root/banc-max-*
+                                  unless run from the overlay)
     SORTIE=/path.md  EXT="log sh md mmd py txt c h"  SEUIL=3 (minimum group size)
 """
-import glob
 import hashlib
 import os
 import re
@@ -26,7 +25,7 @@ import time
 EXT = os.environ.get("EXT", "log sh md mmd py txt c h").split()
 SEUIL = int(os.environ.get("SEUIL", "3"))
 FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) or md
-SORTIE = os.environ.get("SORTIE") or "/root/tout-en-un-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
+SORTIE = os.environ.get("SORTIE") or "/root/qosmo-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
 AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 DSP_DUMP = re.compile(r"(^calypso_dsp.*\.txt|^dsp-rom-.*\.txt|\.dis)$")   # DSP ROM dumps (not ours, megabytes of hex)
@@ -40,19 +39,16 @@ LANG = {"sh": "bash", "py": "python", "md": "markdown", "mmd": "mermaid", "txt":
 
 
 def dossiers_par_defaut():
-    """The qosmo overlay (only the files specific to qosmo, not vanilla QEMU)
-    and the latest bench run. Run from an overlay, the overlay is this
-    directory; run from the qosmo tree, make-overlay.sh rebuilds
-    ../qosmo-overlay first."""
+    """The qosmo overlay (only the files specific to qosmo, not vanilla QEMU).
+    Run from an overlay, the overlay is this directory; run from the qosmo
+    tree, make-overlay.sh rebuilds ../qosmo-overlay first."""
     ici = os.path.dirname(os.path.realpath(__file__))
     if os.path.exists(os.path.join(ici, "MANIFEST.ajoutes")):
         overlay = ici
     else:
         overlay = os.path.join(os.path.dirname(ici), "qosmo-overlay")
         subprocess.run([os.path.join(ici, "make-overlay.sh"), overlay], check=True, stdout=subprocess.DEVNULL)
-    runs = sorted(glob.glob("/root/banc-max-*"), key=os.path.getmtime)
-    runs = [r for r in runs if os.path.isdir(r)]
-    return [overlay] + ([runs[-1]] if runs else [])
+    return [overlay]
 
 
 
