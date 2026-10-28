@@ -1,33 +1,33 @@
 /*
- * qosmo-launch.c — lanceur C de qemu-system-arm pour la machine Calypso.
+ * qosmo-launch.c — C launcher of qemu-system-arm for the Calypso machine.
  *
- * Compilé DEUX fois, dans le dossier de chaque fork :
+ * Built TWICE, in the directory of each fork:
  *   /opt/GSM/qosmo-dsp/tools/qosmo-launch    -> qosmo-dsp    (-DQOSMO_DSP=1)
  *   /opt/GSM/qosmo-grgsm/tools/qosmo-launch  -> qosmo-grgsm  (-DQOSMO_DSP=0)
- * La source est IDENTIQUE dans les deux dossiers ; le Makefile fixe l'alias,
- * l'arbre QEMU et la saveur. Installé dans /usr/local/bin par `make install`.
+ * The source is IDENTICAL in both directories; the Makefile sets the alias,
+ * the QEMU tree and the flavour. Installed in /usr/local/bin by `make install`.
  *
- * Ce que fait le lanceur, et rien de plus :
- *   1. résout le firmware (-k ELF | dossier | .bin) et ses voisins (.bin pour
- *      osmocon, .map) ; lit les symboles `l1s` et `last_rach` dans l'ELF
- *      (ELF32 ARM) et les exporte comme run_modules/16-fwsyms.sh le fait
- *      avec nm (CALYPSO_L1S_FN_ADDR / CALYPSO_LAST_RACH_FN_ADDR) ;
- *   2. (saveur dsp) résout les 7 ROMs du C54x depuis un dossier ou un préfixe
- *      (-dsp) et les passe en propriétés machine dsp-prom0=… ;
- *   3. expose les sockets et le réseau AVEC LES DÉFAUTS QUI MARCHENT DÉJÀ
- *      (ceux de run.sh / 40-qemu.sh) : moniteur unix, gdbstub ARM tcp::1234,
- *      L1CTL /tmp/osmocom_l2, TRXDv0 udp 0.0.0.0:6702, IQ tee 127.0.0.1:6703 ;
- *      chacun est choisi par une option (--monitor, --gdb, --l1ctl, --bind,
- *      --trx-port, --iq-tee) ;
- *   4. lance QEMU avec `-serial pty -serial pty`, relaie son stderr tel quel
- *      (les modules 41-pty / grep « redirected » continuent de marcher), et
- *      publie des liens STABLES vers les deux pty : <rundir>/modem.pty et
- *      <rundir>/irda.pty — c'est là-dessus qu'on fait osmocon directement ;
- *   5. sur demande (-o) lance osmocon lui-même (-m romload) dès que le pty
- *      modem existe ; transmet SIGINT/SIGTERM à QEMU ; sort avec son code.
+ * What the launcher does, and nothing more:
+ *   1. resolves the firmware (-k ELF | directory | .bin) and its neighbours
+ *      (.bin for osmocon, .map); reads the `l1s` and `last_rach` symbols in the
+ *      ELF (ELF32 ARM) and exports them as run_modules/16-fwsyms.sh does with
+ *      nm (CALYPSO_L1S_FN_ADDR / CALYPSO_LAST_RACH_FN_ADDR);
+ *   2. (dsp flavour) resolves the 7 C54x ROMs from a directory or a prefix
+ *      (-dsp) and passes them as machine properties dsp-prom0=…;
+ *   3. exposes the sockets and the network WITH THE WORKING DEFAULTS (those of
+ *      run.sh / 40-qemu.sh): unix monitor, ARM gdbstub tcp::1234,
+ *      L1CTL /tmp/osmocom_l2, TRXDv0 udp 0.0.0.0:6702, IQ tee 127.0.0.1:6703;
+ *      each is selected by an option (--monitor, --gdb, --l1ctl, --bind,
+ *      --trx-port, --iq-tee);
+ *   4. starts QEMU with `-serial pty -serial pty`, relays its stderr as is
+ *      (the 41-pty modules / grep "redirected" keep working), and publishes
+ *      STABLE links to the two ptys: <rundir>/modem.pty and <rundir>/irda.pty
+ *      — osmocon is run directly on those;
+ *   5. on request (-o) starts osmocon itself (-m romload) as soon as the modem
+ *      pty exists; forwards SIGINT/SIGTERM to QEMU; exits with its code.
  *
- * Tout argument inconnu commençant par `-` (et sa valeur si elle ne commence
- * pas par `-`) est transmis à QEMU. Après `--`, tout va à QEMU.
+ * Any unknown argument starting with `-` (and its value if it does not start
+ * with `-`) is passed to QEMU. After `--`, everything goes to QEMU.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -70,25 +70,23 @@
 #define QOSMO_VERSION "1.0"
 #endif
 
-/* ---- défauts = ce qui marche déjà (run.sh / paths.env / 40-qemu.sh) ---- */
+/* ---- defaults = the working values (run.sh / paths.env / 40-qemu.sh) ---- */
 #define DEF_QEMU        QOSMO_TREE "/build/qemu-system-arm"
 #define DEF_FIRMWARE    QOSMO_GSM_ROOT "/firmware/board/compal_e88/layer1.highram.elf"
 #define DEF_DSP_DIR     QOSMO_GSM_ROOT
 #define DEF_OSMOCON     QOSMO_GSM_ROOT "/osmocom-bb/src/host/osmocon/osmocon"
 #define DEF_CPU         "arm946"
 #define DEF_GDB         "1234"
-/* [2026-09-05] LA MACHINE calypso N A PAS D ECRAN, QEMU LUI EN OUVRAIT UN.
- * Sans -display, QEMU prend son defaut graphique (SDL est compile dans ce
- * fork : `qemu-system-arm -display help` le liste) et, display actif, il
- * cable ses peripheriques par defaut sur des consoles virtuelles. Les deux
- * serie sont deja prises (-serial pty x2) et le moniteur aussi (-monitor
- * unix:) : il ne reste que le port parallele. On obtenait une fenetre SDL
- * vide intitulee « parallel0 », qui capte le clavier, et devant laquelle on
- * attend un boot qui, lui, se passe sur les pty. Sans DISPLAY
- * (osmo-banc.service au demarrage) c est pire : QEMU ne peut pas ouvrir SDL
- * et SORT. Le modele n a rien a afficher : --display none par defaut.
- * `--display sdl` (ou -display/-nographic apres --) rend l ancien
- * comportement. */
+/* THE calypso MACHINE HAS NO SCREEN. Without -display, QEMU takes its
+ * graphical default (SDL is built into this fork: `qemu-system-arm -display
+ * help` lists it) and, with a display active, wires its default devices to
+ * virtual consoles. Both serial ports are already taken (-serial pty x2) and
+ * the monitor too (-monitor unix:): only the parallel port remains, which
+ * would give an empty SDL window named "parallel0" that grabs the keyboard,
+ * while the boot happens on the ptys. Without DISPLAY (osmo-banc.service at
+ * boot) QEMU cannot open SDL and EXITS. The model has nothing to display:
+ * --display none by default. `--display sdl` (or -display/-nographic after
+ * --) gives the SDL behaviour. */
 #define DEF_DISPLAY     "none"
 #define DEF_L1CTL       "/tmp/osmocom_l2"
 #define DEF_BIND        "0.0.0.0"
@@ -98,7 +96,7 @@
 #define DEF_OSMOCON_MODEL "romload"
 #define DEF_OSMOCON_DELAY "100"
 #define DEF_OSMOCON_DEBUG "tr"
-#define GRGSM_GSMTAP_PORT "4730"   /* fixe dans calypso_l1_grgsm.c */
+#define GRGSM_GSMTAP_PORT "4730"   /* fixed in calypso_l1_grgsm.c */
 
 static const char *g_alias = QOSMO_ALIAS;
 
@@ -171,8 +169,8 @@ static const char *env_nonempty(const char *n)
     return (v && *v) ? v : NULL;
 }
 
-/* Pose une variable SEULEMENT si elle est absente ou vide : l'environnement
- * hérité (run.sh, opérateur) garde la main, sauf option explicite. */
+/* Sets a variable ONLY if it is absent or empty: the inherited environment
+ * (run.sh, operator) keeps precedence, unless an explicit option is given. */
 static void env_default(const char *n, const char *v)
 {
     if (!env_nonempty(n) && v && *v) setenv(n, v, 1);
@@ -219,10 +217,10 @@ static void argv_push(argv_t *a, const char *s)
     a->v[a->n] = NULL;
 }
 
-/* ------------------------------------------------------ symboles ELF32 */
-/* Cherche `names[i]` dans la table des symboles d'un ELF32 little-endian et
- * renvoie sa valeur dans addrs[i] (found[i]=true). Équivalent de
- * `nm ELF | awk '$3==nom'` de 16-fwsyms.sh, sans dépendre de binutils. */
+/* ------------------------------------------------------- ELF32 symbols */
+/* Looks up `names[i]` in the symbol table of a little-endian ELF32 and
+ * returns its value in addrs[i] (found[i]=true). Equivalent of
+ * `nm ELF | awk '$3==name'` of 16-fwsyms.sh, without depending on binutils. */
 static int elf32_lookup(const char *path, const char **names, int n,
                         uint32_t *addrs, bool *found)
 {
@@ -270,7 +268,7 @@ out:
     return rc;
 }
 
-/* --------------------------------------------------------- ROMs du DSP */
+/* ------------------------------------------------------------ DSP ROMs */
 static const char *rom_tokens[] = { "PROM0", "PROM1", "PROM2", "PROM3", "DROM", "PDROM", "Registers" };
 static const char *rom_props[]  = { "dsp-prom0", "dsp-prom1", "dsp-prom2", "dsp-prom3", "dsp-drom", "dsp-pdrom", "dsp-registers" };
 static const char *rom_envs[]   = { "DSP_PROM0", "DSP_PROM1", "DSP_PROM2", "DSP_PROM3", "DSP_DROM", "DSP_PDROM", "DSP_REGISTERS" };
@@ -281,8 +279,8 @@ static int strcasestr_has(const char *hay, const char *needle)
     return strcasestr(hay, needle) != NULL;
 }
 
-/* Cherche la ROM `tok` dans `dir` : noms connus d'abord, puis balayage
- * (tout fichier dont le nom contient "<tok>.bin", insensible à la casse). */
+/* Looks for the ROM `tok` in `dir`: known names first, then a scan (any file
+ * whose name contains "<tok>.bin", case-insensitive). */
 static char *find_rom_in_dir(const char *dir, const char *tok)
 {
     const char *pat[] = { "%s/calypso_dsp.%s.bin", "%s/%s.bin", "%s/.%s.bin",
@@ -299,7 +297,7 @@ static char *find_rom_in_dir(const char *dir, const char *tok)
     char *needle = xasprintf("%s.bin", tok);
     while ((e = readdir(d))) {
         if (!strcasestr_has(e->d_name, needle)) continue;
-        /* évite PDROM quand on cherche DROM */
+        /* avoids PDROM when looking for DROM */
         if (strcmp(tok, "DROM") == 0 && strcasestr_has(e->d_name, "PDROM")) continue;
         char *p = xasprintf("%s/%s", dir, e->d_name);
         if (is_readable_file(p)) { best = p; break; }
@@ -310,8 +308,8 @@ static char *find_rom_in_dir(const char *dir, const char *tok)
     return best;
 }
 
-/* `spec` = dossier, ou préfixe/fichier d'une ROM (ex. /x/calypso_dsp.PROM0.bin
- * ou /x/calypso_dsp.). Remplit roms[]. Renvoie le nombre trouvé. */
+/* `spec` = directory, or prefix/file of a ROM (e.g. /x/calypso_dsp.PROM0.bin
+ * or /x/calypso_dsp.). Fills roms[]. Returns the number found. */
 static int resolve_roms(const char *spec, char **roms)
 {
     int n = 0;
@@ -322,7 +320,7 @@ static int resolve_roms(const char *spec, char **roms)
         }
         return n;
     }
-    /* préfixe : coupe au premier jeton connu s'il est présent */
+    /* prefix: cut at the first known token if present */
     char *prefix = xstrdup(spec);
     for (int i = 0; i < N_ROMS; i++) {
         char *hit = strcasestr(prefix, rom_tokens[i]);
@@ -334,8 +332,8 @@ static int resolve_roms(const char *spec, char **roms)
         else { free(p); roms[i] = NULL; }
     }
     if (n == 0) {
-        /* peut-être un fichier dans un dossier aux noms exotiques : on
-         * retombe sur le dossier */
+        /* maybe a file in a directory with exotic names: fall back to the
+         * directory */
         char *dup = xstrdup(spec);
         char *dir = dirname(dup);
         for (int i = 0; i < N_ROMS; i++) {
@@ -348,14 +346,14 @@ static int resolve_roms(const char *spec, char **roms)
     return n;
 }
 
-/* --------------------------------------------------------------- réseau */
+/* -------------------------------------------------------------- network */
 static bool is_ipv4_literal(const char *s)
 {
     struct in_addr a;
     return inet_aton(s, &a) != 0;
 }
 
-/* `spec` = IPv4 littérale, ou nom d'interface (eth0, lo, …) -> IPv4 */
+/* `spec` = literal IPv4, or interface name (eth0, lo, …) -> IPv4 */
 static char *resolve_bind(const char *spec)
 {
     if (is_ipv4_literal(spec)) return xstrdup(spec);
@@ -374,8 +372,8 @@ static char *resolve_bind(const char *spec)
     return res;
 }
 
-/* `spec` -> argument de `-gdb` : off | PORT | ADDR:PORT | IFACE:PORT | raw
- * (contient déjà "tcp:" ou "unix:"). Renvoie NULL pour off. */
+/* `spec` -> argument of `-gdb`: off | PORT | ADDR:PORT | IFACE:PORT | raw
+ * (already contains "tcp:" or "unix:"). Returns NULL for off. */
 static char *gdb_spec(const char *spec)
 {
     if (!spec || !*spec || !strcmp(spec, "off") || !strcmp(spec, "none") || !strcmp(spec, "0"))
@@ -398,13 +396,13 @@ static char *gdb_spec(const char *spec)
 /* ------------------------------------------------------------- options */
 typedef struct {
     const char *qemu, *firmware, *fw_bin, *cpu, *rundir, *monitor, *gdb, *display;
-    const char *icount, *asm_log;   /* -icount SPEC ; -d in_asm -D FICHIER */
+    const char *icount, *asm_log;   /* -icount SPEC ; -d in_asm -D FILE */
     const char *l1ctl, *bind, *trx_port, *iq_tee;
     const char *pty_link, *irda_link;
     const char *dsp_spec;
     const char *osmocon_bin, *osmocon_model, *osmocon_delay, *osmocon_debug, *osmocon_log;
     bool osmocon, dry_run, quiet, no_pty_link, no_monitor;
-    argv_t extra;   /* args QEMU en plus */
+    argv_t extra;   /* extra QEMU args */
     argv_t envs;    /* -e VAR=VAL */
 } opts_t;
 
@@ -484,7 +482,7 @@ static void usage(FILE *f)
         g_alias, QOSMO_DSP ? " -dsp /opt/GSM" : "", g_alias, DEF_L1CTL);
 }
 
-/* --opt VAL | --opt=VAL | -oVAL(non) ; renvoie la valeur, avance *i */
+/* --opt VAL | --opt=VAL | -oVAL(no); returns the value, advances *i */
 static const char *optval(int argc, char **argv, int *i, const char *eq)
 {
     if (eq) return eq + 1;
@@ -548,7 +546,7 @@ static void parse_args(int argc, char **argv, opts_t *o)
         else if (IS("-n", "--dry-run", NULL)) o->dry_run = true;
         else if (IS("-q", "--quiet", NULL))   o->quiet = true;
         else if (a[0] == '-' && a[1]) {
-            /* inconnu -> QEMU, avec sa valeur éventuelle */
+            /* unknown -> QEMU, with its value if any */
             argv_push(&o->extra, a);
             if (i + 1 < argc && argv[i + 1][0] != '-') argv_push(&o->extra, argv[++i]);
         }
@@ -592,7 +590,7 @@ static pid_t spawn_osmocon(const opts_t *o, const char *pty)
         say("image .bin pour osmocon illisible : %s (--bin)", o->fw_bin ? o->fw_bin : "(aucune)");
         return 0;
     }
-    /* comme 50-osmocon.sh : la socket d'un run précédent ferait refuser le bind */
+    /* like 50-osmocon.sh: the socket of a previous run would make the bind fail */
     unlink(o->l1ctl);
     pid_t p = fork();
     if (p < 0) { say("fork osmocon : %s", strerror(errno)); return 0; }
@@ -616,7 +614,7 @@ int main(int argc, char **argv)
     opts_t o = { 0 };
     parse_args(argc, argv, &o);
 
-    /* -- environnement posé par -e, AVANT les défauts (il gagne) -- */
+    /* -- environment set by -e, BEFORE the defaults (it wins) -- */
     for (int i = 0; i < o.envs.n; i++) {
         char *kv = xstrdup(o.envs.v[i]);
         char *e = strchr(kv, '=');
@@ -651,11 +649,11 @@ int main(int argc, char **argv)
         if (!is_readable_file(b) && env_nonempty("FIRMWARE_BIN")) { free(b); b = xstrdup(env_nonempty("FIRMWARE_BIN")); }
         o.fw_bin = b;
     }
-    /* Garde-fou : sous QEMU le stub romload de hw/char/calypso_uart.c IGNORE le
-     * payload du .bin (le firmware qui tourne est l'ELF de -kernel), le .bin ne
-     * sert qu'a la poignee de main d'osmocon. Mais FIRMWARE_BIN (run.sh) est
-     * pose independamment de FIRMWARE_ELF : un .bin d'un autre build passe
-     * inapercu, et sur un VRAI telephone ce serait bien lui qui tournerait. */
+    /* Safeguard: under QEMU the romload stub of hw/char/calypso_uart.c IGNORES
+     * the .bin payload (the running firmware is the ELF of -kernel), the .bin
+     * only serves the osmocon handshake. But FIRMWARE_BIN (run.sh) is set
+     * independently of FIRMWARE_ELF: a .bin from another build would go
+     * unnoticed, and on a REAL phone that is the one that would run. */
     bool fw_mismatch = false;
     {
         char *sib = xasprintf("%s.bin", stem);
@@ -685,14 +683,14 @@ int main(int argc, char **argv)
     if (o.no_monitor || (o.monitor && (!strcmp(o.monitor, "none") || !strcmp(o.monitor, "off")))) o.monitor = NULL, o.no_monitor = true;
     else if (!o.monitor) o.monitor = xasprintf("%s/qemu-monitor.sock", o.rundir);
     if (!o.l1ctl) o.l1ctl = env_nonempty("L1CTL_SOCK") ? env_nonempty("L1CTL_SOCK") : DEF_L1CTL;
-    env_force("L1CTL_SOCK", o.l1ctl);           /* lu par calypso_soc.c (fork dsp) */
+    env_force("L1CTL_SOCK", o.l1ctl);           /* read by calypso_soc.c (dsp fork) */
     env_default("CALYPSO_L1CTL_SOCK", o.l1ctl);
     if (!o.no_pty_link) {
         if (!o.pty_link)  o.pty_link  = xasprintf("%s/modem.pty", o.rundir);
         if (!o.irda_link) o.irda_link = xasprintf("%s/irda.pty", o.rundir);
     }
 
-    /* -- réseau -- */
+    /* -- network -- */
     char *gdb = gdb_spec(o.gdb ? o.gdb : (env_nonempty("CALYPSO_GDB_PORT") ? env_nonempty("CALYPSO_GDB_PORT") : DEF_GDB));
     if (gdb) { const char *p = strrchr(gdb, ':'); if (p) env_force("CALYPSO_GDB_PORT", p + 1); }
     char *bind_addr = NULL;
@@ -712,7 +710,7 @@ int main(int argc, char **argv)
         say("avertissement : --bind/--trx-port/--iq-tee sont sans effet sur le fork gr-gsm (aucune écoute configurable dans son modèle)");
     }
 
-    /* -- ROMs DSP -- */
+    /* -- DSP ROMs -- */
     char *roms[N_ROMS] = { 0 };
     char *mach = xstrdup("calypso");
     if (QOSMO_DSP) {
@@ -757,9 +755,9 @@ int main(int argc, char **argv)
     if (!o.osmocon_debug) o.osmocon_debug = env_nonempty("OSMOCON_DEBUG") ? env_nonempty("OSMOCON_DEBUG") : DEF_OSMOCON_DEBUG;
     if (!o.osmocon_log)   o.osmocon_log   = xasprintf("%s/osmocon.log", o.rundir);
 
-    /* -- icount / trace in_asm (désactivés par défaut) --
-     * $QOSMO_ICOUNT=auto|shift=N,… ; $QOSMO_ASM=1 (fichier par défaut) ou un chemin.
-     * « off » (option ou variable) coupe. */
+    /* -- icount / in_asm trace (disabled by default) --
+     * $QOSMO_ICOUNT=auto|shift=N,… ; $QOSMO_ASM=1 (default file) or a path.
+     * "off" (option or variable) disables. */
     if (!o.icount)  o.icount  = env_nonempty("QOSMO_ICOUNT");
     if (!o.asm_log) o.asm_log = env_nonempty("QOSMO_ASM");
     if (o.icount && (!*o.icount || !strcmp(o.icount, "off") || !strcmp(o.icount, "0"))) o.icount = NULL;
@@ -767,7 +765,7 @@ int main(int argc, char **argv)
     if (o.asm_log && (!*o.asm_log || !strcmp(o.asm_log, "1")))
         o.asm_log = xasprintf("%s/qemu-asm.log", o.rundir);
 
-    /* -- ligne de commande QEMU -- */
+    /* -- QEMU command line -- */
     argv_t qa = { 0 };
     argv_push(&qa, o.qemu);
     bool user_M = false, user_cpu = false, user_serial = false, user_kernel = false;
@@ -784,11 +782,10 @@ int main(int argc, char **argv)
     }
     if (!user_M)   { argv_push(&qa, "-M"); argv_push(&qa, mach); }
     if (!user_cpu) { argv_push(&qa, "-cpu"); argv_push(&qa, o.cpu); }
-    /* -display none : aucune fenetre. -parallel none : et plus de chardev
-     * « parallel0 » du tout (`info chardev` le montrait encore en `vc`
-     * malgre -display none). La machine calypso n a pas de port parallele
-     * a modeliser : ce peripherique par defaut n existait que pour porter
-     * la console virtuelle qu on vient de supprimer. */
+    /* -display none: no window. -parallel none: no "parallel0" chardev at all
+     * (`info chardev` would still show it as `vc` despite -display none). The
+     * calypso machine has no parallel port to model: that default device only
+     * exists to carry the virtual console removed above. */
     if (!user_display)  { argv_push(&qa, "-display"); argv_push(&qa, o.display); }
     if (!user_parallel && !strcmp(o.display, "none")) { argv_push(&qa, "-parallel"); argv_push(&qa, "none"); }
     if (gdb)       { argv_push(&qa, "-gdb"); argv_push(&qa, gdb); }
@@ -799,7 +796,7 @@ int main(int argc, char **argv)
     if (o.asm_log && !user_d) { argv_push(&qa, "-d"); argv_push(&qa, "in_asm"); argv_push(&qa, "-D"); argv_push(&qa, o.asm_log); }
     for (int i = 0; i < o.extra.n; i++) argv_push(&qa, o.extra.v[i]);
 
-    /* -- bannière -- */
+    /* -- banner -- */
     if (!o.quiet || o.dry_run) {
         say("fork      : %s  (%s)", QOSMO_TREE, QOSMO_DSP ? "DSP C54x émulé sur la mask-ROM TI" : "L1 gr-gsm, DSP non émulé");
         say("qemu      : %s", o.qemu);
@@ -852,11 +849,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* -- lancement : stdout+stderr de QEMU dans un tube, relayés et scrutés -- */
+    /* -- launch: QEMU's stdout+stderr in a pipe, relayed and scanned -- */
     int pfd[2];
     if (pipe(pfd) < 0) die("pipe : %s", strerror(errno));
     struct sigaction sa = { 0 };
-    sa.sa_handler = on_sig;           /* pas SA_RESTART : read() rend EINTR */
+    sa.sa_handler = on_sig;           /* no SA_RESTART: read() returns EINTR */
     sigaction(SIGINT, &sa, NULL); sigaction(SIGTERM, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     struct sigaction sc = { 0 };
     sc.sa_handler = on_sig; sc.sa_flags = SA_NOCLDSTOP;
@@ -866,9 +863,9 @@ int main(int argc, char **argv)
     if (g_qemu < 0) die("fork : %s", strerror(errno));
     if (g_qemu == 0) {
         close(pfd[0]);
-        /* QEMU annonce ses pty sur STDOUT (« char device redirected to … »)
-         * et ses sondes sur STDERR : on capture les deux, comme le
-         * `>>qemu.log 2>&1` de 40-qemu.sh. */
+        /* QEMU announces its ptys on STDOUT ("char device redirected to …")
+         * and its probes on STDERR: both are captured, like the
+         * `>>qemu.log 2>&1` of 40-qemu.sh. */
         dup2(pfd[1], 1);
         dup2(pfd[1], 2);
         close(pfd[1]);
@@ -905,8 +902,8 @@ int main(int argc, char **argv)
         }
         ssize_t n = read(pfd[0], buf, sizeof buf);
         if (n < 0) { if (errno == EINTR) continue; break; }
-        if (n == 0) break;                          /* QEMU a fermé stderr */
-        (void)!write(2, buf, n);                    /* relais tel quel */
+        if (n == 0) break;                          /* QEMU closed stderr */
+        (void)!write(2, buf, n);                    /* relayed as is */
         for (ssize_t i = 0; i < n; i++) {
             char c = buf[i];
             if (c == '\n') {
@@ -956,7 +953,7 @@ int main(int argc, char **argv)
     }
     if (g_osmocon > 0) { kill(g_osmocon, SIGTERM); waitpid(g_osmocon, NULL, 0); g_osmocon = 0; }
 
-    /* ménage : liens et pid ; la socket L1CTL est laissée (osmocon/mobile la gèrent) */
+    /* cleanup: links and pid; the L1CTL socket is left (osmocon/mobile manage it) */
     if (o.pty_link) unlink(o.pty_link);
     if (o.irda_link) unlink(o.irda_link);
     { char *p = xasprintf("%s/%s.pid", o.rundir, g_alias); unlink(p); free(p);

@@ -35,28 +35,16 @@ extern CalypsoUARTState *g_uart_irda;
 
 #define FRAME_IRQ_PULSE_NS     1000000
 
-/* [2026-09-22] PERIODE DU COUP DE POUCE AU CPU -- suspect no 1 du retard.
+/* CPU KICK PERIOD.
  *
- * cpu_kick() fait `cpu_exit(first_cpu)` + `qemu_notify_event()` : c'est ce qui
- * rend la main a la boucle principale, donc ce qui permet de SERVIR le timer
- * TDMA. Tant que le CPU ne sort pas, le timer peut bien etre echu, personne ne
- * le regarde. La periode valait 5 ms, soit PLUS qu'une trame GSM (4,615 ms) :
- * la coincidence etait frappante : 5 ms de kick, 5,11 ms mesurees par trame.
- *
- * MESURE (2026-09-22) : HYPOTHESE FAUSSE ELLE AUSSI. Balayage sur un facteur
- * 17 -- 5,00 ms : 195,8 tr/s ; 1,15 ms : 195,9 ; 0,58 ms : 195,8 ;
- * 0,29 ms : 195,9. Parfaitement plat. (Verifie dans /proc/<qemu>/environ que
- * la variable atteignait bien QEMU : elle y etait.)
- *
- * Restent donc, pour expliquer les 5,11 ms : le TRAVAIL lui-meme. Sans
- * pas-a-pas QEMU seul fait 588 tr/s (1,70 ms/trame) ; le pas-a-pas serialise
- * l'ARM et le DSP au lieu de les laisser se recouvrir. Le reste, ~3,4 ms,
- * c'est l'interpreteur C54x qui execute la trame. INSNS n'y change rien (plat
- * de 60000 a 30000) parce que c'est un PLAFOND : la ROM finit son travail et
- * passe en idle bien avant, donc baisser le plafond ne retire aucun travail.
- * La piste suivante est donc la VITESSE de l'interpreteur, pas son budget.
- * CALYPSO_CPU_KICK_NS reste reglable pour mesurer. */
-#define CPU_KICK_NS_DEFAUT     5000000    /* mesure : sans effet, on garde l'original */
+ * cpu_kick() does `cpu_exit(first_cpu)` + `qemu_notify_event()`: that is what
+ * hands control back to the main loop, hence what lets the TDMA timer be
+ * SERVED. As long as the CPU does not exit, an expired timer is seen by nobody.
+ * The period has no measurable effect on the frame rate (flat from 5 ms down
+ * to 0.29 ms): the per-frame cost is the work itself (lock-step serialises
+ * the ARM and the DSP, and the C54x interpreter executes the frame).
+ * CALYPSO_CPU_KICK_NS remains tunable for measurements. */
+#define CPU_KICK_NS_DEFAUT     5000000    /* no measurable effect; default kept */
 static int64_t cpu_kick_ns(void)
 {
     static int64_t ns;
@@ -71,29 +59,20 @@ static int64_t cpu_kick_ns(void)
 }
 #define CPU_KICK_NS            cpu_kick_ns()
 
-/* [2026-09-22] QUANTUM DE RE-ESSAI DU PAS-A-PAS -- la cause du retard de 9,7 %.
+/* LOCK-STEP RETRY QUANTUM.
  *
- * Quand l1_sync de l'ARM ou le DSP n'a pas fini, on ne bloque pas : on
- * replanifie le tick TDMA un peu plus tard et on repasse. Le « un peu plus
- * tard » valait GSM_TDMA_NS/16 = 288 us, et /8 = 577 us pour le DSP. Or ce
- * qu'on attend se termine en DIZAINES de microsecondes : on payait donc, a
- * chaque trame, un arrondi pouvant aller jusqu'a 288 us, une a deux fois.
+ * When the ARM's l1_sync or the DSP has not finished, we do not block: the
+ * TDMA tick is rescheduled a little later and we come back. That "little
+ * later" is GSM_TDMA_NS/16 = 288 us. The quantum has no measurable effect on
+ * the frame rate (/16 and /64 give the same rate).
+ * What matters: a late frame must not be dropped. osmo-bts-trx cannot follow
+ * a slow clock (its drift filter is an empty TODO, scheduler_trx.c:571); it
+ * resynchronises and produces nothing meanwhile, i.e. gaps of ~200 frames.
  *
- * MESURE (2026-09-22) : HYPOTHESE FAUSSE. Balayage du quantum sur un facteur
- * 4 -- /16 (288 us) : 195,7 tr/s ; /64 (72 us) : 195,5. Aucun effet. Le
- * quantum n'est PAS la cause du retard de 9,7 %. On garde la valeur d'origine
- * et la molette, qui reste utile pour mesurer.
- * Ce qui suit reste vrai et important : tdma_pacer() rattrape un retard en SAUTANT une trame
- * (`while (target <= now) target += GSM_TDMA_NS`), ce depassement ne se voit
- * nulle part : il se transforme en trames perdues. En aval, osmo-bts-trx ne
- * sait pas suivre une horloge lente (son filtre de derive est un TODO vide,
- * scheduler_trx.c:571), il resynchronise, et pendant ce temps il ne produit
- * rien : des coupures de ~200 trames d'affilee.
- *
- * Le budget d'attente TOTAL est conserve : les plafonds de re-essai sont
- * mis a l'echelle du meme facteur (voir PONT_ATTENTES_MAX).
- * CALYPSO_PONT_RETRY_DIV permet de mesurer d'autres valeurs sans recompiler. */
-#define PONT_RETRY_DIV_DEFAUT  16        /* mesure : sans effet, on garde l'original */
+ * The TOTAL wait budget is preserved: the retry ceilings are scaled by the
+ * same factor (see PONT_ATTENTES_MAX).
+ * CALYPSO_PONT_RETRY_DIV allows measuring other values without rebuilding. */
+#define PONT_RETRY_DIV_DEFAUT  16        /* no measurable effect; default kept */
 static int pont_retry_div(void)
 {
     static int div;
@@ -107,7 +86,7 @@ static int pont_retry_div(void)
     return div;
 }
 #define PONT_RETRY_NS      ((int64_t)GSM_TDMA_NS / pont_retry_div())
-/* meme budget mural qu'avec 256 essais de GSM_TDMA_NS/16 */
+/* same wall-clock budget as 256 retries of GSM_TDMA_NS/16 */
 #define PONT_ATTENTES_MAX  (256 * pont_retry_div() / 16)
 #define IDLE_PC_LO             0x00823000u
 #define IDLE_PC_HI             0x00826000u
@@ -134,7 +113,7 @@ typedef struct CalypsoTRX {
     uint8_t dsp_page;
     bool bl_booted;
     unsigned bl_polls;
-    uint32_t bl_lu_fn;          /* trame de la derniere lecture de DOWNLOAD_STATUS par l'ARM (verrou ARM) */
+    uint32_t bl_lu_fn;          /* frame of the ARM's last DOWNLOAD_STATUS read (ARM lock) */
     MemoryRegion tpu_iomem;
     MemoryRegion tpu_ram_iomem;
     uint16_t tpu_regs[CALYPSO_TPU_SIZE / 2];
@@ -168,21 +147,20 @@ typedef struct CalypsoTRX {
     bool     go_inutile;        /* single-phase DSP answered a final DONE already */
     uint64_t eoi_cible;         /* frame_eoi to reach before the TICK goes out */
     unsigned eoi_attentes, eoi_timeouts;
-    unsigned eoi_longues;       /* [2026-09-30] attentes de l1_sync au-dela de 256 essais */
+    unsigned eoi_longues;       /* l1_sync waits that went beyond 256 retries */
     uint8_t burst_ring[8];
     unsigned burst_w, burst_r;
     uint16_t burst_cur;
     uint32_t burst_last_fn;
-    /* [2026-09-21] Reference de requete de l'IMMEDIATE ASSIGNMENT, cf.
-     * pont_reqref_corrigee() : la RA de la derniere ecriture de d_rach, et la
-     * trame que le firmware a memorisee pour chacune (son last_rach, relevee
-     * une fois par trame). */
+    /* Request reference of the IMMEDIATE ASSIGNMENT, see pont_reqref_corrigee():
+     * the RA of the last d_rach write, and the frame the firmware memorised for
+     * each one (its last_rach, sampled once per frame). */
     uint8_t  rach_ra;
     bool     rach_ra_vue;
     uint32_t rach_fn[256];
-    uint8_t  rach_file[8];       /* RA ecrites, en attente de leur RACH_CONF */
+    uint8_t  rach_file[8];       /* written RAs, waiting for their RACH_CONF */
     unsigned rach_file_w, rach_file_r;
-    /* Canal dedie a annoncer au DSP au prochain TICK (PONT_DCCH). */
+    /* Dedicated channel to announce to the DSP at the next TICK (PONT_DCCH). */
     bool     dcch_a_dire;
     uint8_t  dcch_tn, dcch_ss;
     int      dcch_genre;
@@ -324,33 +302,31 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
     calypso_l1_disable("DSP externe");
 }
 
-/* ── Reference de requete de l'IMMEDIATE ASSIGNMENT (montage DSP) ────────
+/* ── Request reference of the IMMEDIATE ASSIGNMENT (DSP setup) ───────────
  *
- * Le mobile n'accepte un IMM ASS que si sa reference de requete correspond
- * EXACTEMENT a ce que SA couche 1 lui a confirme : gsm48_match_ra()
- * (osmocom-bb gsm48_rr.c:3359) compare la RA *et* T1'/T2/T3, et journalise
- * sinon « request %02x matches but not frame number ».
+ * The mobile accepts an IMM ASS only if its request reference matches
+ * EXACTLY what ITS layer 1 confirmed: gsm48_match_ra() (osmocom-bb
+ * gsm48_rr.c:3359) compares the RA *and* T1'/T2/T3, and otherwise logs
+ * "request %02x matches but not frame number".
  *
- * Or le banc n'emet pas l'access-burst a la trame ou le firmware a cru
- * l'emettre : pont.py le programme sur SA propre horloge (pont/uplink.py,
- * _poll_rach -> _next_fn(4, ...)), plusieurs trames plus tard. La BTS
- * horodate donc la reference avec une autre trame, et le mobile jette
- * l'assignation. Mesure du 2026-09-21 sur le banc reel : RACH publie
- * ra=0x0d, IMM ASS revenue avec la meme RA mais T1'=3 T2=9 T3=35, et le
- * mobile est reste en « connection pending », sans jamais poser de tache
- * SDCCH montante (/dev/shm/calypso_sdcch_ul jamais cree) ; cote BSC, douze
- * lchan SDCCH ouverts puis « lchan allocation failed ... Timeout ».
+ * The bench does not transmit the access burst in the frame the firmware
+ * believes it did: pont.py schedules it on ITS own clock (pont/uplink.py,
+ * _poll_rach -> _next_fn(4, ...)), several frames later. The BTS therefore
+ * stamps the reference with another frame and the mobile discards the
+ * assignment (it stays in "connection pending", never sets up an uplink
+ * SDCCH task; on the BSC side, SDCCH lchans end in "lchan allocation
+ * failed ... Timeout").
  *
- * La couche 1 gr-gsm reglait deja exactement ca en reecrivant les octets 8-9
- * du bloc (l1-grgsm/calypso_l1_grgsm.c:836-845, feed_agch). Avec un DSP
- * externe elle est desactivee : on refait la meme chose ici, sur la lecture
- * ARM du mot concerne de a_cd, a partir de « last_rach » du firmware — la
- * trame que le firmware a lui-meme memorisee et remontee en L1CTL_RACH_CONF.
+ * The gr-gsm layer 1 fixes this by rewriting bytes 8-9 of the block
+ * (l1-grgsm/calypso_l1_grgsm.c:836-845, feed_agch). With an external DSP it
+ * is disabled, so the same thing is done here, on the ARM read of the
+ * relevant a_cd word, from the firmware's "last_rach" — the frame the
+ * firmware itself memorised and reported in L1CTL_RACH_CONF.
  *
- * On ne corrige que si la RA de l'assignation est celle de la derniere
- * ecriture de d_rach : sinon l'assignation repond a une tentative plus
- * ancienne que last_rach, et fabriquer une correspondance serait pire que
- * l'echec. MONTANT_REQREF=0 desactive la correction.
+ * The fix is only applied if the assignment's RA is the one of the last
+ * d_rach write: otherwise the assignment answers an attempt older than
+ * last_rach, and forging a match would be worse than the failure.
+ * MONTANT_REQREF=0 disables the correction.
  */
 static uint32_t pont_last_rach_fn(void)
 {
@@ -371,24 +347,19 @@ static uint32_t pont_last_rach_fn(void)
     return le32_to_cpu(fn);
 }
 
-/* Appariement RA -> trame d'emission.
+/* RA -> transmit frame pairing.
  *
- * [2026-09-21] Premiere version : relever last_rach.fn une fois par trame et
- * l'attribuer a la derniere RA ecrite. Mesure sur le banc : trois « IMM ASS
- * ra=0x0c : aucune trame memorisee » d'affilee. En rafale, le firmware ecrit
- * le d_rach de la tentative suivante AVANT que last_rach n'ait bouge pour la
- * precedente : la trame partait alors dans la mauvaise case et la RA d'avant
- * n'en avait aucune.
- *
- * Deuxieme version, exacte : les RA sont mises en file a l'ecriture de
- * d_rach, et chaque L1CTL_RACH_CONF (vu par calypso_dcch_tap.c dans le flux
- * sercomm) en depile une. C'est le meme appariement que fait le mobile, qui
- * range cr_ra et le fn du RACH_CONF ensemble dans cr_hist -- et c'est
- * exactement la valeur que gsm48_match_ra() comparera. */
-/* calypso_dcch_tap.c vient d'apprendre le canal dedie du mobile. On ne
- * l'envoie pas tout de suite : le protocole du pont est synchrone, et un
- * message glisse pendant l'attente d'un PONT_GO serait ignore par le DSP.
- * Il part juste avant le prochain TICK. */
+ * The RAs are queued when d_rach is written, and every L1CTL_RACH_CONF (seen
+ * by calypso_dcch_tap.c in the sercomm stream) dequeues one. In a burst of
+ * attempts the firmware writes the d_rach of the next attempt BEFORE
+ * last_rach has moved for the previous one, so sampling last_rach.fn once per
+ * frame would attribute the frame to the wrong RA. The queue is the same
+ * pairing the mobile does, which stores cr_ra and the RACH_CONF fn together in
+ * cr_hist -- exactly the value gsm48_match_ra() will compare. */
+/* calypso_dcch_tap.c has just learnt the mobile's dedicated channel. It is not
+ * sent right away: the bridge protocol is synchronous, and a message slipped
+ * in while waiting for a PONT_GO would be ignored by the DSP. It goes out
+ * just before the next TICK. */
 void calypso_trx_dcch(int genre, int ss, int tn)
 {
     CalypsoTRX *s = g_trx;
@@ -427,17 +398,16 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
         const char *e = getenv("MONTANT_REQREF");
         actif = (e && *e == '0') ? 0 : 1;
     }
-    /* [2026-10-15] MONTANT_REQREF=0 (profil ROM max) : on compare et on journalise
-     * toujours, mais on ne reecrit plus rien -- la reference de la BTS arrive au
-     * firmware telle quelle, comme sur un vrai telephone (s'il ne la reconnait
-     * pas, il refait un RACH). La couverture garde ainsi sa preuve ROM. */
+    /* MONTANT_REQREF=0 (max ROM profile): always compare and log, but never
+     * rewrite -- the BTS reference reaches the firmware as is, like on a real
+     * phone (if it does not recognise it, it sends another RACH). */
     if (woff != API_NDB + NDB_A_CD + 14) {
         return false;
     }
 
-    /* a_cd : mot 0 = etat, les 23 octets L2 commencent au mot 3 (octet +6).
-     * L3 = [pseudo-longueur, PD, type, ...] -> 06 3f = IMMEDIATE ASSIGNMENT,
-     * la RA est l'octet 7 et la reference de requete les octets 8-9. */
+    /* a_cd: word 0 = status, the 23 L2 bytes start at word 3 (byte +6).
+     * L3 = [pseudo-length, PD, type, ...] -> 06 3f = IMMEDIATE ASSIGNMENT,
+     * the RA is byte 7 and the request reference bytes 8-9. */
     const uint8_t *d = (const uint8_t *)s->api_ram + API_NDB + NDB_A_CD + 6;
     if (d[1] != 0x06 || d[2] != 0x3f) {
         return false;
@@ -480,9 +450,9 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
                     d[7], at1, at2, at3, t1p, t2, t3, memo);
         }
     } else {
-        /* [2026-10-04] Le RACH de la ROM part a son propre fn (c54x_exe tsp_tx, PONT_UL_RAW) : la
-         * reference de la BTS est deja celle que le firmware attend, rien a reecrire. Journalise
-         * pour la table de couverture (99-couverture.sh : chemin ROM). */
+        /* The ROM's RACH goes out at its own fn (c54x_exe tsp_tx, PONT_UL_RAW): the
+         * BTS reference is already the one the firmware expects, nothing to rewrite.
+         * Logged for the coverage table (99-couverture.sh: ROM path). */
         static unsigned n;
         if (n++ < 20)
             fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference %u/%u/%u identique a last_rach (fn=%u), rien a reecrire\n",
@@ -494,7 +464,7 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
 static void pont_echange(CalypsoTRX *s);
 static void pont_boot_pas(CalypsoTRX *s);
 
-/* CALYPSO_PONT_BOOT_POLL (defaut 1) : voir api_read, attente de LEAD_READY */
+/* CALYPSO_PONT_BOOT_POLL (default 1): see api_read, LEAD_READY wait */
 static bool pont_boot_poll(void)
 {
     static int v = -1;
@@ -530,9 +500,9 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
             }
         }
     }
-    /* [2026-10-19] moniteur mailbox, cote ARM (CALYPSO_MAILBOX=1, fichier
-     * mailbox-arm.log ; le cote DSP est dans c54x_exe). Mot DSP = 0x0800 + off/2,
-     * ctx = PC ARM, fn = trame courante du pont. */
+    /* Mailbox monitor, ARM side (CALYPSO_MAILBOX=1, file mailbox-arm.log; the
+     * DSP side is in c54x_exe). DSP word = 0x0800 + off/2, ctx = ARM PC,
+     * fn = current bridge frame. */
     if (calypso_mbx_actif && (size == 2 || size == 4)) {
         calypso_mbx_suffixe = "arm";
         uint32_t pc = (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
@@ -551,16 +521,16 @@ static uint64_t api_read(void *opaque, hwaddr off, unsigned size)
          * BL_CMD_STATUS commands itself. The emulation below, written for the
          * DSP-less shunt, would force IDLE after three reads, BEFORE the DSP
          * has seen the command, making it miss the startup COPY_BLOCK. */
-        /* [2026-10-21] TELECHARGEMENT DSP A TEMPS COMPTE EN TOURS DE BOUCLE. Le firmware TI
-         * (leadapi.c, LA_LoadPage) attend LEAD_READY dans DOWNLOAD_STATUS (= 0x0FFE) au plus
-         * LA_TIMEOUT = 10000 lectures : quelques ms sur le vrai Calypso, quelques us ici, alors
-         * que le DSP n'avance que d'une trame par echange du pont. Selon la course, le
-         * telechargement passait (DSP:3606h) ou partait en LA_ERR_TIMEOUT : DSP laisse dans son
-         * chargeur (« occupe boot »), version lue 4e2a, ni L1 ni audio (keybeep jamais fini).
-         * Avant le TDMA, une lecture de 0x0FFE sans LEAD_READY fait donc avancer le DSP d'une
-         * trame toutes les 32 lectures. CALYPSO_PONT_BOOT_POLL=0 coupe. */
+        /* DSP DOWNLOAD TIMED IN LOOP ITERATIONS. The TI firmware (leadapi.c,
+         * LA_LoadPage) waits for LEAD_READY in DOWNLOAD_STATUS (= 0x0FFE) for at most
+         * LA_TIMEOUT = 10000 reads: a few ms on the real Calypso, a few us here, while
+         * the DSP only advances one frame per bridge exchange. Without help the
+         * download may end in LA_ERR_TIMEOUT (DSP left in its bootloader, version read
+         * 4e2a, neither L1 nor audio). Before the TDMA runs, a read of 0x0FFE without
+         * LEAD_READY therefore advances the DSP by one frame every 32 reads.
+         * CALYPSO_PONT_BOOT_POLL=0 disables this. */
         if (off == API_BL_STATUS) {
-            s->bl_lu_fn = s->fn + 1;    /* +1 : 0 = jamais lu */
+            s->bl_lu_fn = s->fn + 1;    /* +1: 0 = never read */
         }
         if (off == API_BL_STATUS && val != 1 && !s->tdma_running && pont_boot_poll()) {
             if ((++s->bl_polls & 31) == 0) {
@@ -599,7 +569,7 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
     if (off >= CALYPSO_API_SIZE) {
         return;
     }
-    if (calypso_mbx_actif && (size == 2 || size == 4)) {        /* [2026-10-19] voir api_read */
+    if (calypso_mbx_actif && (size == 2 || size == 4)) {        /* see api_read */
         calypso_mbx_suffixe = "arm";
         uint32_t pc = (first_cpu && first_cpu->cc && first_cpu->cc->get_pc) ? (uint32_t)first_cpu->cc->get_pc(first_cpu) : 0;
         calypso_mbx(MBX_ARM_WR, (uint16_t)(0x0800 + off / 2), (uint16_t)value, s->api_ram[off / 2], pc, s->fn, 0);
@@ -646,12 +616,12 @@ static void api_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
         calypso_l1_do_burst_written((uint16_t)value);
     }
     if (off == API_NDB + NDB_D_RACH && value != 0 && (size == 2 || size == 4)) {
-        /* prim_rach.c:72 ecrit (uic|bsic)<<2 | ra<<8 juste avant de poser
-         * d_task_ra. On retient la RA : pont_reqref_corrigee() s'en sert pour
-         * ne corriger que l'assignation qui repond a CETTE tentative. */
+        /* prim_rach.c:72 writes (uic|bsic)<<2 | ra<<8 just before setting
+         * d_task_ra. The RA is kept: pont_reqref_corrigee() uses it to correct
+         * only the assignment that answers THIS attempt. */
         uint8_t ra = (uint8_t)((value >> 8) & 0xff);
         if (s->rach_file_w - s->rach_file_r >= ARRAY_SIZE(s->rach_file)) {
-            s->rach_file_r++;   /* file pleine : la plus ancienne degage */
+            s->rach_file_r++;   /* queue full: drop the oldest */
         }
         s->rach_file[s->rach_file_w++ % ARRAY_SIZE(s->rach_file)] = ra;
         calypso_l1_do_rach_written((uint16_t)value, s->fn);
@@ -691,13 +661,14 @@ void calypso_trx_dsp_reset_line(bool active)
          * parks at 0xb41c, ready for the ARM COPY_BLOCKs. This is the ONLY
          * point where the C54x is reset - never on a bootloader command, which
          * would destroy the pending command. */
-        /* [2026-10-21 18:20] Le reset part en asynchrone vers c54x_exe : le LEAD_READY (1) laisse
-         * dans 0x0FFE par le chargeur d'AVANT le reset etait lu tout de suite par l'ARM (Magnetite,
-         * l1_func.c dsp_power_on), qui y ecrivait son demarrage (2, adresse 0x7000) ; le chargeur
-         * relance ensuite par le reset reecrivait 1 (ROM b419) et le demarrage etait perdu : DSP
-         * pour toujours dans sa boucle 0xb41c. Sur le vrai Calypso le chargeur redemarre en
-         * quelques us, avant la lecture de l'ARM. On efface donc le mot : l'ARM attend le
-         * LEAD_READY du NOUVEAU chargeur (api_read fait avancer le DSP pendant cette attente). */
+        /* The reset goes to c54x_exe asynchronously. The LEAD_READY (1) left in 0x0FFE
+         * by the bootloader from BEFORE the reset would otherwise be read right away by
+         * the ARM (Magnetite, l1_func.c dsp_power_on), which would write its start command
+         * there (2, address 0x7000); the bootloader restarted by the reset would then
+         * rewrite 1 (ROM b419) and the start would be lost (DSP stuck in its 0xb41c loop).
+         * On the real Calypso the bootloader restarts within a few us, before the ARM
+         * read. The word is therefore cleared: the ARM waits for the LEAD_READY of the
+         * NEW bootloader (api_read advances the DSP during that wait). */
         s->api_ram[API_BL_STATUS / 2] = 0;
         pont_send(s, PONT_RESET, 0, 0, 0);
         fprintf(stderr, "[trx] pont DSP : RESET_DSP relache par le firmware -> "
@@ -756,12 +727,12 @@ static void tpu_write(void *o, hwaddr off, uint64_t val, unsigned sz)
     if (off == TPU_CTRL && (val & TPU_CTRL_EN)) {
         s->tpu_regs[TPU_CTRL / 2] &= ~(TPU_CTRL_EN | TPU_CTRL_IDLE);
         tpu_done(s);
-        /* [2026-10-21] La couche 1 TI (FreeCalypso Magnetite, tpudrv.c) ne
-         * touche jamais TPU_INT_CTRL : l'IT trame MCU est active au reset et
-         * le TDMA court des que le TPU est valide (TP_Enable). Sans ce depart
-         * Nucleus n'avait pas de tick (IQ_FrameHandler -> TMT_Timer_Interrupt)
-         * et les UART, pompees par tdma_tick, restaient muettes. osmocom-bb
-         * ecrit TPU_INT_CTRL avant, rien ne change pour lui. */
+        /* The TI layer 1 (FreeCalypso Magnetite, tpudrv.c) never touches
+         * TPU_INT_CTRL: the MCU frame IRQ is enabled at reset and the TDMA runs
+         * as soon as the TPU is enabled (TP_Enable). Nucleus needs this start for
+         * its tick (IQ_FrameHandler -> TMT_Timer_Interrupt), and the UARTs are
+         * pumped by tdma_tick. osmocom-bb writes TPU_INT_CTRL beforehand, so
+         * nothing changes for it. */
         if (!s->tdma_running && !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_MCU_FRAME)) {
             fprintf(stderr, "[trx] TPU valide (TP_Enable) sans ecriture de TPU_INT_CTRL : depart du TDMA\n");
             tdma_start(s);
@@ -902,19 +873,15 @@ static void cpu_idle_park(void)
     if (pc < IDLE_PC_LO || pc >= IDLE_PC_HI) {
         return;
     }
-    /* [2026-10-19] PAS DE PARK EN CONTEXTE D'INTERRUPTION. La plage IDLE_PC
-     * (0x823000-0x826000) contient l1a_l23_handler, mframe_schedule et les
-     * puts() de l1_sync : du code qui tourne aussi dans le handler d'IT trame
-     * et d'UART (mode IRQ, bit I leve). Avec -d exec,nochain l'ARM est 5 fois
-     * plus lent (2 ms de CPU par trame au lieu de 0,4) et se trouve souvent
-     * la, en plein ISR, quand l'impulsion de 1 ms retombe : il etait halte
-     * IT masquees (PSR=0x80000192 au moniteur, 12 echantillons sur 12,
-     * PC=0x824b20), ne reveille que par l'IT suivante, l'EOI trame ne venait
-     * jamais et le pont attendait jusqu'a 2,4 s (« l1_sync finie apres 9210
-     * a 29907 attentes », puis « GO envoye quand meme »). Mesure du
-     * 2026-10-19 11:09 : 60 trames/s, mobile « no cell available ».
-     * Le vrai idle (while(1) de main) tourne en mode SYS/SVC, IT ouvertes :
-     * on ne parque que lui. */
+    /* NO PARKING IN INTERRUPT CONTEXT. The IDLE_PC range (0x823000-0x826000)
+     * contains l1a_l23_handler, mframe_schedule and the puts() of l1_sync:
+     * code that also runs inside the frame IRQ and UART handlers (IRQ mode,
+     * I bit set). With -d exec,nochain the ARM is 5 times slower (2 ms of CPU
+     * per frame instead of 0.4) and is often there, in the middle of an ISR,
+     * when the 1 ms pulse falls; halting it with IRQs masked would leave it
+     * asleep until the next IRQ, the frame EOI would never come and the bridge
+     * would wait up to 2.4 s. The real idle (main's while(1)) runs in SYS/SVC
+     * mode with IRQs enabled: only that one is parked. */
     {
         CPUARMState *env = &ARM_CPU(cs)->env;
         uint32_t cpsr = cpsr_read(env);
@@ -962,7 +929,7 @@ static void *wall_clock_loop(void *arg)
     return NULL;
 }
 
-/* [2026-10-21] CALYPSO_PONT_ARM_LOCK=1 : voir tdma_tick (attente de l'ARM sans GO force). */
+/* CALYPSO_PONT_ARM_LOCK=1: see tdma_tick (wait for the ARM without forced GO). */
 static bool pont_arm_lock(void)
 {
     static int v = -1;
@@ -1038,16 +1005,16 @@ static void pont_echange(CalypsoTRX *s)
     }
 }
 
-/* [2026-10-21] une trame DSP pendant que l'ARM attend LEAD_READY (api_read) : comme
- * pont_echange, mais en ATTENDANT le DONE (20 ms au plus), sinon la boucle de l'ARM
- * repasse avant que le DSP ait fini sa trame et rien n'avance. */
+/* One DSP frame while the ARM waits for LEAD_READY (api_read): like pont_echange,
+ * but WAITING for the DONE (20 ms at most), otherwise the ARM loop comes back
+ * before the DSP has finished its frame and nothing advances. */
 static void pont_boot_pas(CalypsoTRX *s)
 {
     if (s->pont_fd < 0) {
         return;
     }
     if (!s->pont_pending) {
-        pont_echange(s);                 /* envoie le TICK */
+        pont_echange(s);                 /* sends the TICK */
     }
     if (s->pont_pending) {
         CalypsoPontMsg m;
@@ -1134,16 +1101,15 @@ static void tdma_tick(void *opaque)
         bool fini = s->phase_a_recue &&
                     (calypso_inth_frame_eoi() >= s->eoi_cible ||
                      calypso_inth_irq_masked(CALYPSO_IRQ_TPU_FRAME));
-        /* [2026-09-30] NE PAS FORCER LE GO TANT QUE L'ARM N'A PAS SERVI L'IT
-         * TRAME. Au bout de 256 attentes (74 ms) on envoyait le GO « quand
-         * meme » et on recalait la cible d'EOI : la ROM lisait alors une page W
-         * perimee (a_a5fn de la trame precedente) et, l'IT trame ayant ete
-         * perdue (impulsion de 1 ms, ARM occupe par l'UART), le compteur de
-         * trames du firmware glissait d'une unite pour le reste du canal.
-         * L'IT est desormais memorisee dans l'INTH (calypso_inth.c) ; on
-         * l'attend jusqu'a PONT_ATTENTES_LONG (~2,4 s) et on trace les attentes
-         * longues. Le temps mural perdu se paye en trames BTS arrivees trop
-         * tard chez le BSP (pertes radio), pas en glissement TDMA. */
+        /* DO NOT FORCE THE GO WHILE THE ARM HAS NOT SERVED THE FRAME IRQ.
+         * Forcing the GO after 256 waits (74 ms) and realigning the EOI target
+         * would make the ROM read a stale W page (a_a5fn of the previous frame)
+         * and, with the frame IRQ lost (1 ms pulse, ARM busy with the UART), the
+         * firmware's frame counter would slip by one for the rest of the channel.
+         * The IRQ is latched in the INTH (calypso_inth.c); it is awaited up to
+         * PONT_ATTENTES_LONG (~2.4 s) and long waits are traced. The lost wall
+         * time costs BTS frames arriving too late at the BSP (radio losses),
+         * not a TDMA slip. */
         if (!fini && s->eoi_attentes + 1 >= (unsigned)PONT_ATTENTES_MAX &&
             s->eoi_attentes + 1 < (unsigned)PONT_ATTENTES_MAX * 32 && s->phase_a_recue) {
             if (s->eoi_attentes + 1 == (unsigned)PONT_ATTENTES_MAX && ++s->eoi_longues <= 20) {
@@ -1153,7 +1119,7 @@ static void tdma_tick(void *opaque)
                         calypso_inth_frame_eoi(), s->eoi_cible);
             }
             s->eoi_attentes++;
-            if (g_uart_modem) {          /* l'ARM peut attendre la ligne serie : on la sert */
+            if (g_uart_modem) {          /* the ARM may be waiting on the serial line: serve it */
                 calypso_uart_poll_backend(g_uart_modem);
                 calypso_uart_kick_rx(g_uart_modem);
             }
@@ -1179,15 +1145,14 @@ static void tdma_tick(void *opaque)
             timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
             return;
         }
-        /* [2026-10-21] CALYPSO_PONT_ARM_LOCK=1 (Magnetite) : ne pas forcer le GO tant que l'ARM n'a pas
-         * fini l1_sync. Forcer fait arriver les trames plus vite que la L1 ne les traite : la file L1
-         * se remplit (9/9), « IRQ write attempt to L1 queue failed » -> os_SystemError (gel). */
-        /* [2026-10-21 18:10] borne : au demarrage (fn=3) l'ARM prend l'IT trame sans que l1_sync
-         * tourne encore (EOI 2/3) ; sans borne le pont attendait l'ARM et l'ARM le DSP, pour toujours.
-         * Au-dela de 64 x PONT_ATTENTES_MAX (~5 s) le GO part quand meme. */
-        /* [2026-10-21 19:15] pas d'attente non plus quand l'ARM sonde DOWNLOAD_STATUS (relance du DSP par
-         * le firmware, dsp_power_on) : l1_sync ne tourne pas, attendre ne faisait que figer l'instance
-         * (retards de 240 puis 586 trames sur le BTS, mesures). */
+        /* CALYPSO_PONT_ARM_LOCK=1 (Magnetite): do not force the GO while the ARM has not
+         * finished l1_sync. Forcing makes frames arrive faster than L1 processes them: the
+         * L1 queue fills up (9/9), "IRQ write attempt to L1 queue failed" -> os_SystemError. */
+        /* Bound: at startup (fn=3) the ARM takes the frame IRQ while l1_sync is not running
+         * yet (EOI 2/3); without a bound the bridge would wait for the ARM and the ARM for
+         * the DSP, forever. Beyond 64 x PONT_ATTENTES_MAX (~5 s) the GO goes out anyway. */
+        /* No wait either while the ARM polls DOWNLOAD_STATUS (DSP restart by the firmware,
+         * dsp_power_on): l1_sync is not running, waiting would only freeze the instance. */
         bool arm_relance_dsp = s->bl_lu_fn && (uint32_t)(s->fn + 1 - s->bl_lu_fn) <= 4;
         if (!fini && pont_arm_lock() && !arm_relance_dsp && s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX * 64) {
             if (++s->eoi_attentes == (unsigned)PONT_ATTENTES_MAX * 64) {
@@ -1339,10 +1304,10 @@ static void tdma_tick(void *opaque)
         timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
         return;
     }
-    /* [2026-10-21] Sans DSP externe (Magnetite : pas de pont), personne ne remet
-     * TPU_CTRL_DSP_EN a zero : le HISR de l1_sync voit « IT DSP en attente » a
-     * chaque trame et ecrit « MCU CPU overload » en boucle. Ici le DSP est
-     * considere fini des la trame : on acquitte le bit avant la trame suivante. */
+    /* Without an external DSP (Magnetite: no bridge), nobody clears
+     * TPU_CTRL_DSP_EN: the l1_sync HISR would see "DSP IRQ pending" every frame
+     * and log "MCU CPU overload" in a loop. Here the DSP is considered done
+     * within the frame: the bit is acknowledged before the next frame. */
     if (s->pont_fd < 0) {
         s->tpu_regs[TPU_CTRL / 2] &= (uint16_t)~TPU_CTRL_DSP_EN;
     }
@@ -1362,15 +1327,14 @@ static void tdma_pacer(CalypsoTRX *s)
         target = now;
     }
     target += GSM_TDMA_NS;
-    /* [2026-09-23] RATTRAPER AU LIEU DE SAUTER UNE CASE. L'ancienne boucle
-     * « while (target <= now) target += GSM_TDMA_NS » calait le TICK suivant
-     * sur la grille murale : une trame en retard de 0,1 ms en perdait une
-     * entiere. En TCH (DSP ~4,8 ms certaines trames) une trame sur quatre
-     * glissait : 5,86 ms en moyenne, 171 trames/s au lieu de 216,7, la parole a
-     * 40 trames/s pour un ALSA a 50 -- echo test qui « part en live ». On
-     * repart aussitot et on rattrape, dans la limite de
-     * CALYPSO_PACER_RATTRAPAGE trames de retard cumule (20 par defaut) ; au-dela
-     * on recale sur maintenant. 0 = l'ancienne grille stricte. */
+    /* CATCH UP INSTEAD OF SKIPPING A SLOT. Aligning the next TICK on the
+     * wall-clock grid (`while (target <= now) target += GSM_TDMA_NS`) would
+     * lose a whole frame for every 0.1 ms of lateness; in TCH (DSP ~4.8 ms on
+     * some frames) one frame in four would slip (171 frames/s instead of
+     * 216.7, speech at 40 frames/s for an ALSA at 50). Instead the next frame
+     * starts right away and the lateness is caught up, within a limit of
+     * CALYPSO_PACER_RATTRAPAGE frames of cumulated lateness (20 by default);
+     * beyond that the target is realigned on now. 0 = strict grid. */
     static int rattrapage = -1;
     if (rattrapage < 0) {
         const char *e = getenv("CALYPSO_PACER_RATTRAPAGE");
@@ -1448,9 +1412,9 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs)
            CALYPSO_SIM_SIZE);
 
     s->tdma_timer = timer_new_ns(QEMU_CLOCK_REALTIME, tdma_tick, s);
-    /* [2026-10-19] -D bufferise (QEMU_LOG_BUFFERED) : a chaque arret de la VM
-     * (Ctrl-C de la console gdb, « stop » moniteur) on vide le tampon pour que
-     * la trace lue a ce moment aille jusqu'au dernier bloc execute. */
+    /* -D is buffered (QEMU_LOG_BUFFERED): on every VM stop (Ctrl-C from the
+     * gdb console, monitor "stop") the buffer is flushed so that the trace read
+     * at that moment goes up to the last executed block. */
     qemu_add_vm_change_state_handler(calypso_trx_vm_state, s);
     s->frame_irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, frame_irq_lower, s);
     s->kick_timer = timer_new_ns(QEMU_CLOCK_REALTIME, cpu_kick, s);

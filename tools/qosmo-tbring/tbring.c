@@ -1,30 +1,30 @@
 /*
- * tbring.c - plugin TCG : anneau des blocs ARM executes, en memoire partagee.
+ * tbring.c - TCG plugin: ring of the executed ARM blocks, in shared memory.
  *
- * [2026-10-19] Pourquoi. « -d in_asm,exec,nochain » ecrit une ligne de texte
- * par bloc execute, sous verrou, avec un fflush() par ligne (util/log.c) et un
- * lookup_symbol() par bloc : 32 M de lignes, 2,8 Go en 3 min sur le banc
- * Calypso, l'ARM 5 fois plus lent, le pont DSP qui decroche. Ici rien n'est
- * formate dans la boucle : a chaque execution d'un bloc, une ecriture de
- * 8 octets (PC, compteur) dans un anneau mmap sur /dev/shm. Le plugin est
- * appele meme pour les blocs chaines, donc pas de « nochain » : le TCG tourne
- * comme en production. Le texte se fait apres coup (tbring-dump.py), avec
- * -d in_asm (une ligne par bloc, a sa traduction) comme table de correspondance.
+ * Why. "-d in_asm,exec,nochain" writes one text line per executed block,
+ * under a lock, with one fflush() per line (util/log.c) and one
+ * lookup_symbol() per block: on the Calypso bench that is 2.8 GB in 3 min,
+ * the ARM 5 times slower and the DSP bridge losing sync. Here nothing is
+ * formatted in the loop: every execution of a block is an 8-byte write (PC,
+ * counter) into a ring mmapped on /dev/shm. The plugin is called even for
+ * chained blocks, so no "nochain": the TCG runs as in production. The text is
+ * produced afterwards (tbring-dump.py), with -d in_asm (one line per block,
+ * at translation) as the lookup table.
  *
- * Chargement :  -plugin libtbring.so[,anneau=/dev/shm/qemu-tbring][,entries=N]
- *   anneau  : le fichier (PAS « file= » : c'est le mot-cle de QEMU pour le
- *             chemin du plugin, il chargerait l'anneau comme second plugin).
- *   entries : puissance de 2 (defaut 1 Mi = 8 Mio), les N derniers blocs.
+ * Loading:  -plugin libtbring.so[,anneau=/dev/shm/qemu-tbring][,entries=N]
+ *   anneau  : the file (NOT "file=": that is QEMU's keyword for the plugin
+ *             path, it would load the ring as a second plugin).
+ *   entries : power of 2 (default 1 Mi = 8 MiB), the last N blocks.
  *
- * Fichier :  en-tete 64 octets  { magic "TBRING01", entries, count, shift }
- *            puis entries x { uint32 pc ; uint32 tour }  (tour = count >> shift au
- *            moment de l'ecriture : le lecteur sait si l'entree est de la fenetre
- *            courante ou d'un tour precedent ; valable jusqu'a 2^32 tours).
- * Sur le disque (ASSEMBLY_LOGS_RING_FILE, option anneau=) le fichier est creux : 64 Gio
- * (2^33 entrees) ne coutent que ce qui a ete ecrit, a 8 octets par bloc, soit
- * ~1,4 Mo/s a 180 000 blocs/s -- contre 150 Mo/s pour le texte de -d exec.
- * Le compteur global avance a chaque bloc : tbring-dump lit le fichier a chaud,
- * a n'importe quel moment (SIGUSR1 inutile, c'est de la memoire partagee).
+ * File:  64-byte header  { magic "TBRING01", entries, count, shift }
+ *        then entries x { uint32 pc ; uint32 tour }  (tour = count >> shift at
+ *        write time: the reader knows whether the entry belongs to the current
+ *        window or to a previous lap; valid up to 2^32 laps).
+ * On disk (ASSEMBLY_LOGS_RING_FILE, option anneau=) the file is sparse: 64 GiB
+ * (2^33 entries) only cost what has been written, 8 bytes per block, i.e.
+ * ~1.4 MB/s at 180 000 blocks/s -- against 150 MB/s for the text of -d exec.
+ * The global counter advances on every block: tbring-dump reads the file live,
+ * at any time (no SIGUSR1 needed, it is shared memory).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,11 +41,11 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 typedef struct {
     char     magic[8];      /* "TBRING01" */
-    uint64_t entries;       /* taille de l'anneau, puissance de 2 */
-    uint64_t count;         /* blocs executes depuis le depart (indice d'ecriture) */
+    uint64_t entries;       /* ring size, power of 2 */
+    uint64_t count;         /* blocks executed since start (write index) */
     uint64_t shift;         /* log2(entries) */
     uint64_t reserve[4];
-} TbRingHdr;                /* 64 octets */
+} TbRingHdr;                /* 64 bytes */
 
 typedef struct {
     uint32_t pc;

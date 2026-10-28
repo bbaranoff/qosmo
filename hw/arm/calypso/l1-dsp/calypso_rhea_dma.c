@@ -100,13 +100,11 @@
 /* Read-only bits: kept by the model, never overwritten by the ARM. */
 #define CTRL_RO_MASK  (CTRL_IDLE | CTRL_IRQ_STATE | CTRL_RHEA_ERROR)
 
-/* [2026-09-22] COMBIEN DE TRANSFERTS SE TERMINENT, COMBIEN LA ROM EN ACQUITTE.
- * La ROM ferme un transfert en LISANT DMAn_CTRL (IRQ_STATE s'efface a la
- * lecture, CAL207 §11.3.5). Si elle lit moins souvent que la DMA ne termine,
- * ses files de requetes -- 14 entrees circulaires, 0xaa83/0xaaad/0xaad1 --
- * debordent : c'est le `DSP Error Status: 24` (DMA_PROG|DMA_TASK) permanent
- * depuis le boot, 18492 occurrences sur un run. La trace existante etait
- * plafonnee a 20 lignes et ne comptait donc rien. */
+/* HOW MANY TRANSFERS COMPLETE, HOW MANY THE ROM ACKNOWLEDGES.
+ * The ROM closes a transfer by READING DMAn_CTRL (IRQ_STATE clears on read,
+ * CAL207 §11.3.5). If it reads less often than the DMA completes, its request
+ * queues -- 14 circular entries, 0xaa83/0xaaad/0xaad1 -- overflow: that is a
+ * permanent `DSP Error Status: 24` (DMA_PROG|DMA_TASK). */
 static unsigned long long g_rd_fini, g_rd_acquitte;
 
 static struct {
@@ -222,15 +220,13 @@ uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
                     if (rd.ch[n].ctrl & CTRL_IRQ_STATE) {
                         g_rd_acquitte++;
                         if ((g_rd_acquitte % 200) == 1) {
-                            /* [2026-09-22] NIVEAU DE VERBOSITE. verbosite.c
-                             * classe par mots-cles : cette ligne ne contient que
-                             * « DMA », donc niveau 3, invisible au -v par
-                             * defaut. C'est pour ca qu'elle avait « disparu » --
-                             * pas parce que la ROM avait cesse d'acquitter.
-                             * Plutot que de forcer un « ERR » sur une ligne saine
-                             * (elle sortirait en niveau 0 a chaque run normal),
-                             * on ne promeut QUE l'anomalie : retard
-                             * d'acquittement = WARN, donc niveau 1. */
+                            /* VERBOSITY LEVEL. verbosite.c classifies by
+                             * keywords: this line only contains "DMA", hence
+                             * level 3, invisible with the default -v. Rather
+                             * than forcing an "ERR" on a healthy line (it would
+                             * come out at level 0 on every normal run), ONLY the
+                             * anomaly is promoted: acknowledgement lag = WARN,
+                             * hence level 1. */
                             double pc = g_rd_fini ? 100.0 * g_rd_acquitte / g_rd_fini : 0.0;
                             bool mauvais = g_rd_fini > 100 && pc < 90.0;
                             fprintf(stderr, "[rhea-dma] %sbilan : %llu transferts finis, "
@@ -238,9 +234,9 @@ uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
                                     mauvais ? "WARN " : "", g_rd_fini, g_rd_acquitte, pc);
                         }
                     }
-                    /* [2026-09-22] Plafond leve de 20 a 4000 et compteurs
-                     * joints : c'est le rapport « transferts finis / acquittes »
-                     * qui dit si les files de la ROM debordent. */
+                    /* Cap of 4000 lines with the counters attached: the ratio
+                     * "completed / acknowledged transfers" tells whether the
+                     * ROM's queues overflow. */
                     if (n_clr++ < 4000)
                         fprintf(stderr, "[rhea-dma] DMA%d_CTRL lu = 0x%04x : acquitte "
                                 "(finis=%llu acquittes=%llu)\n",
@@ -319,8 +315,9 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
              * The write is inert here only because ENABLE is already 0. Count
              * those passes instead of repeating them, and log everything that
              * CHANGES the state or sets ENABLE/DMA_START. */
-            /* [2026-10-22 12:20] [dma-arm] chaque armement/desarmement du canal RX en dedie TI (CALYPSO_BSP_DMA_TRACE=1) :
-             * quand la ROM ouvre la fenetre NB (151) ou de mesure (64) par rapport au depot du banc. */
+            /* [dma-arm] every arm/disarm of the RX channel in TI dedicated mode
+             * (CALYPSO_BSP_DMA_TRACE=1): when the ROM opens the NB (151) or measurement
+             * (64) window relative to the bench's deposit. */
             if (n == 1 && ((v ^ before) & (CTRL_ENABLE | CTRL_ONE_SHOT))) {
                 extern int calypso_bsp_dma_trace_on(void); extern uint32_t calypso_trx_get_fn(void);
                 if (calypso_bsp_dma_trace_on())
@@ -572,12 +569,12 @@ void calypso_rhea_dma_rx_request(C54xState *s)
      * counted 6 (0x3fb4 += 12 instead of 26). The words wait in the receiver;
      * calypso_rhea_dma_pump() moves them once the DSP is idle. */
     if (!one_shot && (ctrl & CTRL_IRQ_STATE)) {
-        /* [2026-09-22] Rendre IDLE avant de sortir. La ligne 517 l'a efface
-         * (« transfert en cours ») et TOUTES les autres sorties le reposent :
-         * skip_pending, rien-a-transferer, fin de transfert. Celle-ci seule ne
-         * le faisait pas, laissant le canal annoncer indefiniment un transfert
-         * qui n'aura pas lieu -- la ROM qui scrute IDLE pour savoir si elle peut
-         * reprogrammer le canal attend alors sans fin. */
+        /* Restore IDLE before returning. It was cleared above ("transfer in
+         * progress") and EVERY other exit path sets it back: skip_pending,
+         * nothing-to-transfer, end of transfer. Without it the channel would
+         * announce forever a transfer that will not happen -- the ROM, which
+         * polls IDLE to know whether it may reprogram the channel, would then
+         * wait endlessly. */
         rd.ch[n].ctrl |= CTRL_IDLE;
         return;
     }
@@ -689,7 +686,7 @@ void calypso_rhea_dma_rx_request(C54xState *s)
 
     /* §11.3.5: transfer complete -> IRQ_STATE set, DMA_START drops. */
     if (!(rd.ch[n].ctrl & CTRL_IRQ_STATE)) {
-        g_rd_fini++;   /* un transfert de plus que la ROM devra acquitter */
+        g_rd_fini++;   /* one more transfer the ROM will have to acknowledge */
     }
     rd.ch[n].ctrl = (uint16_t)((rd.ch[n].ctrl | CTRL_IRQ_STATE | CTRL_IDLE)
                                & ~CTRL_DMA_START);   /* done -> IDLE=1 */

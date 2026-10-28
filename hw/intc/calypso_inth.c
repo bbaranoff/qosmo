@@ -54,18 +54,15 @@ static void calypso_inth_set_irq(void *opaque, int irq, int level)
     if (level) {
         s->levels |= (1u << irq);
     } else if ((s->ilr[irq] & 0x2) && (irq == 4 || irq == 5 || irq == 15)) {
-        /* [2026-09-30] SOURCE CONFIGUREE SUR FRONT (ILR bit 1, irq_config(...,
-         * edge=1)) : le front est MEMORISE dans IT_REG jusqu'a la lecture de
-         * IRQ_NUM (ci-dessous, pour 4/5/15) ou l'effacement logiciel. Avant,
-         * la retombee de la ligne effacait le bit : l'IT trame TPU (IRQ 4) est
-         * une impulsion de 1 ms (calypso_trx.c FRAME_IRQ_PULSE_NS) et, si
-         * l'ARM etait encore dans un traitement long (UART/L1CTL en pleine
-         * parole), l'IT etait PERDUE. Le firmware ne detecte pas une trame
-         * TDMA perdue : son compteur de trames glissait d'une unite pour le
-         * reste du canal (a_a5fn = fn-1 : [a5] ecart +1 -> 0, parole
-         * dechiffree avec le mauvais flux, FACCH a faux, SACCH perdue, LOS
-         * ~15 s plus tard). Mesure : appels de 12:09 et 12:26, bascule a
-         * l'injection du ton (rafales de TRAFFIC_REQ sur l'UART). */
+        /* EDGE-CONFIGURED SOURCE (ILR bit 1, irq_config(..., edge=1)): the
+         * edge is LATCHED in IT_REG until IRQ_NUM is read (below, for 4/5/15)
+         * or until the software clears it. The line falling must not clear the
+         * bit: the TPU frame IRQ (IRQ 4) is a 1 ms pulse (calypso_trx.c
+         * FRAME_IRQ_PULSE_NS) and, if the ARM is still inside a long handler
+         * (UART/L1CTL during speech), the IRQ would be LOST. The firmware does
+         * not detect a lost TDMA frame: its frame counter would slip by one for
+         * the rest of the channel (a_a5fn = fn-1: speech deciphered with the
+         * wrong stream, wrong FACCH, lost SACCH, LOS ~15 s later). */
     } else {
         s->levels &= ~(1u << irq);
     }
@@ -92,9 +89,9 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
         uint16_t num = s->ith_v;
         s->last_num = num;
 
-        /* [2026-10-20] une source configuree SUR FRONT (ILR bit 1 : TIMER2 de jiffies, qui ne redescend jamais
-         * sa ligne) est acquittee par la lecture d'IRQ_NUM, comme 4/5/15 ; sinon elle reste pendante et
-         * l'ARM reprend l'IT en boucle (clavier C123 : keypad_poll jamais atteint). */
+        /* An EDGE-configured source (ILR bit 1: the jiffies TIMER2, which never lowers its
+         * line) is acknowledged by the IRQ_NUM read, like 4/5/15; otherwise it stays pending
+         * and the ARM re-enters the IRQ in a loop (C123 keypad: keypad_poll never reached). */
         if (num == 4 || num == 5 || num == 15 || (s->ilr[num] & 0x2)) {
             s->levels &= ~(1u << num);
         }
@@ -174,10 +171,10 @@ static void calypso_inth_write(void *opaque, hwaddr offset, uint64_t value,
     default:
         if (offset >= 0x20 && offset < 0x60) {
             int idx = (offset - 0x20) / 2;
-            /* [2026-10-20] ILR = 7 bits (FIQ/nIRQ, SENSE_EDGE, PRIORITY[4:0]). Le firmware ecrit 0xfffe pour
-             * TIMER2 (default_irq_prio 0xff lu en int8_t -1, irq.c irq_config) : avec un masque 0x1FFF le bit 8
-             * passait pour le drapeau FIQ (calypso_inth_update) et le timer de jiffies partait en FIQ, jamais
-             * acquitte -> avalanche (jiffies +160 000/s, ARM coince dans fiq()). */
+            /* ILR = 7 bits (FIQ/nIRQ, SENSE_EDGE, PRIORITY[4:0]). The firmware writes 0xfffe
+             * for TIMER2 (default_irq_prio 0xff read as int8_t -1, irq.c irq_config): with a
+             * 0x1FFF mask bit 8 would be taken for the FIQ flag (calypso_inth_update) and the
+             * jiffies timer would go to FIQ, never acknowledged (ARM stuck in fiq()). */
             s->ilr[idx] = value & 0x7F;
 
             if (idx == 7) {
@@ -200,17 +197,13 @@ static const MemoryRegionOps calypso_inth_ops = {
     .impl  = { .min_access_size = 1, .max_access_size = 2 },
 };
 
-/* [2026-09-16] Instance unique, pour calypso_inth_arm_ack(). Remonte depuis
- * qosmo-dsp en portant la L1 C54x : la version de l'INTH heritee de
- * qosmo-grgsm avait perdu cet acquittement, et le DSP emule en a besoin. */
+/* Single instance, for calypso_inth_arm_ack(): the emulated DSP needs this
+ * acknowledgement. */
 static CalypsoINTHState *g_inth;
 
-/* Acquittement d'interruption emis par le DSP, pas par l'ARM : fin de service
- * de la source courante, la file repart au suivant. Porte tel quel de
- * qosmo-dsp, MOINS son « s->irq_in_service = -1 » - ce champ y est ecrit deux
- * fois et jamais relu (l'en-tete du fichier la-bas le dit : « no nesting, no
- * irq_in_service blocking »). Ajouter un champ mort a la plateforme commune
- * pour la fidelite d'un vestige n'aurait servi personne. */
+/* Interrupt acknowledgement issued by the DSP, not by the ARM: end of service
+ * of the current source, the queue moves on to the next one. No nesting, no
+ * irq_in_service blocking. */
 void calypso_inth_arm_ack(void)
 {
     CalypsoINTHState *s = g_inth;
@@ -220,7 +213,7 @@ void calypso_inth_arm_ack(void)
 
     uint16_t svc = s->ith_v;
     if (svc > 0 || (s->levels & 1)) {
-        s->levels &= ~(1u << svc);      /* fin de service : la source retombe */
+        s->levels &= ~(1u << svc);      /* end of service: the source drops */
         s->rr_start = (svc + 1) % CALYPSO_INTH_NUM_IRQS;
     }
 }
@@ -235,7 +228,7 @@ bool calypso_inth_irq_masked(int irq)
     return !g_inth || (g_inth->mask & (1u << irq));
 }
 
-/* [2026-09-30] IT encore en attente dans IT_REG (levee, pas encore servie). */
+/* IRQ still pending in IT_REG (raised, not served yet). */
 bool calypso_inth_irq_pending(int irq)
 {
     return g_inth && (g_inth->levels & (1u << irq));

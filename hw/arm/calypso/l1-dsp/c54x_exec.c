@@ -10,15 +10,13 @@
 #include "hw/arm/calypso/calypso_debug.h"
 
 /* 0xF4xx source/destination selectors: bit 9 = src, bit 8 = dst (TI SPRU172C). */
-/* [2026-10-15] NORM ET TC. SPRU172C : NORM decale l'accumulateur de T et ne touche
- * pas TC. L'ancien modele (« decaler d'un bit tant que bit39 != bit38 ») posait TC
- * sur cette difference, et l'a garde en passant au decalage par T. Or la ROM fait
- * `bitf *ar2,#8000h ; ld #1,a ; norm a ; bc ...,ntc` (PROM0 0x909c, marqueur de
- * trame de parole montante, rejeu du 15/10) : TC efface par NORM -> le marqueur
- * n'est jamais pose -> la porte 0xb711 ne batit aucun burst de parole.
- * CALYPSO_NORM_TC=0 : NORM ne touche plus TC (silicium). Defaut : ancien
- * comportement, le temps de valider FB/SB/Viterbi sur le banc. */
-/* [2026-10-15] Sonde BC heuristique (CALYPSO_BCTC_SONDE=1) : voir le BC F82x/F83x. */
+/* NORM AND TC. SPRU172C: NORM shifts the accumulator by T and does not touch
+ * TC. The ROM does `bitf *ar2,#8000h ; ld #1,a ; norm a ; bc ...,ntc` (PROM0
+ * 0x909c, uplink speech frame marker): a NORM clearing TC would mean the
+ * marker is never set and the 0xb711 gate builds no speech burst.
+ * CALYPSO_NORM_TC=0: NORM does not touch TC (silicon). Default: NORM sets TC
+ * on bit39 != bit38 (legacy model). */
+/* BC heuristic probe (CALYPSO_BCTC_SONDE=1): see the BC F82x/F83x. */
 static struct { uint16_t pc, prev; unsigned long n, divergent; } bctc_sites[256];
 static int bctc_nsites;
 static void bctc_sonde_note(uint16_t pc, uint16_t prev, bool diverge)
@@ -29,16 +27,18 @@ static void bctc_sonde_note(uint16_t pc, uint16_t prev, bool diverge)
     bctc_sites[i].n++;
     if (diverge) bctc_sites[i].divergent++;
 }
-/* [2026-10-22] TC FIABLE A TRAVERS UNE ECRITURE MEMOIRE. CMPM/BITF (0x60/0x61) posent TC ; ANDM/ORM/XORM/ADDM
- * #lk (0x68..0x6B) et ST/STM #k (0x76/0x77) n'y touchent pas (SPRU172C). Un bc/bcd tc|ntc juste apres une de ces
- * ecritures, elle-meme juste apres le CMPM/BITF, teste donc le vrai TC. PROM0 0xb81e `bitf *ar2(9),#8000h`
- * (d_ctrl_tch B_SUBCHANNEL) ; 0xb821 `andm #-17,*(0x3fbf)` ; 0xb824 `bc 0xb82f,ntc` : l'heuristique ACC (A=0 ->
- * pas de saut) executait `orm #256,*(0x3fab)` a chaque trame TCH/F -> table d'etats du sous-canal TCH/H
- * (0xde57), sortie de table au 1er multitrame (liste 0xbc5a, appel 0x3f8c), reset du DSP, Assignment Failure
- * (Magnetite, appel au 600, 22/10). CALYPSO_C54X_BCTC_RMW=0 pour revenir a l'heuristique. */
-/* Une seule ecriture intercalee ne suffisait pas : PROM0 0xb925 `bitf *(0x3fab),#256` ; `st #de57,*(0x4366)` ;
- * `st #decd,*(0x4367)` ; 0xb92e `bc 0xb936,tc` -- l'heuristique (tc : saute si A == 0, A = fn%26) gardait la
- * base 0xde57 a chaque fn%26 = 0 : meme sortie de table. g_tc_fiable suit la chaine (calypso_c54x.c). */
+/* RELIABLE TC ACROSS A MEMORY WRITE. CMPM/BITF (0x60/0x61) set TC; ANDM/ORM/XORM/ADDM #lk
+ * (0x68..0x6B) and ST/STM #k (0x76/0x77) do not touch it (SPRU172C). A bc/bcd tc|ntc right after
+ * one of those writes, itself right after the CMPM/BITF, therefore tests the real TC. PROM0 0xb81e
+ * `bitf *ar2(9),#8000h` (d_ctrl_tch B_SUBCHANNEL); 0xb821 `andm #-17,*(0x3fbf)`; 0xb824
+ * `bc 0xb82f,ntc`: with the ACC heuristic (A=0 -> no jump) `orm #256,*(0x3fab)` would run on every
+ * TCH/F frame -> TCH/H sub-channel state table (0xde57), table overrun at the 1st multiframe (list
+ * 0xbc5a, call 0x3f8c), DSP reset, Assignment Failure. CALYPSO_C54X_BCTC_RMW=0 falls back to the
+ * heuristic. */
+/* A single interposed write is not enough: PROM0 0xb925 `bitf *(0x3fab),#256`; `st #de57,*(0x4366)`;
+ * `st #decd,*(0x4367)`; 0xb92e `bc 0xb936,tc` -- the heuristic (tc: jump if A == 0, A = fn%26) would
+ * keep base 0xde57 at every fn%26 = 0: same table overrun. g_tc_fiable follows the chain
+ * (calypso_c54x.c). */
 int g_tc_fiable;
 static int c54x_tc_par_rmw(void)
 {
@@ -154,12 +154,12 @@ static inline void c54x_neg_abs_ovf(C54xState *s, int dst, int64_t r)
  * Returns -1 when the opcode is not handled, else the words consumed.
  * ═══════════════════════════════════════════════════════════════════════════ */
 static int c54x_mac_ancien(void)
-{   /* [2026-10-03] MACR/MASR/MACA[R]/MASA/MPYA conformes a SPRU172C (arrondi du RESULTAT, A(32-16) sur
-     * 17 bits, produit sur 40 bits, masque MAC 0xFE00 qui rend MACR a son handler) : isa_test 147 -> 152.
-     * OPT-IN (CALYPSO_MAC=1) : le banc A/B du 2026-10-03 21:08/21:13 (meme binaire) donne la voix a
-     * +9.4 dB (bruit 3456 en silence) avec, +59.6 dB (silence 11) sans, alors que la parole descendante
-     * decodee par la ROM est identique bit a bit au rejeu : un defaut aval, hors du canal rejoue, a
-     * trouver avant de les activer. CALYPSO_MAC_ANCIEN=1 force l'ancien (defaut). */
+{   /* MACR/MASR/MACA[R]/MASA/MPYA per SPRU172C (rounding of the RESULT, A(32-16) on 17 bits,
+     * 40-bit product, MAC mask 0xFE00 which gives MACR its own handler): isa_test 147 -> 152.
+     * OPT-IN (CALYPSO_MAC=1): on the bench the strict variant raises the voice noise floor
+     * (+9.4 dB with, +59.6 dB without, same binary) while the downlink speech decoded by the
+     * ROM is bit-identical to the replay: a downstream defect, outside the replayed channel.
+     * CALYPSO_MAC_ANCIEN=1 forces the legacy variant (default). */
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("CALYPSO_MAC_ANCIEN"), *n = getenv("CALYPSO_MAC");
@@ -541,10 +541,10 @@ int c54x_exec_one(C54xState *s)
         return 1;   /* per-instruction IRQ vectoring consumed this step */
     }
     uint16_t op = prog_fetch(s, s->pc);
-    /* [2026-10-22 22:10] [fft-dp] la FFT du codec (PDROM 0xf0d0..0xf19c, appelee par 0xc13c `ld #112,dp` ->
-     * fcall 0xf0c1 -> 0xf439 -> call 0xf0d0) range ses variables en DP+0x0b/0x16/0x17/0x18 et attend DP=0x70.
-     * Appel de 21:47 : DP=0 en 0xf15c -> SP=0x001f, DSP perdu. A l'entree et a l'endroit de la panne, si DP
-     * n'est pas 0x70 : DP, SP, la pile et le chemin (une fois chacun). */
+    /* [fft-dp] the codec FFT (PDROM 0xf0d0..0xf19c, called by 0xc13c `ld #112,dp` -> fcall 0xf0c1 ->
+     * 0xf439 -> call 0xf0d0) keeps its variables at DP+0x0b/0x16/0x17/0x18 and expects DP=0x70
+     * (with DP=0 at 0xf15c the stack ends at SP=0x001f and the DSP is lost). At the entry and at
+     * 0xf150, if DP is not 0x70: DP, SP, the stack and the path (once each). */
     if (s->xpc == 0 && (s->pc == 0xf0d0 || s->pc == 0xf150) && (s->st0 & 0x1ff) != 0x70) {
         static unsigned n_e, n_m;
         unsigned *n = (s->pc == 0xf0d0) ? &n_e : &n_m;
@@ -705,7 +705,7 @@ int c54x_exec_one(C54xState *s)
         if (a_ini && a_n < 30) {
             for (int pg = 0; pg < 2; pg++) {
                 uint16_t was = pg ? a_prev1 : a_prev0, now = pg ? a_now1 : a_now0;
-                if (now != was && (now & 0x8000)) {   /* BLUD=1 : un RESULTAT */
+                if (now != was && (now & 0x8000)) {   /* BLUD=1: a RESULT */
                     fprintf(stderr, "[c54x] A_SCH-RESULTAT page=%d %04x -> %04x "
                             "par PC=0x%04x op=0x%04x A=%lld B=%lld T=%04x "
                             "AR1=%04x AR2=%04x AR3=%04x AR4=%04x insn=%u\n",
@@ -956,7 +956,7 @@ int c54x_exec_one(C54xState *s)
     if (s->pc == 0x7234) {
         /* One-shot dump of the 0x7234 scheduler (CALYPSO_AR0_DEBUG): what it does
          * and which indirect pointer sends it to 0x013b.
-         * [2026-09-23] sonde pure ; FORCE_DISPATCH ci-dessous reste active. */
+         * Pure probe; FORCE_DISPATCH below stays active. */
         if (C54X_SONDES && calypso_getenv("CALYPSO_AR0_DEBUG")) {
             static int d7 = 0;
             if (!d7) { d7 = 1;
@@ -1887,12 +1887,12 @@ int c54x_exec_one(C54xState *s)
             int is_call = (op & 1) != 0;
             uint16_t tgt = (uint16_t)((is_b ? s->b : s->a) & 0xFFFF);
             uint16_t src_pc = s->pc;
-            /* [2026-10-22 10:50] [bacc-soi] Magnetite apres le 1er TCH : DSP fige en 0x01f6 (copie DARAM de
-             * PROM0 0x71f6, `bacc a` avec A=0x01f6), occupe 120000 insn/trame. Le chemin qui y mene, une fois. */
-            /* [2026-10-22 11:00] [liste-tache] le dispatcher PROM0 0xbc2e..0xbc36 appelle une liste de routines
-             * terminee par 0 ; la liste vient de be3e : base (0xde27/0xde57, b928) + data[0x3fba]*12 + data[0x4365]/2.
-             * Au 1er TCH Magnetite la liste lue sortait de la table (entree 0x01f6 = coefficients DROM). Chaque
-             * appel hors ROM, et les 40 premiers apres l'entree en dedie. */
+            /* [bacc-soi] DSP stuck at 0x01f6 (DARAM copy of PROM0 0x71f6, `bacc a` with A=0x01f6),
+             * busy 120000 insn/frame: the path leading there, once. */
+            /* [liste-tache] the PROM0 dispatcher 0xbc2e..0xbc36 calls a 0-terminated list of routines;
+             * the list comes from be3e: base (0xde27/0xde57, b928) + data[0x3fba]*12 + data[0x4365]/2.
+             * A list read outside the table yields entries such as 0x01f6 (DROM coefficients). Logged:
+             * every call outside the ROM, and the first 40 after entering dedicated mode. */
             if (is_call && src_pc == 0xbc36) {
                 static unsigned n_lt;
                 uint16_t ent = (uint16_t)(s->ar[1] - 1);
@@ -1902,20 +1902,19 @@ int c54x_exec_one(C54xState *s)
                     printf("  [liste-tache] entree data[0x%04x]=0x%04x%s liste=0x%04x base=? 3fba=%u 4364=%u 4365=%u 3fab=%04x insn=%u\n",
                            ent, tgt, hors_rom ? " HORS ROM" : "", s->data[0x4356], s->data[0x3fba],
                            s->data[0x4364], s->data[0x4365], s->data[0x3fab], s->insn_count);
-                    /* [2026-10-22 11:20] le 1er appel hors ROM : base 0xde57 + etat 4 -> liste = 0xbc5a ; d'ou vient la base */
+                    /* first call outside the ROM: base 0xde57 + state 4 -> list = 0xbc5a; where the base comes from */
                     static unsigned n_hr;
                     if (hors_rom && n_hr++ == 0) {
                         extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
                         c54x_anneau_vider_stdout("liste-hors", 512);
                     }
                 }
-                /* [2026-10-22 21:35] GARDE : FIN DE LISTE SUR UNE ENTREE HORS ROM. Run de 21:21 (Magnetite, appel
-                 * entrant) : a chaque fin de TCH, 0xb456 remet l'etat TCH data[0x3fba] a -1 et le dispatcher tourne
-                 * encore une fois sur base + (-1)*12 : entrees 0x1b04, 0x5213 puis 0x01f6 (`bacc a` sur soi-meme,
-                 * [bacc-soi]) -> DSP occupe pour toujours, 25 ms par trame, 1000+ trames de retard (raccroche vu
-                 * avec 5 s de retard, puis cellule perdue). Une routine de tache est toujours en ROM : une entree
-                 * hors ROM est traitee comme le 0 qui termine la liste (sortie du `bc pmad,aeq` de 0xbc32, pmad en
-                 * 0xbc33). CALYPSO_C54X_GARDE_LISTE=0 coupe. */
+                /* GUARD: END OF LIST ON AN ENTRY OUTSIDE THE ROM. At every end of TCH, 0xb456 resets the
+                 * TCH state data[0x3fba] to -1 and the dispatcher runs once more on base + (-1)*12:
+                 * entries 0x1b04, 0x5213 then 0x01f6 (`bacc a` onto itself, [bacc-soi]) -> DSP busy
+                 * forever, 25 ms per frame, 1000+ frames late. A task routine is always in the ROM: an
+                 * entry outside the ROM is treated as the 0 that terminates the list (exit through the
+                 * `bc pmad,aeq` of 0xbc32, pmad at 0xbc33). CALYPSO_C54X_GARDE_LISTE=0 disables. */
                 static int garde_liste = -1;
                 if (garde_liste < 0) garde_liste = calypso_gate("CALYPSO_C54X_GARDE_LISTE", 1);
                 if (garde_liste && hors_rom) {
@@ -2012,7 +2011,7 @@ int c54x_exec_one(C54xState *s)
                     fprintf(stderr, "\n");
                     /* SP-event ring: the last 28 push/pop events (pc:op delta).
                      * A push (delta<0) with no matching pop is the leak.
-                     * [2026-09-23] l'anneau n'est alimente que sous C54X_SONDES. */
+                     * The ring is only fed under C54X_SONDES. */
                     if (C54X_SONDES) {
                     fprintf(stderr, "[c54x]     SP-EVENTS net_words=%lld pushes=%llu pops=%llu (récents, anciens→récents):\n[c54x]    ",
                             (long long)g_sp_ledger.net_words,
@@ -2184,8 +2183,8 @@ int c54x_exec_one(C54xState *s)
                 static int _ra_g = -1; static unsigned long long _ra_n = 0;
                 static unsigned _ra_log = 0;
                 if (_ra_g < 0) _ra_g = calypso_gate("CALYPSO_RETE_AUDIT", 0);
-                /* [2026-09-23] net_words vient de l'anneau SP, alimente seulement
-                 * sous C54X_SONDES : la sonde suit le meme interrupteur. */
+                /* net_words comes from the SP ring, fed only under C54X_SONDES:
+                 * the probe follows the same switch. */
                 if (_ra_g && C54X_SONDES) {
                     static unsigned long long _ra_vec = 0;   /* RETE inside the vector zone */
                     _ra_n++;
@@ -2613,10 +2612,10 @@ int c54x_exec_one(C54xState *s)
             if ((op & 0xFCFF) == 0xF480) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
-                /* [2026-10-16] ADD src,ASM,dst : dst = dst + (src << ASM) (SPRU172C). Le decalage ASM
-                 * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
-                 * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
-                 * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                /* ADD src,ASM,dst: dst = dst + (src << ASM) (SPRU172C). The ROM's FR encoder (RPE,
+                 * PDROM 0xeac1 `add b,asm,a` = xM << (6 - exp)) relies on the ASM shift; without it
+                 * every pulse comes out at 3/4 (~0) and uplink speech is reduced to noise.
+                 * CALYPSO_ADDASM_ANCIEN=1: shift ignored. */
                 static int addasm_ancien = -1;
                 if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
                 if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
@@ -2628,10 +2627,9 @@ int c54x_exec_one(C54xState *s)
             if ((op & 0xFCFF) == 0xF481) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
-                /* [2026-10-16] SUB src,ASM,dst : dst = dst - (src << ASM) (SPRU172C). Le decalage ASM
-                 * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
-                 * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
-                 * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                /* SUB src,ASM,dst: dst = dst - (src << ASM) (SPRU172C). Same ASM shift as ADD
+                 * src,ASM,dst above (the ROM's FR encoder relies on it).
+                 * CALYPSO_ADDASM_ANCIEN=1: shift ignored. */
                 static int addasm_ancien = -1;
                 if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
                 if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
@@ -2640,11 +2638,11 @@ int c54x_exec_one(C54xState *s)
             }
 
             /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word).
-             * [2026-10-04] Le decalage ASM (ST1[4:0], complement a deux, -16..15 ; SPRU172C « LD src, ASM
-             * [, dst] : dst = src << ASM ») etait ignore : dst recevait src tel quel. L'emetteur de bursts
-             * montants de la ROM (PROM0 0x8613/0x8625 `ld b,asm` apres `ld DP+0x48,asm`) accumule ses bits
-             * par ce decalage ; sans lui, les 16 mots BULDATA du burst sortaient tous a 0xff06.
-             * CALYPSO_LDASM_ANCIEN=1 : ancien comportement. */
+             * The ASM shift (ST1[4:0], two's complement, -16..15; SPRU172C "LD src, ASM [, dst]:
+             * dst = src << ASM") is applied. The ROM's uplink burst transmitter (PROM0 0x8613/0x8625
+             * `ld b,asm` after `ld DP+0x48,asm`) accumulates its bits through this shift; without it
+             * the 16 BULDATA words of the burst all come out as 0xff06.
+             * CALYPSO_LDASM_ANCIEN=1: shift ignored (dst receives src as is). */
             if ((op & 0xFCFF) == 0xF482) {
                 int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                 int64_t sv = sext40(src ? s->b : s->a);
@@ -2655,13 +2653,12 @@ int c54x_exec_one(C54xState *s)
                 return consumed + s->lk_used;
             }
 
-            /* [2026-10-04] CMPR CC, ARx -- binutils tic54x-opc.c {"cmpr", 0xF4A8, mask 0xFCF8, {OP_CC3, OP_ARX}} :
-             * compare ARx (bits 2-0) with AR0, 16 bits non signes, et pose TC ; CC = bits 9-8 : 0 EQ, 1 LT,
-             * 2 GT, 3 NEQ (SPRU172C). Jusqu'ici F4A8-F4AF tombait dans `unimpl` (NOP, TC inchange) et
-             * F5A8/F6A8/F7A8 dans RPT #k / le NOP F6xx / le bloc F7xx. Effet mesure : l'emetteur de bursts
-             * montants de la ROM (PROM0 0x8608 `cmpr eq,ar2 ; rc tc`, AR0 = fin du tampon) rendait la main
-             * aussitot sur un TC perime et n'ecrivait jamais les 16 mots BULDATA du burst (RACH, NB, TCH).
-             * 78 sites CMPR dans PROM0. CALYPSO_CMPR_ANCIEN=1 : ancien comportement. */
+            /* CMPR CC, ARx -- binutils tic54x-opc.c {"cmpr", 0xF4A8, mask 0xFCF8, {OP_CC3, OP_ARX}}:
+             * compares ARx (bits 2-0) with AR0, 16 bits unsigned, and sets TC; CC = bits 9-8: 0 EQ, 1 LT,
+             * 2 GT, 3 NEQ (SPRU172C). The ROM's uplink burst transmitter (PROM0 0x8608 `cmpr eq,ar2 ;
+             * rc tc`, AR0 = end of buffer) depends on it: with a stale TC it returns at once and never
+             * writes the 16 BULDATA words of the burst (RACH, NB, TCH). 78 CMPR sites in PROM0.
+             * CALYPSO_CMPR_ANCIEN=1: F4A8-F4AF treated as `unimpl` (NOP, TC unchanged). */
             if ((op & 0xFCF8) == 0xF4A8) {
                 static int cmpr_ancien = -1;
                 if (cmpr_ancien < 0) { const char *e = getenv("CALYPSO_CMPR_ANCIEN"); cmpr_ancien = (e && *e == '1') ? 1 : 0; }
@@ -2951,10 +2948,9 @@ int c54x_exec_one(C54xState *s)
                 if ((op & 0xFCFF) == 0xF480) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
-                    /* [2026-10-16] ADD src,ASM,dst : dst = dst + (src << ASM) (SPRU172C). Le decalage ASM
-                     * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
-                     * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
-                     * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                    /* ADD src,ASM,dst: dst = dst + (src << ASM) (SPRU172C), 2nd copy of the
+                     * handler above (the ROM's FR encoder relies on the ASM shift).
+                     * CALYPSO_ADDASM_ANCIEN=1: shift ignored. */
                     static int addasm_ancien = -1;
                     if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
                     if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
@@ -2965,18 +2961,16 @@ int c54x_exec_one(C54xState *s)
                 if ((op & 0xFCFF) == 0xF481) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
-                    /* [2026-10-16] SUB src,ASM,dst : dst = dst - (src << ASM) (SPRU172C). Le decalage ASM
-                     * etait ignore, comme pour LD src,ASM avant le 04/10. Le codeur FR de la ROM (RPE, PDROM
-                     * 0xeac1 `add b,asm,a` = xM << (6 - exp)) sortait des impulsions toutes a 3/4 (~0) :
-                     * parole montante reduite au bruit. CALYPSO_ADDASM_ANCIEN=1 : ancien comportement. */
+                    /* SUB src,ASM,dst: dst = dst - (src << ASM) (SPRU172C), 2nd copy of the
+                     * handler above. CALYPSO_ADDASM_ANCIEN=1: shift ignored. */
                     static int addasm_ancien = -1;
                     if (addasm_ancien < 0) addasm_ancien = calypso_gate("CALYPSO_ADDASM_ANCIEN", 0);
                     if (!addasm_ancien) { int sh = asm_shift(s); if (sh >= 0) sv <<= sh; else sv >>= -sh; sv = sext40(sv); }
                     if (dst) s->b = sext40(s->b - sv); else s->a = sext40(s->a - sv);
                     return consumed + s->lk_used;
                 }
-                /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word) -- 2e copie, meme correctif du decalage ASM
-                 * que la 1re (voir plus haut, [2026-10-04]). */
+                /* F482/F582: LD src,ASM,dst (mask FCFF, 1 word) -- 2nd copy, same ASM shift as the
+                 * 1st one (see above). */
                 if ((op & 0xFCFF) == 0xF482) {
                     int src, dst; c54x_f4_srcdst(op, &src, &dst);   /* FIX_F4XX_SRCDST */
                     int64_t sv = sext40(src ? s->b : s->a);
@@ -3342,9 +3336,9 @@ int c54x_exec_one(C54xState *s)
                     int64_t src_val = src_sel ? s->b : s->a;
                     int64_t *dst = dst_sel ? &s->b : &s->a;
                     switch (sub6) {
-                    case 0: c54x_carry_add40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthese] C, cf. retenue */
+                    case 0: c54x_carry_add40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthesis] C, see carry */
                             *dst = sext40(src_val + ((int64_t)(int16_t)op2 << 16)); break;
-                    case 1: c54x_carry_sub40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthese] C, cf. retenue */
+                    case 1: c54x_carry_sub40(s, src_val, (int64_t)(int16_t)op2 << 16);   /* [synthesis] C, see carry */
                             *dst = sext40(src_val - ((int64_t)(int16_t)op2 << 16)); break;
                     case 2: dst = dst8 ? &s->b : &s->a;
                             *dst = sext40((int64_t)(int16_t)op2 << 16); break;
@@ -3643,17 +3637,17 @@ int c54x_exec_one(C54xState *s)
                  * forever. */
                 static int bctc_sm = -1;
                 if (bctc_sm < 0) bctc_sm = calypso_gate("CALYPSO_C54X_BCTC_SM", 0);
-                /* [2026-10-15] CALYPSO_C54X_BCTC_NORM=1 : TC strict aussi apres un NORM. Deux sites
-                 * dans toute la ROM (PROM0 0x90a0, PROM3 0x38d60). A 0x90a0, `bitf *ar2,#8000h ;
-                 * ld #1,a ; norm a ; bc 0x90a8,ntc` pose le marqueur « trame de parole presente »
-                 * des bursts TCH montants (a_du_0 B_BLUD) : l'heuristique ACC (A != 0 -> saute)
-                 * l'effacait toujours, et la porte 0xb711 ne batissait aucun burst de parole
-                 * (rejeu du 15/10). A utiliser avec CALYPSO_NORM_TC=0 (NORM ne touche pas TC). */
+                /* CALYPSO_C54X_BCTC_NORM=1: strict TC also after a NORM. Two sites in the whole
+                 * ROM (PROM0 0x90a0, PROM3 0x38d60). At 0x90a0, `bitf *ar2,#8000h ; ld #1,a ;
+                 * norm a ; bc 0x90a8,ntc` sets the "speech frame present" marker of the uplink
+                 * TCH bursts (a_du_0 B_BLUD): the ACC heuristic (A != 0 -> jump) always clears
+                 * it, and the 0xb711 gate then builds no speech burst. To be used with
+                 * CALYPSO_NORM_TC=0 (NORM does not touch TC). */
                 static int bctc_norm = -1;
                 if (bctc_norm < 0) bctc_norm = calypso_gate("CALYPSO_C54X_BCTC_NORM", 0);
-                /* [2026-10-15] CALYPSO_C54X_BCTC_ETENDU=1 : TC strict aussi apres les autres
-                 * instructions qui POSENT TC sur le silicium -- CMPR (0xF4A8/0xFCF8, 234 sites
-                 * suivis d'un bc tc/ntc dans la ROM), BIT Xmem (0x96xx, 34), BITT (0x34xx). */
+                /* CALYPSO_C54X_BCTC_ETENDU=1: strict TC also after the other instructions that
+                 * SET TC on silicon -- CMPR (0xF4A8/0xFCF8, 234 sites followed by a bc tc/ntc in
+                 * the ROM), BIT Xmem (0x96xx, 34), BITT (0x34xx). */
                 static int bctc_etendu = -1;
                 if (bctc_etendu < 0) bctc_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
                 bool tc_strict = ((g_prev_op & 0xFE00) == 0x6000) || c54x_tc_par_rmw() ||
@@ -3662,17 +3656,17 @@ int c54x_exec_one(C54xState *s)
                                  (bctc_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 ||
                                                   (g_prev_op & 0xFF00) == 0x9600 ||
                                                   (g_prev_op & 0xFF00) == 0x3400 ||
-                                                  /* cmpm/bitf puis un ST #k / STM #k (0x76xx/0x77xx),
-                                                   * qui ne touchent pas TC -- PROM0 0xb2c1..0xb2c7 :
-                                                   * moitie du double tampon I/Q 0x0cce/0x0d2e, 50 %
-                                                   * de mauvais choix sous l'heuristique ACC. */
+                                                  /* cmpm/bitf then an ST #k / STM #k (0x76xx/0x77xx),
+                                                   * which do not touch TC -- PROM0 0xb2c1..0xb2c7:
+                                                   * half of the I/Q double buffer 0x0cce/0x0d2e, 50 %
+                                                   * wrong choices under the ACC heuristic. */
                                                   (((g_prev_op & 0xFE00) == 0x7600) &&
                                                    (g_prev2_op & 0xFE00) == 0x6000)));
-                /* [2026-10-15] CALYPSO_C54X_BCTC_COMBO=1 : TC strict quand la
-                 * condition combine TC/NTC avec C/NC et/ou BIO/NBIO (low nibble
-                 * != 0, ex. f83b = BC pmad,TC,NC,BIO). L'heuristique ACC ne vise que
-                 * f820/f830 ; ROM : f824 x1, f825 x3, f82a x1. Les champs du groupe 2
-                 * sont ET-es (SPRU172C) ; BIO n'est pas modelise (vrai). */
+                /* CALYPSO_C54X_BCTC_COMBO=1: strict TC when the condition combines
+                 * TC/NTC with C/NC and/or BIO/NBIO (low nibble != 0, e.g. f83b =
+                 * BC pmad,TC,NC,BIO). The ACC heuristic only targets f820/f830; ROM:
+                 * f824 x1, f825 x3, f82a x1. The group 2 fields are ANDed (SPRU172C);
+                 * BIO is not modelled (true). */
                 static int bctc_combo = -1;
                 if (bctc_combo < 0) bctc_combo = calypso_gate("CALYPSO_C54X_BCTC_COMBO", 0);
                 if (bctc_combo && (op & 0x0F) != 0) {
@@ -3690,8 +3684,8 @@ int c54x_exec_one(C54xState *s)
                 } else {
                     if (sub == 0x2)      take = (acc_signed != 0);
                     else /* sub==0x3 */  take = (acc_signed == 0);
-                    /* [2026-10-15] CALYPSO_BCTC_SONDE=1 : sites ou l'heuristique ACC diverge du
-                     * vrai TC -- par PC, avec l'instruction precedente (resume a la sortie). */
+                    /* CALYPSO_BCTC_SONDE=1: sites where the ACC heuristic diverges from the
+                     * real TC -- per PC, with the previous instruction (summary at exit). */
                     static int sonde = -1;
                     if (sonde < 0) { sonde = calypso_gate("CALYPSO_BCTC_SONDE", 0); if (sonde) atexit(bctc_sonde_resume); }
                     if (sonde) {
@@ -4425,7 +4419,7 @@ int c54x_exec_one(C54xState *s)
             {
                 uint8_t fa_sub = (op >> 4) & 0xF;
                 if (fa_sub == 0x2 || fa_sub == 0x3) {
-                    /* [2026-10-15] meme extension que le BC F82x/F83x (BCTC_NORM / BCTC_ETENDU) */
+                    /* same extension as the BC F82x/F83x (BCTC_NORM / BCTC_ETENDU) */
                     static int fa_norm = -1, fa_etendu = -1;
                     if (fa_norm < 0) fa_norm = calypso_gate("CALYPSO_C54X_BCTC_NORM", 0);
                     if (fa_etendu < 0) fa_etendu = calypso_gate("CALYPSO_C54X_BCTC_ETENDU", 0);
@@ -4434,12 +4428,12 @@ int c54x_exec_one(C54xState *s)
                         (fa_etendu && ((g_prev_op & 0xFCF8) == 0xF4A8 || (g_prev_op & 0xFF00) == 0x9600 ||
                                        (g_prev_op & 0xFF00) == 0x3400 ||
                                        (((g_prev_op & 0xFE00) == 0x7600) && (g_prev2_op & 0xFE00) == 0x6000)));
-                    /* [2026-10-16] CALYPSO_C54X_BCD_TC=1 : vrai TC sur TOUS les BCD TC/NTC (12 sites dans
-                     * la ROM). Le codec FR teste le signe de P[1] par `bit *ar2,0` puis, neuf instructions
-                     * plus loin (apres rpt subc), `bcd ...,tc` choisit de negativer le coefficient de
-                     * reflexion (Schur, PDROM 0xe763 codeur et 0xedc5) : le repli « saute toujours »
-                     * le contredisait 47 % du temps (sonde BCTC, rejeu micro de test) -> LPC au signe
-                     * aleatoire, spectre de la parole montante retourne (1 kHz rendu a ~3 kHz). */
+                    /* CALYPSO_C54X_BCD_TC=1: real TC on ALL BCD TC/NTC (12 sites in the ROM). The
+                     * FR codec tests the sign of P[1] with `bit *ar2,0` then, nine instructions
+                     * later (after rpt subc), `bcd ...,tc` chooses whether to negate the reflection
+                     * coefficient (Schur, PDROM 0xe763 encoder and 0xedc5): the "always jump"
+                     * fallback contradicts it 47 % of the time (BCTC probe) -> LPC with a random
+                     * sign, uplink speech spectrum flipped (1 kHz rendered at ~3 kHz). */
                     static int fa_tc_tous = -1;
                     if (fa_tc_tous < 0) fa_tc_tous = calypso_gate("CALYPSO_C54X_BCD_TC", 0);
                     if (fa_tc_tous) fa_tc_strict = true;
@@ -4482,11 +4476,10 @@ int c54x_exec_one(C54xState *s)
                     return consumed + s->lk_used;   /* not taken: fall through */
                 }
             }
-            /* [2026-10-15] CALYPSO_C54X_BCD_CARRY=1 : BCD sur la retenue (C 0x0C / NC 0x08) evalue
-             * pour de bon, avec ses 2 creneaux retardes. Le repli ci-dessous sautait TOUJOURS et
-             * SANS creneaux : dans le codec FR de la ROM (PDROM 0xe458, depaquetage des 260 bits :
-             * `rol b ; bcd 0xe463,nc`) aucun bit a 1 n'etait jamais range -> parametres FR nuls ->
-             * decodeur de parole muet (vocodeur ROM sans son, rejeu du 15/10). */
+            /* CALYPSO_C54X_BCD_CARRY=1: BCD on the carry (C 0x0C / NC 0x08) evaluated for real,
+             * with its 2 delay slots. The fallback below ALWAYS jumps and WITHOUT delay slots: in
+             * the ROM's FR codec (PDROM 0xe458, unpacking of the 260 bits: `rol b ; bcd 0xe463,nc`)
+             * no 1 bit would ever be stored -> null FR parameters -> mute speech decoder. */
             {
                 static int bcd_c = -1;
                 if (bcd_c < 0) bcd_c = calypso_gate("CALYPSO_C54X_BCD_CARRY", 0);
@@ -4499,7 +4492,7 @@ int c54x_exec_one(C54xState *s)
                     return consumed + s->lk_used;
                 }
             }
-            /* [2026-10-15] CALYPSO_BCTC_SONDE=1 : ou le repli « saute toujours » sert (PC, condition). */
+            /* CALYPSO_BCTC_SONDE=1: where the "always jump" fallback is used (PC, condition). */
             {
                 static int sonde = -1;
                 if (sonde < 0) { sonde = calypso_gate("CALYPSO_BCTC_SONDE", 0); if (sonde) atexit(bctc_sonde_resume); }
@@ -5120,7 +5113,7 @@ int c54x_exec_one(C54xState *s)
             case 0xE1: s->b = ~s->b; s->b = sext40(s->b); break;  /* CMPL B */
             case 0xE2: s->a = -s->a; s->a = sext40(s->a); break;  /* NEG A */
             case 0xE3: s->b = -s->b; s->b = sext40(s->b); break;  /* NEG B */
-            /* [2026-10-03] SAT : -2^31 sign-etendu (voir calypso_c54x.c, post-saturation OVM). */
+            /* SAT: -2^31 sign-extended (see calypso_c54x.c, OVM post-saturation). */
             case 0xE4: /* SAT A */ if (s->st0 & ST0_OVA) s->a = (s->a < 0) ? (getenv("CALYPSO_SAT_NEG_ANCIEN") && *getenv("CALYPSO_SAT_NEG_ANCIEN") == '1' ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL; break;
             case 0xE5: /* SAT B */ if (s->st0 & ST0_OVB) s->b = (s->b < 0) ? (getenv("CALYPSO_SAT_NEG_ANCIEN") && *getenv("CALYPSO_SAT_NEG_ANCIEN") == '1' ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL; break;
             case 0xE8: /* ABS A */ s->a = (s->a < 0) ? -s->a : s->a; s->a = sext40(s->a); break;
@@ -5396,7 +5389,7 @@ int c54x_exec_one(C54xState *s)
             /* RIF (calypso_rif.c): SPCR/SPCX/DXR are really written. SPCR is how
              * the firmware opens RINT_MASK or RDMA_MASK, i.e. how it chooses the
              * transfer mode of CAL207 §3.7.1. */
-            /* Coprocesseur A5 (0x2800..0x2818), voir calypso_a5.c. */
+            /* A5 coprocessor (0x2800..0x2818), see calypso_a5.c. */
             if (calypso_a5_portw(s, pa, data_read(s, addr))) {
                 consumed = 2;
                 return consumed + s->lk_used;
@@ -5505,20 +5498,19 @@ int c54x_exec_one(C54xState *s)
             int mode = (op & 0x80) ? ((op >> 3) & 0x0F) : -1;
             uint16_t smem_addr;
             s->lk_used = false;
-            /* [2026-09-23] ORDRE DES MOTS EN ADRESSAGE LONG : lk D'ABORD (pc+1),
-             * dmad ENSUITE (pc+2), comme PORTW `75f8 4356 2800` et ST
-             * `76f8 4356 0000` dans ce meme coeur et comme le desassembleur
-             * binutils. L'ordre inverse faisait de `70f8 0012 0014` (0x76c0,
-             * mesure de puissance) AR4 <- AR2 au lieu de AR2 <- AR4 : la
-             * routine PM lisait un AR2 perime puis ecrivait ses resultats en
-             * 0x3d0b..0x3d89, sur les variables du TCH -- dont le pointeur du
-             * tampon SACCH 0x3d89, envoye dans l'API RAM : SACCH jamais
-             * decodee, LOS en appel, et d_debug_ptr ecrase (DSP perdu).
-             * CALYPSO_MVKD_DMAD_AVANT=1 retablit l'ancien ordre (A/B). */
+            /* WORD ORDER IN LONG ADDRESSING: lk FIRST (pc+1), dmad SECOND (pc+2),
+             * like PORTW `75f8 4356 2800` and ST `76f8 4356 0000` in this same core
+             * and like the binutils disassembler. The reverse order would turn
+             * `70f8 0012 0014` (0x76c0, power measurement) into AR4 <- AR2 instead
+             * of AR2 <- AR4: the PM routine would read a stale AR2 and write its
+             * results at 0x3d0b..0x3d89, over the TCH variables -- including the
+             * SACCH buffer pointer 0x3d89 sent to the API RAM (SACCH never decoded,
+             * LOS in call, d_debug_ptr overwritten).
+             * CALYPSO_MVKD_DMAD_AVANT=1 selects the reverse order (A/B). */
             static int dmad_avant = -1;
             if (dmad_avant < 0) { const char *e = calypso_getenv("CALYPSO_MVKD_DMAD_AVANT"); dmad_avant = (e && *e == '1'); }
             if (mode >= 0xC && !dmad_avant) dmad = prog_fetch(s, s->pc + 2);
-            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+1 (voir plus haut) */
+            if (mode >= 0xC) {                 /* absolute/long Smem: lk @pc+1 (see above) */
                 uint16_t lk = prog_fetch(s, s->pc + (dmad_avant ? 2 : 1));
                 int nar = op & 0x07;
                 if (mode == 0xC) {                      /* *ARx(lk), no modify */
@@ -5534,11 +5526,11 @@ int c54x_exec_one(C54xState *s)
             } else {                           /* direct or non-absolute indirect */
                 smem_addr = resolve_smem(s, op, &ind);  /* plus the AR post-modify */
             }
-            /* [2026-10-03] SPRU172C MVKD : dmad -> DAR ; sous RPT, DAR + 1 apres chaque transfert (« move
-             * consecutive words »). Le coeur relisait dmad a chaque repetition : `rpt #15 ; mvkd 0x2c00,*ar7+`
-             * (PROM0 0x9aaa, historique des metriques du Viterbi TCH lu par le CHED 0x9ad3) copiait 16 fois
-             * data[0x2c00]. Meme mecanique que READA/MVPD/MACP (rpt_fresh, mvpd_src).
-             * CALYPSO_MVK_RPT_ANCIEN=1 = ancien comportement (MVKD et MVDK). */
+            /* SPRU172C MVKD: dmad -> DAR; under RPT, DAR + 1 after each transfer ("move consecutive
+             * words"). Re-reading dmad at every repetition would make `rpt #15 ; mvkd 0x2c00,*ar7+`
+             * (PROM0 0x9aaa, TCH Viterbi metrics history read by the CHED 0x9ad3) copy data[0x2c00]
+             * 16 times. Same mechanism as READA/MVPD/MACP (rpt_fresh, mvpd_src).
+             * CALYPSO_MVK_RPT_ANCIEN=1 = dmad re-read at every repetition (MVKD and MVDK). */
             {   static int mvk_ancien = -1;
                 if (mvk_ancien < 0) { const char *e = getenv("CALYPSO_MVK_RPT_ANCIEN"); mvk_ancien = (e && *e == '1') ? 1 : 0; }
                 if (!mvk_ancien && s->rpt_active) {
@@ -5569,20 +5561,19 @@ int c54x_exec_one(C54xState *s)
             int mode = (op & 0x80) ? ((op >> 3) & 0x0F) : -1;
             uint16_t smem_addr;
             s->lk_used = false;
-            /* [2026-09-23] ORDRE DES MOTS EN ADRESSAGE LONG : lk D'ABORD (pc+1),
-             * dmad ENSUITE (pc+2), comme PORTW `75f8 4356 2800` et ST
-             * `76f8 4356 0000` dans ce meme coeur et comme le desassembleur
-             * binutils. L'ordre inverse faisait de `70f8 0012 0014` (0x76c0,
-             * mesure de puissance) AR4 <- AR2 au lieu de AR2 <- AR4 : la
-             * routine PM lisait un AR2 perime puis ecrivait ses resultats en
-             * 0x3d0b..0x3d89, sur les variables du TCH -- dont le pointeur du
-             * tampon SACCH 0x3d89, envoye dans l'API RAM : SACCH jamais
-             * decodee, LOS en appel, et d_debug_ptr ecrase (DSP perdu).
-             * CALYPSO_MVKD_DMAD_AVANT=1 retablit l'ancien ordre (A/B). */
+            /* WORD ORDER IN LONG ADDRESSING: lk FIRST (pc+1), dmad SECOND (pc+2),
+             * like PORTW `75f8 4356 2800` and ST `76f8 4356 0000` in this same core
+             * and like the binutils disassembler. The reverse order would turn
+             * `70f8 0012 0014` (0x76c0, power measurement) into AR4 <- AR2 instead
+             * of AR2 <- AR4: the PM routine would read a stale AR2 and write its
+             * results at 0x3d0b..0x3d89, over the TCH variables -- including the
+             * SACCH buffer pointer 0x3d89 sent to the API RAM (SACCH never decoded,
+             * LOS in call, d_debug_ptr overwritten).
+             * CALYPSO_MVKD_DMAD_AVANT=1 selects the reverse order (A/B). */
             static int dmad_avant = -1;
             if (dmad_avant < 0) { const char *e = calypso_getenv("CALYPSO_MVKD_DMAD_AVANT"); dmad_avant = (e && *e == '1'); }
             if (mode >= 0xC && !dmad_avant) dmad = prog_fetch(s, s->pc + 2);
-            if (mode >= 0xC) {                 /* Smem absolu/long : lk @pc+1 (voir plus haut) */
+            if (mode >= 0xC) {                 /* absolute/long Smem: lk @pc+1 (see above) */
                 uint16_t lk = prog_fetch(s, s->pc + (dmad_avant ? 2 : 1));
                 int nar = op & 0x07;
                 if (mode == 0xC) {                      /* *ARx(lk), no modify */
@@ -5590,15 +5581,15 @@ int c54x_exec_one(C54xState *s)
                 } else if (mode == 0xD || mode == 0xE) { /* *+ARx(lk)[%] premod */
                     s->ar[nar] = (uint16_t)(s->ar[nar] + lk);
                     smem_addr = s->ar[nar];
-                } else {                                 /* 0xF : *(lk) absolu */
+                } else {                                 /* 0xF: *(lk) absolute */
                     smem_addr = lk;
                 }
                 s->st0 = (s->st0 & ~ST0_ARP_MASK) | (nar << ST0_ARP_SHIFT);
                 s->lk_used = true;
-            } else {                           /* direct ou indirect non-abs */
+            } else {                           /* direct or non-absolute indirect */
                 smem_addr = resolve_smem(s, op, &ind);  /* +post-modify AR */
             }
-            /* [2026-10-03] SPRU172C MVDK : meme DAR qui s'incremente sous RPT (voir MVKD). */
+            /* SPRU172C MVDK: same DAR incrementing under RPT (see MVKD). */
             {   static int mvk_ancien = -1;
                 if (mvk_ancien < 0) { const char *e = getenv("CALYPSO_MVK_RPT_ANCIEN"); mvk_ancien = (e && *e == '1') ? 1 : 0; }
                 if (!mvk_ancien && s->rpt_active) {
@@ -6106,8 +6097,8 @@ int c54x_exec_one(C54xState *s)
             int64_t src = dst ? sext40((int64_t)s->b) : sext40((int64_t)s->a);
             int64_t d = src - ((int64_t)(uint16_t)val << 15);
             int64_t r = (d >= 0) ? ((d << 1) + 1) : (src << 1);
-            /* [2026-10-03] SPRU172C : SUBC « Affects C » -- C = 1 quand la soustraction est positive ou nulle
-             * (exemples du manuel : 4 - 1<<15 -> C=0 ; RPT #15 SUBC 41h/7 -> C=1). */
+            /* SPRU172C: SUBC "Affects C" -- C = 1 when the subtraction is positive or zero
+             * (manual examples: 4 - 1<<15 -> C=0; RPT #15 SUBC 41h/7 -> C=1). */
             if (d >= 0) s->st0 |= ST0_C; else s->st0 &= ~ST0_C;
             if (dst) s->b = sext40(r); else s->a = sext40(r);
             return consumed + s->lk_used;
@@ -6302,11 +6293,11 @@ int c54x_exec_one(C54xState *s)
              *   POLY  Smem     : B = Smem << 16 ; A = rnd(A(32-16) * T + B)   (B = the OLD B)
              * The speech-frame code runs SQURS once per TCH/F frame (opcode histogram of the replay).
              * CALYPSO_SQURS_MAC=1 restores the old decoding. */
-            /* SQURS correct = DEFAUT depuis le 2026-10-03 22:40. Il faisait tomber la SB (0x7e40 `squrs @0x22,a`,
-             * bruit residuel E - c^2 de la correlation SCH) a cause de la saturation negative non sign-etendue
-             * (corrigee dans calypso_c54x.c) : SB 57 % avec ou sans lui. Avec MVKD/MVDK sous RPT, il rend le
-             * BFI de la parole juste (rejeu : 147/2875 au lieu de 2875/2875 ; banc : 200/3000, tous sur des
-             * trames vraiment mauvaises ou volees par la FACCH). CALYPSO_SQURS_MAC=1 force l'ancien decodage. */
+            /* Correct SQURS = DEFAULT. It feeds the SB (0x7e40 `squrs @0x22,a`, residual noise E - c^2
+             * of the SCH correlation; depends on the sign-extended negative saturation of
+             * calypso_c54x.c) and, with MVKD/MVDK under RPT, gives a correct speech BFI (replay:
+             * 147/2875 instead of 2875/2875; bench: 200/3000, all on really bad frames or frames
+             * stolen by the FACCH). CALYPSO_SQURS_MAC=1 forces the MAC decoding. */
             static int squrs_mac = -1;
             if (squrs_mac < 0) { const char *e = getenv("CALYPSO_SQURS_MAC"); squrs_mac = (e && *e == '1') ? 1 : 0; }
             if (!squrs_mac && (op & 0xFE00) == 0x3A00) {
@@ -6317,7 +6308,7 @@ int c54x_exec_one(C54xState *s)
                 s->t = val;
                 return consumed + s->lk_used;
             }
-            static int poly_mac = -1;   /* CALYPSO_POLY_MAC=1 : ancien decodage de POLY seul */
+            static int poly_mac = -1;   /* CALYPSO_POLY_MAC=1: MAC decoding of POLY alone */
             if (poly_mac < 0) { const char *e = getenv("CALYPSO_POLY_MAC"); poly_mac = (e && *e == '1') ? 1 : 0; }
             if (!poly_mac && (op & 0xFF00) == 0x3600) {
                 int64_t ahi = (sext40(s->a) >> 16) & 0x1FFFF;          /* A(32-16), 17-bit operand */
@@ -6479,18 +6470,18 @@ int c54x_exec_one(C54xState *s)
                 uint16_t val = data_read(s, addr);
                 s->rpt_count = val;
                 s->rpt_active = true; s->rpt_fresh = true;
-                /* [2026-09-23] + lk_used : avec Smem absolu (47f8 = RPT *(lk))
-                 * l'instruction fait DEUX mots. `pc += 1` laissait l'adresse lk
-                 * s'executer comme l'instruction repetee. Mesure : PROM0 0x724a
-                 * `47f8 3fd8` (RPT *(0x3fd8), puis NOP) -- dans la queue de l'IT
-                 * trame, contexte de l'interrompu deja restaure -- executait
-                 * 0x3fd8 (`*AR0+0%`) : AR0 1 -> 2, resauve par le prologue 0x013b
-                 * et rendu a la boucle RPTB 0xe93e..0xe957 (tampon circulaire
-                 * `*AR5+0%`, BK=16). AR5 derivait alors en lineaire, les appels
-                 * suivants de 0xe931 (BRC 0x77) ecrasaient data[0x2d0d] (pointeur
-                 * pose a 0x2d0e par 0xe68a), AR5 = 0 + 8 au CALLD 0xea0c, et
-                 * 0xeac9 `MVDD *AR2+,*AR5+` sous RPT #16 ecrivait SP : le
-                 * « SP-CORRUPT pc=0xeac9 sp -> 0x0004 » de chaque appel en TCH. */
+                /* + lk_used: with an absolute Smem (47f8 = RPT *(lk)) the
+                 * instruction is TWO words. A bare `pc += 1` would execute the lk
+                 * address as the repeated instruction: PROM0 0x724a `47f8 3fd8`
+                 * (RPT *(0x3fd8), then NOP) -- in the tail of the frame IRQ, the
+                 * interrupted context already restored -- would execute 0x3fd8
+                 * (`*AR0+0%`): AR0 1 -> 2, saved again by the 0x013b prologue and
+                 * handed back to the RPTB loop 0xe93e..0xe957 (circular buffer
+                 * `*AR5+0%`, BK=16). AR5 would then drift linearly, the next calls
+                 * of 0xe931 (BRC 0x77) overwrite data[0x2d0d] (pointer set at
+                 * 0x2d0e by 0xe68a), AR5 = 0 + 8 at the CALLD 0xea0c, and 0xeac9
+                 * `MVDD *AR2+,*AR5+` under RPT #16 write SP (SP-CORRUPT at
+                 * pc=0xeac9 on every TCH call). */
                 s->pc += 1 + s->lk_used;
                 return 0;
             }

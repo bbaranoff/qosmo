@@ -1,30 +1,30 @@
-/* calypso_vsp.c - port serie voix (VSP) du DSP Calypso.
+/* calypso_vsp.c - voice serial port (VSP) of the Calypso DSP.
  *
- * [2026-10-15] LE VOCODEUR DE LA ROM N'AVAIT PAS DE PORT. La ROM 3606 contient
- * tout le chemin voix : decodeur DL (tache 0x7355, codec par le repartiteur
- * *(0x3f64) code 43), codeur UL (tache 0x7400, code 34), et l'ISR par
- * echantillon 0xc14a (vecteur 20, IMR bit 4) qui lit DRR (data 0x20, mvkd 0x20)
- * et ecrit DXR (data 0x21, mvmd bh,0x21) a 8 kHz, avec un FIR de 31 coefficients
- * et les gains d_audio_gain_ul/dl. Sur le Calypso, ce port SP0 est relie a
- * l'ABB (TWL3025, codec voix) par le VSP. Rien de tout cela n'etait modelise :
- * MMR 0x20-0x22 inertes, IT 20 jamais levee -> anneaux 0x3e00 (UL) / 0x4000 (DL)
- * jamais remplis ni vides, et la parole passait par GAPK sur l'hote.
+ * The 3606 ROM contains the whole voice path: DL decoder (task 0x7355, codec
+ * through the dispatcher *(0x3f64) code 43), UL encoder (task 0x7400, code 34),
+ * and the per-sample ISR 0xc14a (vector 20, IMR bit 4) which reads DRR (data
+ * 0x20, mvkd 0x20) and writes DXR (data 0x21, mvmd bh,0x21) at 8 kHz, with a
+ * 31-coefficient FIR and the d_audio_gain_ul/dl gains. On the Calypso this SP0
+ * port is wired to the ABB (TWL3025, voice codec) through the VSP. Without this
+ * model MMR 0x20-0x22 are inert, IRQ 20 is never raised, the 0x3e00 (UL) /
+ * 0x4000 (DL) rings are never filled nor drained, and speech goes through GAPK
+ * on the host.
  *
- * Ce modele ne s'accroche pas a data_read/data_write (chemin rapide
- * c54x_rapide) : a chaque echantillon il pose DRR, leve l'IT 20 si la ROM a
- * arme le port (IMR bit 4, SPC = 0xC8 : XRST|RRST), fait tourner l'ISR, puis
- * releve DXR. Debit : 960 echantillons pour 26 trames (8 kHz exacts par rapport
- * au fn), soit 36 ou 37 par trame -- la regulation de la ROM (0xc4f7, ecart
- * d'anneau > 60) saute des trames si le debit derive.
+ * This model does not hook data_read/data_write (c54x_rapide fast path): for
+ * every sample it sets DRR, raises IRQ 20 if the ROM has armed the port (IMR
+ * bit 4, SPC = 0xC8: XRST|RRST), runs the ISR, then collects DXR. Rate: 960
+ * samples per 26 frames (exactly 8 kHz relative to the fn), i.e. 36 or 37 per
+ * frame -- the ROM's regulation (0xc4f7, ring gap > 60) skips frames if the
+ * rate drifts.
  *
- * Echange avec l'hote : deux anneaux shm (calypso_vsp.h), sans blocage ; un
- * anneau UL vide donne du silence, un DL plein ecrase le plus ancien.
- * pont/vsp_audio.py les relie a PulseAudio (gsm_mic.monitor -> UL, DL ->
- * gsm_audio), les memes points que GAPK et que l'etage « voix » de banc-max.
+ * Exchange with the host: two shm rings (calypso_vsp.h), non-blocking; an
+ * empty UL ring yields silence, a full DL ring overwrites the oldest sample.
+ * pont/vsp_audio.py connects them to PulseAudio (gsm_mic.monitor -> UL, DL ->
+ * gsm_audio), the same points as GAPK and as the "voice" stage of banc-max.
  *
- * CALYPSO_VSP=1 l'active (defaut 0 : comportement d'avant, GAPK sur l'hote).
- * Le mobile doit alors tourner en `io-handler l1phy` (BANC_VOCODEUR=rom) pour
- * que le firmware leve les mutes du vocodeur (prim_tch.c:101-111). */
+ * CALYPSO_VSP=1 enables it (default 0: GAPK on the host). The mobile must then
+ * run with `io-handler l1phy` (BANC_VOCODEUR=rom) so that the firmware lifts
+ * the vocoder mutes (prim_tch.c:101-111). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,17 +69,17 @@ bool calypso_vsp_actif(void)
 
 static struct {
     VspAnneau *ul, *dl;
-    uint32_t   lu_ul;          /* position de lecture dans l'anneau UL */
-    unsigned   reste;          /* accumulateur 960/26 */
+    uint32_t   lu_ul;          /* read position in the UL ring */
+    unsigned   reste;          /* 960/26 accumulator */
     unsigned long rint, arme, desarme, sous_ul, trames, saut_ul;
     long       dl_max, ul_max;
-    uint32_t   file_ul_max;    /* retard de lecture UL le plus grand de la periode */
+    uint32_t   file_ul_max;    /* largest UL read lag over the period */
 } v;
 
 long calypso_vsp_trame(C54xState *dsp, calypso_vsp_courir_fn courir, uint32_t fn)
 {
     if (!calypso_vsp_actif() || !dsp || !dsp->running) return 0;
-    {   /* CALYPSO_VSP_SHM=0 : pas d'anneaux (rejeu hors ligne, sans toucher au banc) */
+    {   /* CALYPSO_VSP_SHM=0: no rings (offline replay, without touching the bench) */
         static int shm = -1;
         if (shm < 0) { const char *e = calypso_getenv("CALYPSO_VSP_SHM"); shm = !(e && *e == '0'); }
         if (shm && !v.ul) v.ul = anneau_ouvrir(VSP_SHM_UL);
@@ -95,15 +95,15 @@ long calypso_vsp_trame(C54xState *dsp, calypso_vsp_courir_fn courir, uint32_t fn
         bool arme = (dsp->imr & (1u << VSP_IT_BIT)) && (spc & 0xC0) == 0xC0;
         if (!arme) { v.desarme++; continue; }
         v.arme++;
-        /* echantillon micro -> DRR */
+        /* microphone sample -> DRR */
         int16_t ech = 0;
         if (v.ul) {
             uint32_t ecrit = __atomic_load_n(&v.ul->ecrit, __ATOMIC_ACQUIRE);
-            /* [2026-10-16] retard de lecture BORNE. Le rattrapage n'avait lieu qu'au-dela de
-             * VSP_SHM_N (2 s) : un DSP en retard au demarrage (camp, ~1000 trames lentes)
-             * laissait le micro jusqu'a 2 s derriere, pour toute la duree de la pile (la voix
-             * revenait 4,5 s apres le ton, banc du 16/10). CALYPSO_VSP_UL_MAX_MS (defaut 120)
-             * borne ce retard : au-dela on repart a la moitie, et on compte le saut. */
+            /* BOUNDED read lag. A DSP running late at startup (camping, ~1000 slow
+             * frames) would otherwise leave the microphone up to VSP_SHM_N (2 s) behind
+             * for the whole life of the stack. CALYPSO_VSP_UL_MAX_MS (default 120) bounds
+             * that lag: beyond it the read position jumps to half of it, and the jump
+             * is counted. */
             static uint32_t ul_max_ech;
             if (!ul_max_ech) { const char *e = calypso_getenv("CALYPSO_VSP_UL_MAX_MS");
                 ul_max_ech = (uint32_t)((e && *e ? atoi(e) : 120) * 8); if (ul_max_ech < 160) ul_max_ech = 160; }
@@ -114,7 +114,7 @@ long calypso_vsp_trame(C54xState *dsp, calypso_vsp_courir_fn courir, uint32_t fn
             else v.sous_ul++;
             if (abs(ech) > v.ul_max) v.ul_max = abs(ech);
         }
-        if (!v.ul) {   /* CALYPSO_VSP_UL_FICHIER=chemin : micro lu dans un fichier s16le (rejeu) */
+        if (!v.ul) {   /* CALYPSO_VSP_UL_FICHIER=path: microphone read from an s16le file (replay) */
             static FILE *fu; static int lu;
             if (!lu) { lu = 1; const char *e = calypso_getenv("CALYPSO_VSP_UL_FICHIER"); if (e && *e) fu = fopen(e, "rb"); }
             if (fu && fread(&ech, 2, 1, fu) != 1) { rewind(fu); if (fread(&ech, 2, 1, fu) != 1) ech = 0; }
@@ -126,9 +126,9 @@ long calypso_vsp_trame(C54xState *dsp, calypso_vsp_courir_fn courir, uint32_t fn
         if (!dsp->idle && courir) courir(dsp, 400);
         fait += dsp->insn_count - avant;
         v.rint++;
-        /* DXR -> echantillon haut-parleur */
+        /* DXR -> loudspeaker sample */
         int16_t sortie = (int16_t)dsp->data[VSP_DXR];
-        {   /* CALYPSO_VSP_DL_FICHIER=chemin : copie brute s16le de la sortie (rejeu, analyse hors ligne) */
+        {   /* CALYPSO_VSP_DL_FICHIER=path: raw s16le copy of the output (replay, offline analysis) */
             static FILE *f; static int lu;
             if (!lu) { lu = 1; const char *e = calypso_getenv("CALYPSO_VSP_DL_FICHIER"); if (e && *e) f = fopen(e, "wb"); }
             if (f) fwrite(&sortie, 2, 1, f);

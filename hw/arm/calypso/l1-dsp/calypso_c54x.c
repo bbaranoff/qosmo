@@ -13,15 +13,15 @@
 #include "c54x_internal.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
-/* Fournies par QEMU (calypso_trx.c, calypso_inth.c) ou par les cales de
- * c54x_exe (src/main.c). Sans prototype, l'appel etait implicite (int). */
+/* Provided by QEMU (calypso_trx.c, calypso_inth.c) or by the c54x_exe shims
+ * (src/main.c). */
 extern uint32_t calypso_trx_get_fn(void);
 extern void calypso_inth_arm_ack(void);
 
 int c54x_rapide = 0;
 
-/* [2026-09-23] Interrupteur des sondes pures, voir c54x_internal.h. Resolu une
- * fois ; un appelant (main.c de c54x_exe, -vvvv) peut l'avoir pose avant. */
+/* Switch of the pure probes, see c54x_internal.h. Resolved once; a caller
+ * (main.c of c54x_exe, -vvvv) may have set it beforehand. */
 int c54x_sondes = -1;
 void c54x_sondes_resoudre(void)
 {
@@ -30,29 +30,28 @@ void c54x_sondes_resoudre(void)
     c54x_sondes = calypso_gate("CALYPSO_SONDES", (d && *d) ? 1 : 0);
 }
 
-/* [2026-09-23] ANNEAU-EXEC + vidage au SP-CORRUPT (demande du banc : plantage
- * en communication TCH, « SP-CORRUPT pc=0xeac9 op=0xe58b sp 0x5ac0 -> 0x0004 »,
- * PDROM 0xeac6 STM #0x2ba3,AR2 ; 0xeac8 RPT #16 ; 0xeac9 MVDD *AR2+,*AR5+).
- * TOUJOURS actif, hors interrupteur des sondes : l'anneau coute une dizaine
- * d'ecritures par instruction, le vidage ne coute qu'au SP-CORRUPT (3 premiers,
- * hors l'artefact du reset a insn=0). Une entree par PASSAGE dans la boucle,
- * donc une par iteration de RPT (le RPT refait tout le haut de boucle sans
- * avancer le PC). Etat AVANT l'instruction, plus SP APRES et « IT prise ».
- * Les lignes contiennent « SP-CORRUPT » : niveau 0 de verbosite.c, visibles
- * sans -v. Ecrit seulement dans l'anneau et sur stderr : ne change rien au DSP. */
+/* ANNEAU-EXEC + dump on SP-CORRUPT (e.g. "SP-CORRUPT pc=0xeac9 op=0xe58b sp
+ * 0x5ac0 -> 0x0004", PDROM 0xeac6 STM #0x2ba3,AR2 ; 0xeac8 RPT #16 ; 0xeac9
+ * MVDD *AR2+,*AR5+). ALWAYS active, outside the probe switch: the ring costs
+ * about ten writes per instruction, the dump only costs on SP-CORRUPT (first 3,
+ * excluding the reset artefact at insn=0). One entry per PASS through the loop,
+ * hence one per RPT iteration (the RPT redoes the whole loop head without
+ * advancing the PC). State BEFORE the instruction, plus SP AFTER and "interrupt
+ * taken". The lines contain "SP-CORRUPT": level 0 of verbosite.c, visible
+ * without -v. Only writes the ring and stderr: changes nothing in the DSP. */
 unsigned g_c54x_it_prises = 0;
 typedef struct {
     uint32_t insn;
-    uint16_t pc, op, sp, sp_apres, ar2, ar5, rpt_count, st0, ar3, ar4, brc;   /* st0 : [2026-10-22 22:10] DP dans le chemin */
+    uint16_t pc, op, sp, sp_apres, ar2, ar5, rpt_count, st0, ar3, ar4, brc;   /* st0: DP along the path */
     uint8_t  xpc, rpt, intm, it;
     uint16_t it_n;
 } C54xAnneauExec;
-#define C54X_ANNEAU_N 512   /* [2026-10-22] 64 -> 512 : remonter toute une routine (sonde [imr0]) */
+#define C54X_ANNEAU_N 512   /* deep enough to trace back a whole routine ([imr0] probe) */
 static C54xAnneauExec g_anneau_exec[C54X_ANNEAU_N];
 static unsigned g_anneau_exec_idx = 0;
 
-/* [2026-10-22] sonde [imr0] (c54x_mem.c) : le chemin d'execution qui mene a l'ecriture de l'IMR, sur stdout,
- * une ligne par instruction distincte (les iterations de RPT/boucle repliees). */
+/* [imr0] probe (c54x_mem.c): the execution path leading to the IMR write, on stdout, one line
+ * per distinct instruction (RPT/loop iterations folded). */
 void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max)
 {
     unsigned n = g_anneau_exec_idx < C54X_ANNEAU_N ? g_anneau_exec_idx : C54X_ANNEAU_N;
@@ -88,7 +87,7 @@ sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_cour
             (unsigned)s->xpc, s->pmst, (unsigned)s->brc, s->rsa, s->rea,
             (int)s->rptb_active, (int)s->rpt_active, (unsigned)s->rpt_count,
             (unsigned)s->delay_slots);
-    unsigned n = g_anneau_exec_idx < 64 ? g_anneau_exec_idx : 64;   /* le vidage SP-CORRUPT garde ses 64 */
+    unsigned n = g_anneau_exec_idx < 64 ? g_anneau_exec_idx : 64;   /* the SP-CORRUPT dump keeps its 64 */
     for (unsigned k = n; k >= 1; k--) {
         const C54xAnneauExec *e = &g_anneau_exec[(g_anneau_exec_idx - k) % C54X_ANNEAU_N];
         fprintf(stderr, "[c54x] SP-CORRUPT-ANNEAU[-%02u] insn=%u pc=0x%04x op=0x%04x "
@@ -99,10 +98,9 @@ sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_cour
     }
 }
 
-/* [2026-09-23] Etat de l'avance rapide sorti de la fonction : la resolution
- * (getenv, message d'armement) passe dans dsp_idle_ff_init(), appelee une fois,
- * et dsp_idle_fast_forward() devient assez courte pour etre mise en ligne dans
- * la boucle. Logique strictement inchangee. */
+/* Fast-forward state kept outside the function: the resolution (getenv,
+ * arming message) is in dsp_idle_ff_init(), called once, and
+ * dsp_idle_fast_forward() is short enough to be inlined in the loop. */
 static int     ff_enabled = -1;
 static int     ff_n_ranges = 0;
 static uint16_t ff_lo[DSP_IDLE_FF_MAX_RANGES];
@@ -620,9 +618,9 @@ int c54x_run(C54xState *s, int n_insns)
     static int run_num = 0;
     run_num++;
 
-    /* [2026-09-23] Sondes de tete (une passe par appel, mais le banc et le
-     * rejeu appellent c54x_run par tranches de 1 a 64 instructions) : toutes
-     * pures, derriere l'interrupteur. */
+    /* Head probes (one pass per call, but the bench and the replay call
+     * c54x_run in slices of 1 to 64 instructions): all pure, behind the
+     * switch. */
     if (__builtin_expect(c54x_sondes < 0, 0)) c54x_sondes_resoudre();
     if (C54X_SONDES) {
     /* SP history ring buffer (64 entries × insn/PC/SP). Sampled every
@@ -1085,7 +1083,7 @@ int c54x_run(C54xState *s, int n_insns)
     }   /* C54X_SONDES : sondes de tete */
 
     while (executed < n_insns && s->running && !s->idle) {
-        unsigned it_avant = g_c54x_it_prises;   /* [2026-09-23] ANNEAU-EXEC */
+        unsigned it_avant = g_c54x_it_prises;   /* ANNEAU-EXEC */
         /* Cold-reset redirect to the firmware entry point, off by default.
          * The PROM dump does not contain the Calypso silicon mask-ROM, which
          * on real hardware runs at reset, sets SP=0x5AC8 plus the MMRs and
@@ -1214,8 +1212,8 @@ int c54x_run(C54xState *s, int n_insns)
                 s->pc = 0xc704;
             }
         }
-        /* [2026-09-23] Sondes pures D247-TRACE .. PROM3-VISIT, derriere
-         * l'interrupteur (aucune n'ecrit l'etat du DSP). */
+        /* Pure probes D247-TRACE .. PROM3-VISIT, behind the switch (none of
+         * them writes the DSP state). */
         if (C54X_SONDES) {
         /* D247-TRACE (read-only). 0xd247 has exactly one native caller, PROM0
          * 0x7102, inside the operational block 0x70ce-0x7106. These probes
@@ -2243,10 +2241,10 @@ int c54x_run(C54xState *s, int n_insns)
         /* Track SP changes inside RPTB loops */
         uint16_t sp_before = s->sp;
         /* Snapshot for the transfer ring, the A-write ring and the NOP-region
-         * guard. [2026-09-23] pre_op ne sert qu'au bloc !c54x_rapide de fin de
-         * boucle : plus de prog_fetch quand ce bloc est coupe. Sous C54X_SONDES
-         * on le garde, pour que le message d'armement OVLY-SCRATCH (premier
-         * appel de c54x_ovly_bas) sorte au meme endroit qu'avant. */
+         * guard. pre_op only serves the !c54x_rapide block at the end of the
+         * loop: no prog_fetch when that block is off. Under C54X_SONDES it is
+         * kept, so that the OVLY-SCRATCH arming message (first call of
+         * c54x_ovly_bas) comes out at the same place. */
         uint16_t pre_pc  = s->pc;
         uint8_t  pre_xpc = s->xpc & 0x3;
         uint16_t pre_op  = (c54x_rapide && !C54X_SONDES) ? 0 : prog_fetch(s, s->pc);
@@ -2561,8 +2559,8 @@ int c54x_run(C54xState *s, int n_insns)
          * first pass and dumps the overlay contents, to locate the imbalance
          * (a PSHM with no matching POPM, or a branch wrongly taken before the
          * POPMs). One-shot, one frame.
-         * [2026-09-23] La sonde (OVLY-DUMP / OVLY-TRACE) passe derriere
-         * l'interrupteur ; la bequille TEST_3FCD qu'elle contient reste active. */
+         * The probe (OVLY-DUMP / OVLY-TRACE) is behind the switch; the
+         * TEST_3FCD crutch it contains stays active. */
         if (exec_pc >= 0x0100 && exec_pc <= 0x0160) {
             static unsigned ot = 0; static int dumped = 0;
             if (C54X_SONDES && !dumped) {
@@ -2621,8 +2619,8 @@ int c54x_run(C54xState *s, int n_insns)
                 s->data[0x435b] = calypso_getenv("CALYPSO_SEED_52FD") ? 0x52fd : 0x52ed;   /* default 0x52ed: without bit 4 (TINT), which avoids the firmware clobber at 0xa509 that strips bit 12 (frame). 0x52fd sets bit 4 and breaks the frame, which shows the firmware does not use TINT0 */
             }
         }
-        /* [2026-09-23] Sondes pures SM-TRACE .. A4CD-BC (dont CALA-WIDE, qui
-         * faisait un prog_fetch a chaque instruction de PROM0). */
+        /* Pure probes SM-TRACE .. A4CD-BC (including CALA-WIDE, which does a
+         * prog_fetch on every PROM0 instruction). */
         if (C54X_SONDES) {
         /* SM-TRACE: full path of the go-live state machine 0xa4e4-0xa5b5 once
          * d_dsp_page is aligned - where does it branch or loop back? The
@@ -2820,11 +2818,11 @@ int c54x_run(C54xState *s, int n_insns)
             }
         }
         uint16_t exec_op = prog_fetch(s, s->pc);
-        /* [2026-09-23] AR5-BAS : en communication, 0xeac9 `MVDD *AR2+,*AR5+`
-         * (sous RPT #16) ecrase SP (SP-CORRUPT sp 0x5ac0 -> 0x0004) : AR5
-         * pointait sur les MMR. AR5 vient de l'appelant (PDROM 0xe88d..0xe8a9 :
-         * MVDM 0x2d0d,AR5 puis CALLD 0xea0c, MAR *+AR5(lk) en creneau). On
-         * photographie l'etat AVANT l'execution, quand AR5 est aberrant. */
+        /* AR5-BAS: in a call, 0xeac9 `MVDD *AR2+,*AR5+` (under RPT #16) can
+         * overwrite SP (SP-CORRUPT sp 0x5ac0 -> 0x0004) when AR5 points at the
+         * MMRs. AR5 comes from the caller (PDROM 0xe88d..0xe8a9: MVDM 0x2d0d,AR5
+         * then CALLD 0xea0c, MAR *+AR5(lk) in the delay slot). The state is
+         * captured BEFORE execution, when AR5 is aberrant. */
         if (exec_pc == 0xeac9 && s->ar[5] < 0x0100) {
             static unsigned ar5b_n = 0;
             if (ar5b_n++ < 8) {
@@ -2841,9 +2839,9 @@ int c54x_run(C54xState *s, int n_insns)
                     (unsigned)s->xpc);
             }
         }
-        /* [2026-09-23] ANNEAU-EXEC : etat AVANT l'instruction (voir
-         * sp_corrupt_vidage). Evalue a chaque passage, donc a chaque iteration
-         * de RPT, comme AR5-BAS juste au-dessus. */
+        /* ANNEAU-EXEC: state BEFORE the instruction (see sp_corrupt_vidage).
+         * Evaluated on every pass, hence on every RPT iteration, like AR5-BAS
+         * just above. */
         C54xAnneauExec *ev_anneau = &g_anneau_exec[g_anneau_exec_idx++ % C54X_ANNEAU_N];
         ev_anneau->insn = s->insn_count; ev_anneau->pc = exec_pc; ev_anneau->op = exec_op;
         ev_anneau->xpc = (uint8_t)s->xpc; ev_anneau->sp = s->sp; ev_anneau->sp_apres = s->sp;
@@ -2851,10 +2849,10 @@ int c54x_run(C54xState *s, int n_insns)
         ev_anneau->rpt = s->rpt_active; ev_anneau->rpt_count = s->rpt_count;
         ev_anneau->intm = !!(s->st1 & ST1_INTM);
         ev_anneau->it = 0; ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
-        /* [2026-10-22 11:40] [trou-prog] Magnetite en TCH : PC qui glisse dans la memoire programme vide
-         * 0x2800..0x6fff (NOP) jusqu'au reset 0x7000 -> init DSP, etat TCH -1, DSP perdu. Le saut qui y mene. */
-        /* [2026-10-22 11:15] [b81e] bitf *ar2(9),#0x8000 -> b829 orm #256,*(0x3fab) : base 0xde57 de la
-         * table TCH. Le rejeu montre le bit pose avec un mot 9 = 0x0002 : quelle page AR2 designe-t-il. */
+        /* [trou-prog] a PC sliding through the empty program memory 0x2800..0x6fff (NOP) up to the
+         * reset at 0x7000 -> DSP init, TCH state -1, DSP lost. Logged: the jump leading there. */
+        /* [b81e] bitf *ar2(9),#0x8000 -> b829 orm #256,*(0x3fab): base 0xde57 of the TCH table.
+         * Logged: which page AR2 designates when the bit is set. */
         if (exec_pc == 0xb81e && s->insn_count > 3000000) {
             static unsigned n_b81e;
             uint16_t a2 = s->ar[2];
@@ -2863,8 +2861,7 @@ int c54x_run(C54xState *s, int n_insns)
                        a2, s->data[(uint16_t)(a2 + 9)], s->data[0x3fc1], s->data[0x0809], s->data[0x081d],
                        (int16_t)s->data[0x3fba], s->data[0x4364], s->xpc, s->insn_count);
         }
-        /* [2026-10-22 11:45] + la zone des registres (pc < 0x60) : saut en 0x0000 xpc=1 puis ret en boucle,
-         * SP-CORRUPT (appel au 600 de 11:40). */
+        /* + the register zone (pc < 0x60): jump to 0x0000 xpc=1 then ret in a loop, SP-CORRUPT. */
         if (((exec_pc >= 0x2800 && exec_pc < 0x7000) || exec_pc < 0x0060) && s->insn_count > 3000000) {
             static unsigned n_trou; static uint16_t pc_prec_trou;
             uint16_t pp = g_anneau_exec[(g_anneau_exec_idx - 2) % C54X_ANNEAU_N].pc;
@@ -3011,10 +3008,10 @@ int c54x_run(C54xState *s, int n_insns)
             static uint16_t s_last_run_pc = 0;
             static uint16_t s_last_run_op = 0;
             g_prev_pc = s_last_run_pc;
-            g_prev2_op = g_prev_op;     /* [2026-10-15] avant-derniere (BC apres cmpm/bitf ; st) */
+            g_prev2_op = g_prev_op;     /* second to last (BC after cmpm/bitf ; st) */
             g_prev_op = s_last_run_op;
-            /* [2026-10-22] TC fiable : pose par CMPM/BITF, garde a travers ANDM/ORM/XORM/ADDM #lk et ST/STM #k
-             * (hors STM vers ST0), perdu sur toute autre instruction. Voir c54x_tc_par_rmw (c54x_exec.c). */
+            /* Reliable TC: set by CMPM/BITF, kept across ANDM/ORM/XORM/ADDM #lk and ST/STM #k
+             * (except STM to ST0), lost on any other instruction. See c54x_tc_par_rmw (c54x_exec.c). */
             {
                 uint16_t h = g_prev_op & 0xFF00;
                 if ((g_prev_op & 0xFE00) == 0x6000) g_tc_fiable = 1;
@@ -3373,8 +3370,8 @@ int c54x_run(C54xState *s, int n_insns)
             { static int fg = -1; if (fg < 0) { const char *e = calypso_getenv("CALYPSO_FORCE_GOLIVE"); fg = (e && atoi(e) > 0) ? 1 : 0; }
               if (fg && !(fl & 0x0002)) { s->data[0x3f70] = (uint16_t)(fl | 0x0002); fl = s->data[0x3f70];
                 static unsigned fgc = 0; if (fgc++ < 8) fprintf(stderr, "[c54x] FORCE-GOLIVE 0x3f70 |= bit1 -> 0x%04x insn=%u\n", fl, s->insn_count); } }
-            /* [2026-09-23] WAIT-TEST (sonde) derriere l'interrupteur ;
-             * FORCE_GOLIVE ci-dessus reste active. */
+            /* WAIT-TEST (probe) behind the switch; FORCE_GOLIVE above stays
+             * active. */
             if (C54X_SONDES && ((fl & 0x0002) || fl != last)) {
                 if (wt++ < 60)
                     fprintf(stderr, "[c54x] WAIT-TEST PC=0xa4d4 data[0x3f70]=0x%04x bit1=%d "
@@ -3977,7 +3974,7 @@ int c54x_run(C54xState *s, int n_insns)
         uint16_t t_avant_piste = s->t; uint16_t pc_avant_piste = s->pc;
         int64_t a_avant_piste = s->a, b_avant_piste = s->b;
         consumed = c54x_exec_one(s);
-        ev_anneau->sp_apres = s->sp;                              /* [2026-09-23] ANNEAU-EXEC */
+        ev_anneau->sp_apres = s->sp;                              /* ANNEAU-EXEC */
         ev_anneau->it = (g_c54x_it_prises != it_avant);
         ev_anneau->it_n = (uint16_t)g_c54x_it_prises;
         /* [2026-09-21] OVERFLOW AND OVM. The core computed 40-bit results and
@@ -3996,11 +3993,11 @@ int c54x_run(C54xState *s, int n_insns)
         {
             static int ovm_on = -1;
             if (ovm_on < 0) { const char *e = getenv("CALYPSO_C54X_OVM"); ovm_on = (e && *e == '0') ? 0 : 1; }
-            /* [2026-10-15] CALYPSO_C54X_OVM_LOGIQUE=1 : les instructions LOGIQUES ne saturent pas
-             * (SPRU172C : SFTL, AND/OR/XOR, ROL/ROR/ROLTC ne dependent pas de OVM). La passe saturait
-             * aussi `sftl a,11` : dans le codec FR (PDROM 0xe4c4, lecture des bits 0-2 de l'en-tete de
-             * a_dd_0 avec OVM=1) l'en-tete c200 sign-etendu devenait 0x7fffffff -> bits « 111 » ->
-             * chaque trame jugee mauvaise -> parametres remplaces -> parole muette (rejeu du 15/10). */
+            /* CALYPSO_C54X_OVM_LOGIQUE=1: LOGICAL instructions do not saturate (SPRU172C: SFTL,
+             * AND/OR/XOR, ROL/ROR/ROLTC do not depend on OVM). Saturating `sftl a,11` in the FR
+             * codec (PDROM 0xe4c4, reading bits 0-2 of the a_dd_0 header with OVM=1) would turn
+             * the sign-extended header c200 into 0x7fffffff -> bits "111" -> every frame judged
+             * bad -> parameters replaced -> mute speech. */
             static int ovm_logique = -1;
             if (ovm_logique < 0) ovm_logique = calypso_gate("CALYPSO_C54X_OVM_LOGIQUE", 0);
             bool op_logique = ovm_logique && (
@@ -4019,12 +4016,12 @@ int c54x_run(C54xState *s, int n_insns)
                     int64_t v = sext40(*acc);
                     if (v > 0x7FFFFFFFLL || v < -0x80000000LL) {
                         s->st0 |= k ? ST0_OVB : ST0_OVA;
-                        /* [2026-10-03] La valeur negative saturee doit etre -2^31 SIGN-ETENDUE, comme
-                         * tout accumulateur du coeur (sext40) : (int64_t)0xFF80000000LL est un int64
-                         * POSITIF, et un decalage arithmetique qui suit (STH src,ASM,Smem...) en tirait
-                         * +0x7fc0 au lieu de -64. Mesure : mise a l'echelle des souples SCH (PROM0 0x7e6f
-                         * mpyr / 0x7e70 sfta a,3 / 0x7e71 sth a,asm) -> SB fausse des que les souples
-                         * saturent (SQURS correct, SNR eleve). CALYPSO_SAT_NEG_ANCIEN=1 = ancien. */
+                        /* The saturated negative value must be -2^31 SIGN-EXTENDED, like every
+                         * accumulator of the core (sext40): (int64_t)0xFF80000000LL is a POSITIVE
+                         * int64, and a following arithmetic shift (STH src,ASM,Smem...) would yield
+                         * +0x7fc0 instead of -64 (scaling of the SCH soft values, PROM0 0x7e6f mpyr /
+                         * 0x7e70 sfta a,3 / 0x7e71 sth a,asm -> wrong SB as soon as the soft values
+                         * saturate). CALYPSO_SAT_NEG_ANCIEN=1 = positive int64 variant. */
                         static int sat_neg_ancien = -1;
                         if (sat_neg_ancien < 0) { const char *e = getenv("CALYPSO_SAT_NEG_ANCIEN"); sat_neg_ancien = (e && *e == '1') ? 1 : 0; }
                         if (s->st1 & ST1_OVM) *acc = (v < 0) ? (sat_neg_ancien ? (int64_t)0xFF80000000LL : -0x80000000LL) : 0x7FFFFFFFLL;
@@ -5031,8 +5028,8 @@ int c54x_run(C54xState *s, int n_insns)
                 c54x_interrupt_ex(s, _fv, _fvbit);
             }
         }
-        /* [2026-09-23] Sondes pures TRACEFROM .. TASKGO (SCANREF/SCANFB/SCAN43D8
-         * basculent s->xpc le temps du balayage et le restaurent). */
+        /* Pure probes TRACEFROM .. TASKGO (SCANREF/SCANFB/SCAN43D8 switch
+         * s->xpc for the duration of the scan and restore it). */
         if (C54X_SONDES) {
         {   /* TRACEFROM (CALYPSO_TRACEFROM=<pc>): dumps the opcodes at that PC,
              * then follows the control flow from it, printing each
@@ -5633,8 +5630,8 @@ int c54x_run(C54xState *s, int n_insns)
                 }
             }
         }
-        /* [2026-09-23] Sondes pures DISPCALL .. B2SEQ-IN. DARAM-DUMP (fichier
-         * /dev/shm lu par tools/corr_iq.py) reste hors interrupteur. */
+        /* Pure probes DISPCALL .. B2SEQ-IN. DARAM-DUMP (/dev/shm file read by
+         * tools/corr_iq.py) stays outside the switch. */
         if (C54X_SONDES) {
         {   /* DISPCALL: does the task dispatcher REALLY call the slot
              * data[0x43d8], and where does it land?
@@ -6491,9 +6488,9 @@ int c54x_run(C54xState *s, int n_insns)
                 if (wpn++ < 20)
                     fprintf(stderr, "[c54x] SP-CORRUPT pc=0x%04x op=0x%04x sp 0x%04x -> 0x%04x insn=%u\n",
                             exec_pc, exec_op, g_wp_prev_sp, s->sp, s->insn_count);
-                /* [2026-09-23] Vidage ANNEAU-EXEC + registres, 3 premiers
-                 * SP-CORRUPT. insn_count == 0 est l'artefact du reset
-                 * (g_wp_prev_sp demarre a 0x5ac8, le reset pose SP=0x1100) : exclu. */
+                /* ANNEAU-EXEC + registers dump, first 3 SP-CORRUPT.
+                 * insn_count == 0 is the reset artefact (g_wp_prev_sp starts at
+                 * 0x5ac8, the reset sets SP=0x1100): excluded. */
                 static unsigned wpd = 0;
                 if (s->insn_count > 0 && wpd < 3) {
                     wpd++;
@@ -6777,7 +6774,7 @@ C54xState *c54x_init(void)
 {
     C54xState *s = calloc(1, sizeof(C54xState));
     if (!s) return NULL;
-    c54x_sondes_resoudre();   /* [2026-09-23] interrupteur des sondes pures */
+    c54x_sondes_resoudre();   /* switch of the pure probes */
     return s;
 }
 
@@ -7495,14 +7492,14 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
      * early). */
     calypso_twl3025_apply_phase((int16_t *)s->bsp_buf, n / 2,
                                 calypso_trx_get_fn(), 0);
-    /* [2026-10-03] INJECTEUR DE BRUIT (AWGN) sur TOUS les bursts descendants, au point ou les
-     * alimentations convergent (BSP synthese, passthrough, rejeu). Les bursts synthetiques sont parfaits :
-     * la ROM met ses valeurs souples a l'echelle d'une estimation du bruit (SB : PROM0 0x7e40
-     * `squrs @0x22,a` = E - c^2 ; NB : 0x8168 -> 0x82d0) et un bruit nul la fausse.
-     *   CALYPSO_BSP_BRUIT=<sigma>   ecart-type par composante I et Q, en unites d'echantillon int16
-     *   CALYPSO_BSP_SNR_DB=<dB>     ou sigma calcule par burst : P_signal / (2 sigma^2) = 10^(dB/10)
-     * Tirage deterministe (graine = fn, rang du burst dans la trame, CALYPSO_BSP_BRUIT_GRAINE) : le
-     * rejeu reste reproductible. Defaut : aucun bruit. */
+    /* NOISE INJECTOR (AWGN) on ALL downlink bursts, at the point where the feeds converge
+     * (BSP synthesis, passthrough, replay). Synthetic bursts are perfect: the ROM scales its soft
+     * values by a noise estimate (SB: PROM0 0x7e40 `squrs @0x22,a` = E - c^2; NB: 0x8168 ->
+     * 0x82d0) and a zero noise breaks it.
+     *   CALYPSO_BSP_BRUIT=<sigma>   standard deviation per I and Q component, in int16 sample units
+     *   CALYPSO_BSP_SNR_DB=<dB>     or sigma computed per burst: P_signal / (2 sigma^2) = 10^(dB/10)
+     * Deterministic draw (seed = fn, rank of the burst in the frame, CALYPSO_BSP_BRUIT_GRAINE): the
+     * replay stays reproducible. Default: no noise. */
     {
         static double sigma_fixe = -2, snr_db = -999;
         static uint32_t graine0;

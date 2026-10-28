@@ -24,9 +24,9 @@ uint16_t data_read(C54xState *s, uint16_t addr)
 {
     /* Mailbox monitor: logs the value as found in memory on entry. The few cells
      * synthesized further down (FB-STREAM) show up on the write side anyway.
-     * [2026-10-19] AVANT le chemin rapide : c54x_exe tourne en c54x_rapide et
-     * CALYPSO_MAILBOX=1 ne produisait aucun fichier. Moniteur eteint, le cout
-     * est un chargement d'int (calypso_mbx_actif) par acces. */
+     * Placed BEFORE the fast path: c54x_exe runs with c54x_rapide and
+     * CALYPSO_MAILBOX=1 must still produce its file. Monitor off, the cost is
+     * one int load (calypso_mbx_actif) per access. */
     calypso_mbx(MBX_DSP_RD, addr, s->data[addr], 0, s->pc, 0, s->insn_count);
     if (c54x_rapide)                       /* see calypso_c54x.h */
         return data_read_locked(s, addr);
@@ -251,10 +251,10 @@ static void rmap_note(uint16_t addr, uint16_t pc)
 
 static uint16_t data_read_locked(C54xState *s, uint16_t addr)
 {
-    /* [2026-09-23] Toutes les sondes de lecture (DTASKD-WATCH .. FBWATCH-PAGE-RD :
-     * RMAP, FLOWTRACE, read_stats, histogrammes, WATCH-READ, ...) ne font que
-     * lire et compter : derriere l'interrupteur C54X_SONDES. La semantique
-     * (timers, MMR, API RAM, bequille FORCE_3FAD_KERNEL) suit, inchangee. */
+    /* All the read probes (DTASKD-WATCH .. FBWATCH-PAGE-RD: RMAP, FLOWTRACE,
+     * read_stats, histograms, WATCH-READ, ...) only read and count: behind the
+     * C54X_SONDES switch. The semantics (timers, MMR, API RAM, FORCE_3FAD_KERNEL
+     * crutch) follow below. */
     if (C54X_SONDES) {
     {   /* DTASKD-WATCH, leg 4/4 - CALYPSO_DTASKD_WATCH=1, default 0. Read-only,
          * capped. Legs 1-2 are in calypso_trx.c, leg 3 in data_write_locked.
@@ -856,7 +856,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
                         s->pc, s->insn_count);
         }
     }
-    }   /* C54X_SONDES : sondes de lecture */
+    }   /* C54X_SONDES: read probes */
     /* Timer registers (0x0024-0x0026) - read returns current value */
     if (addr == TIM_ADDR) return s->data[TIM_ADDR];
     if (addr == PRD_ADDR) return s->data[PRD_ADDR];
@@ -1056,18 +1056,18 @@ void scratchwr_note(C54xState *s, uint16_t a, uint16_t v, const char *espace)
                 (unsigned long long)cum_coef, (unsigned long long)cum_src);
 }
 
-/* provenance du dernier TOA ecrit par la ROM (voir la sonde sur 0x08fa) */
+/* origin of the last TOA written by the ROM (see the probe on 0x08fa) */
 int g_toa_grille = -1, g_toa_valeur = 0;
 unsigned g_toa_seq = 0;
 
-uint16_t g_piege_pile_sp; int g_piege_pile_on;   /* [2026-10-22 22:30] voir data_write */
+uint16_t g_piege_pile_sp; int g_piege_pile_on;   /* see data_write */
 void data_write(C54xState *s, uint16_t addr, uint16_t val)
 {
-    /* [2026-10-22 22:30] PIEGE PILE : appel au 600 / entrant de 22:05 (Magnetite, vocodeur ROM), `ret` en PROM1
-     * 0x1e9bd lit 0 a l'adresse de retour (SP=0x5abb) juste apres une IT : PC -> 0x0000, DSP perdu. Entre
-     * l'entree d'une IT et son RETE, toute ecriture dans les 4 mots au-dessus du SP du code interrompu (ou il
-     * range ses adresses de retour) est tracee, avec l'anneau. g_piege_pile_on : calypso_c54x.c (entree d'IT),
-     * c54x_exec.c (RETE). CALYPSO_C54X_PIEGE_PILE=0 coupe. */
+    /* STACK TRAP: a `ret` reading 0 at its return address (e.g. PROM1 0x1e9bd, SP=0x5abb) right
+     * after an interrupt sends PC -> 0x0000 and loses the DSP. Between the entry of an interrupt
+     * and its RETE, every write into the 4 words above the SP of the interrupted code (where it
+     * keeps its return addresses) is traced, with the ring. g_piege_pile_on: calypso_c54x.c
+     * (interrupt entry), c54x_exec.c (RETE). CALYPSO_C54X_PIEGE_PILE=0 disables. */
     {
         extern uint16_t g_piege_pile_sp; extern int g_piege_pile_on;
         static int on = -1;
@@ -1085,13 +1085,12 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
             }
         }
     }
-    /* [2026-09-23] GARDE 0x3d89 : pointeur d'ecriture du tampon circulaire de
-     * 232 mots en 0x4d00 (init 0x90c0, avance en 0x9173, copie 28 mots du
-     * tampon DMA 0x0cce a chaque trame TCH). Sur le banc il est retrouve en
-     * 0x08xx : le tampon recouvre alors les pages W/R et le NDB de l'API RAM
-     * (d_debug_ptr 0x08dc ecrase -> STL dans SP depuis 0xb522, DSP perdu). Le
-     * reproducteur, lui, reste en 0x4dxx. On journalise les premieres
-     * ecritures hors de 0x4d00..0x4dff, avec de quoi remonter a la cause. */
+    /* GUARD 0x3d89: write pointer of the 232-word circular buffer at 0x4d00
+     * (init 0x90c0, advanced at 0x9173, copies 28 words of the DMA buffer
+     * 0x0cce on every TCH frame). If it lands in 0x08xx the buffer overlaps the
+     * W/R pages and the NDB of the API RAM (d_debug_ptr 0x08dc overwritten ->
+     * STL into SP from 0xb522, DSP lost). The first writes outside
+     * 0x4d00..0x4dff are logged, with enough context to trace the cause. */
     if (addr == 0x3d89 && (val & 0xff00) != 0x4d00) {
         static unsigned n;
         if (n++ < 12)
@@ -1100,9 +1099,10 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                     val, s->data[0x3d89], s->pc & 0xffff, s->st0 & 0x1ff, s->st0, s->st1, s->sp,
                     s->imr, s->ifr, s->ar[2], s->bk, s->insn_count), fflush(stdout);
     }
-    /* [2026-10-22 11:10] [etat-tch] data[0x3fba] : etat de la machine TCH de PROM0 (be3e : liste = 0xde27 +
-     * etat*12 + (fn%26)/2). -1 (init : b456, c442, c8e1, PDROM e210) puis le dispatcher sans st #0 -> liste hors
-     * table, entree 0x01f6, DSP fige (Magnetite, 1er appel). Qui l'ecrit, depuis ou, avec d_ctrl_tch/d_task_d. */
+    /* [etat-tch] data[0x3fba]: state of the PROM0 TCH machine (be3e: list = 0xde27 + state*12 +
+     * (fn%26)/2). -1 (init: b456, c442, c8e1, PDROM e210); a dispatcher run without st #0 then
+     * reads a list outside the table (entry 0x01f6, DSP stuck). Logged: who writes it, from
+     * where, with d_ctrl_tch/d_task_d. */
     if (addr == 0x3fba && val != s->data[0x3fba] && s->insn_count > 3000000) {
         static unsigned n;
         if (n++ < 80) {
@@ -1112,9 +1112,9 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                    s->data[0x4364], s->data[0x3fb8], s->insn_count);
         }
     }
-    /* [2026-10-22 11:30] [base-tch] base de la table d'etats TCH (b928 : 0xde57 si data[0x3fab] bit8, sinon 0xde27
-     * en b930). 0xde57 + etat 4 -> liste 0xbc5a (hors table). Qui pose 0xde57 et avec quelle page (0x3fc1, mot 9 =
-     * d_ctrl_tch, bit15 = B_SUBCHANNEL -> b829 orm #256,*(0x3fab)). */
+    /* [base-tch] base of the TCH state table (b928: 0xde57 if data[0x3fab] bit8, otherwise 0xde27
+     * at b930). 0xde57 + state 4 -> list 0xbc5a (outside the table). Logged: who sets 0xde57 and
+     * with which page (0x3fc1, word 9 = d_ctrl_tch, bit15 = B_SUBCHANNEL -> b829 orm #256,*(0x3fab)). */
     if (addr == 0x4366 && val == 0xde57 && s->insn_count > 3000000) {
         static unsigned n;
         if (n++ < 40) {
@@ -1139,9 +1139,9 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         static int rssi_on = -1;
         if (rssi_on < 0) rssi_on = calypso_gate("CALYPSO_PM_RSSI", 1);
         if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) || (addr >= 0x0848 && addr <= 0x084A)))
-            val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
-        if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* [2026-10-23] D_PM, air realiste */
-        /* [2026-10-19] moniteur mailbox aussi sur le chemin rapide (voir data_read) */
+            val = calypso_bsp_rssi_apm_suivante(NULL);   /* next window, in order (calypso_bsp.c) */
+        if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* D_PM, realistic air */
+        /* mailbox monitor also on the fast path (see data_read) */
         calypso_mbx(MBX_DSP_WR, addr, val, s->data[addr], s->pc, 0, s->insn_count);
         data_write_locked(s, addr, val);
         return;
@@ -1343,9 +1343,9 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
                  * a_serv_demod, not a_pm. */
                 if (rssi_on && ((addr >= 0x0834 && addr <= 0x0836) ||
                             (addr >= 0x0848 && addr <= 0x084A))) {
-                    val = calypso_bsp_rssi_apm_suivante(NULL);   /* [2026-10-22] fenetre suivante, dans l'ordre (calypso_bsp.c) */
+                    val = calypso_bsp_rssi_apm_suivante(NULL);   /* next window, in order (calypso_bsp.c) */
                 }
-                if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* [2026-10-23] D_PM, air realiste */
+                if (addr == 0x0831 || addr == 0x0845) val = calypso_bsp_air_dpm(val);   /* D_PM, realistic air */
             }
         }
         if (sent && addr == 0x08f8) {
@@ -1635,19 +1635,17 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
      * stores a_sync[TOA] at 0x795a and the stored word equals B, with T holding
      * the constant 48 loaded at 0x7953. Capture B, T and the pointers on every
      * such store to get the law instead of guessing it. */
-    /* [2026-09-19] ANGLE-LAW : meme traitement que le TOA, qui s'etait revele
-     * avoir DEUX producteurs separes par AR2 (0x0cce = une grille, autre = une
-     * vraie mesure). L'angle est ecrit par la ROM en 0x798b et rend ~0 quel que
-     * soit l'offset injecte ; s'il a lui aussi deux populations, l'une des deux
-     * mesure peut-etre correctement et c'est la mauvaise qui est consommee. */
-    /* [2026-09-19] BUF-0cce : le TOA (grille de 48) et l'angle (bruit non
-     * correle) sont TOUS DEUX degrades quand AR2=0x0cce. Hypothese unificatrice :
-     * ce que le correlateur lit la ne porte pas le signal. Test direct -- la
-     * FCCH est une tonalite pure, donc a 1 ech/symbole elle tourne de +pi/2 par
-     * echantillon avec une coherence ~1. On mesure coherence et dphi SUR LE
-     * CONTENU DU TAMPON au moment ou la tache FB rend son resultat. */
-    /* [2026-09-23] Sondes pures d'ecriture BUF-0cce, ANGLE-LAW : derriere
-     * l'interrupteur C54X_SONDES. */
+    /* ANGLE-LAW: same treatment as the TOA, which has TWO producers separated
+     * by AR2 (0x0cce = a grid, anything else = a real measurement). The angle is
+     * written by the ROM at 0x798b; if it also has two populations, one of them
+     * may measure correctly while the wrong one is consumed. */
+    /* BUF-0cce: the TOA (grid of 48) and the angle (uncorrelated noise) are
+     * BOTH degraded when AR2=0x0cce, i.e. what the correlator reads there does
+     * not carry the signal. Direct test -- the FCCH is a pure tone, so at
+     * 1 sample/symbol it rotates by +pi/2 per sample with a coherence ~1.
+     * Coherence and dphi are measured ON THE BUFFER CONTENT at the moment the
+     * FB task returns its result. */
+    /* Pure write probes BUF-0cce, ANGLE-LAW: behind the C54X_SONDES switch. */
     if (C54X_SONDES) {
     if ((addr == 0x08fc || addr == 0x08fa) && val != 0 && s->ar[2] == 0x0cce) {
         static unsigned nb;
@@ -1677,25 +1675,25 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     (long long)s->a, (long long)s->b, s->t, s->pc);
         na++;
     }
-    }   /* C54X_SONDES : BUF-0cce, ANGLE-LAW */
+    }   /* C54X_SONDES: BUF-0cce, ANGLE-LAW */
     if (addr == 0x08fa) {
         static unsigned nt;
-        /* [2026-09-19] Deux producteurs de TOA sortent de la MEME instruction
-         * 0x795a, separes par AR2 : 0x0cce donne 100% de multiples de 48 (une
-         * grille, pas une mesure), tout autre pointeur donne des valeurs fines.
-         * On marque la provenance pour savoir laquelle la tache SB consomme. */
+        /* Two TOA producers come out of the SAME instruction 0x795a, separated
+         * by AR2: 0x0cce gives 100% multiples of 48 (a grid, not a measurement),
+         * any other pointer gives fine values. The origin is flagged to know
+         * which one the SB task consumes. */
         if (s->pc == 0x795a) {
             g_toa_grille = (s->ar[2] == 0x0cce);
             g_toa_valeur = (int)(int16_t)val;
             g_toa_seq++;
         }
-        /* [2026-09-19] La couture. Le TOA tombe a 100% sur un multiple de 48
-         * echantillons = 96 mots = une page DMA, donc le tampon doit porter une
-         * discontinuite a chaque frontiere de page. On imprime les mots de part
-         * et d'autre des frontieres (96 et 192) du tampon 0x0cce : sur un burst
-         * GMSK continu, |IQ| est quasi constant et rien ne doit sauter la. */
-        /* [2026-09-23] g_toa_* ci-dessus alimente le pont (pont.c) : reste
-         * actif. COUTURE et TOA-LAW sont des sondes pures. */
+        /* The seam. A TOA falling 100% on a multiple of 48 samples = 96 words
+         * = one DMA page means the buffer carries a discontinuity at every page
+         * boundary. The words on both sides of the boundaries (96 and 192) of
+         * buffer 0x0cce are printed: on a continuous GMSK burst, |IQ| is almost
+         * constant and nothing should jump there. */
+        /* g_toa_* above feeds the bridge (pont.c): stays active. COUTURE and
+         * TOA-LAW are pure probes. */
         if (C54X_SONDES) {
         if (val != 0 && nt < 12 && s->pc == 0x795a) {
             const uint16_t B0 = 0x0cce;
@@ -1713,42 +1711,39 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     (int)(int16_t)val, (long long)s->b, (int)(int16_t)s->t,
                     (long long)s->a, s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->pc);
         nt++;
-        }   /* C54X_SONDES : COUTURE, TOA-LAW */
+        }   /* C54X_SONDES: COUTURE, TOA-LAW */
     }
-    /* [2026-09-19] A_SERV-WR : read_sb_result (prim_fbsb.c:148) lit
-     * dsp_api.db_r->a_serv_demod[], donc la PAGE R aux mots 8..11 =
-     * 0x0830..0x0833 (page 0) et 0x0844..0x0847 (page 1) -- PAS le NDB
-     * a_sync_demod 0x08fa..0x08fd que lit read_fb_result. Si personne n'ecrit
-     * ces cellules, le SB lit du mort : st->snr reste nul, le test
-     * `snr > AFC_SNR_THRESHOLD` echoue toujours et TOUTES les mesures AFC sont
-     * marquees invalides -- la moyenne glissante n'emet alors jamais. */
-    /* [2026-09-19] SRC-3fa4 : les quatre resultats du SB sortent de quatre
-     * cellules de travail, lues par la ROM en 0xb1e7..0xb1f5 :
+    /* A_SERV-WR: read_sb_result (prim_fbsb.c:148) reads
+     * dsp_api.db_r->a_serv_demod[], i.e. the R PAGE at words 8..11 =
+     * 0x0830..0x0833 (page 0) and 0x0844..0x0847 (page 1) -- NOT the NDB
+     * a_sync_demod 0x08fa..0x08fd that read_fb_result reads. If nobody writes
+     * those cells, the SB reads dead data: st->snr stays zero, the test
+     * `snr > AFC_SNR_THRESHOLD` always fails and ALL the AFC measurements are
+     * flagged invalid -- the sliding average then never emits. */
+    /* SRC-3fa4: the four SB results come out of four work cells, read by the
+     * ROM at 0xb1e7..0xb1f5:
      *   0x3fa4 -> TOA    0x3fa5 -> PM    0x3fa7 -> ANGLE    0x3fa6 -> SNR
-     * Le SNR ne depasse jamais AFC_SNR_THRESHOLD=2560 (max observe 864), donc
-     * 100% des mesures AFC sont marquees invalides. On remonte d'un cran : qui
-     * ecrit 0x3fa6, et avec quoi ? */
-    /* [2026-09-19] SNR-BINAIRE : le SNR publie vaut soit 16384 (0x4000, la
-     * constante "bon signal" que la ROM pose aussi en 0x798d) soit une valeur a
-     * un ou deux chiffres -- rien entre les deux, 15,3% de 16384 sur 111
-     * mesures. Il en faudrait 20% pour atteindre les 8 mesures valides par
-     * fenetre de 40 qu'exige l'AFC. Qu'est-ce qui distingue un bon burst d'un
-     * mauvais ? On mesure la coherence du tampon 0x0cce AU MOMENT de l'ecriture,
-     * et la phase de multitrame : une FCCH (fn%51 dans {0,10,20,30,40}) est une
-     * tonalite pure, coherence ~1 et dphi=+pi/2 a 1 ech/symbole. */
-    /* [2026-09-19] DECALAGE : le verdict SNR n'est PAS correle au contenu du
-     * tampon -- 16384 sur du factice (coherence 0.488), deux chiffres sur de la
-     * FCCH. Quand une vraie FCCH est la, le DSP la voit parfaitement
-     * (coherence 0.999, dphi +1.565 pour +1.571 theorique). Donc le signal et
-     * l'estimateur sont bons : c'est l'INSTANT de l'evaluation qui est decale
-     * par rapport au depot. On apparie chaque evaluation avec le dernier depot
-     * DMA et on compte les trames qui les separent. */
-    /* [2026-09-19] CRC-CELL : le statut SB est forme en 0x98b3/0x98b4 --
-     * A prend 0x8000 (B_BLUD seul) puis 0x8100, l'instruction 0x98b4 ayant
-     * pour operandes 0x2bf8 et 0x0c08. Si data[0x0c08] porte 0x0100, c'est la
-     * cellule du verdict CRC, et son ecrivain est le decodeur lui-meme. */
-    /* [2026-09-23] Sondes pures CRC-CELL .. DISPTAB-WR (dont dio_note,
-     * wmap_note, flow_log) : derriere l'interrupteur. */
+     * The AFC needs the SNR to exceed AFC_SNR_THRESHOLD=2560 for 8 valid
+     * measurements per window of 40. The probe traces who writes 0x3fa6, and
+     * with what. */
+    /* SNR-BINAIRE: the published SNR is either 16384 (0x4000, the "good
+     * signal" constant the ROM also sets at 0x798d) or a one- or two-digit
+     * value -- nothing in between. To tell a good burst from a bad one, the
+     * coherence of buffer 0x0cce is measured AT WRITE TIME, together with the
+     * multiframe phase: an FCCH (fn%51 in {0,10,20,30,40}) is a pure tone,
+     * coherence ~1 and dphi=+pi/2 at 1 sample/symbol. */
+    /* DECALAGE: the SNR verdict is NOT correlated with the buffer content;
+     * when a real FCCH is there the DSP sees it perfectly (coherence 0.999,
+     * dphi +1.565 for +1.571 theoretical), so the signal and the estimator are
+     * fine and it is the INSTANT of the evaluation that is shifted relative to
+     * the deposit. Each evaluation is paired with the last DMA deposit and the
+     * frames separating them are counted. */
+    /* CRC-CELL: the SB status is formed at 0x98b3/0x98b4 -- A takes 0x8000
+     * (B_BLUD alone) then 0x8100, instruction 0x98b4 having 0x2bf8 and 0x0c08
+     * as operands. If data[0x0c08] carries 0x0100, it is the CRC verdict cell,
+     * and its writer is the decoder itself. */
+    /* Pure probes CRC-CELL .. DISPTAB-WR (including dio_note, wmap_note,
+     * flow_log): behind the switch. */
     if (C54X_SONDES) {
     if (addr == 0x0c08) {
         static unsigned n7;
@@ -2448,8 +2443,8 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         return;
     }
 
-    /* [2026-09-23] Sondes pures FBDB, COEFFS-WR : derriere l'interrupteur.
-     * L'INVARIANT qui suit reste actif (il peut signaler/arreter). */
+    /* Pure probes FBDB, COEFFS-WR: behind the switch. The INVARIANT that
+     * follows stays active (it can report/stop). */
     if (C54X_SONDES) {
     /* FBDB-PROBE write to 0x3DC0 (= SARAM flag polled by fc63 BITF).
      * Env CALYPSO_FBDB_PROBE=1. Logs old->new + which bits set, with focus
@@ -3066,11 +3061,11 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                  * (KEEP-IMR in calypso_c54x.c), which restores bit5 only when it
                  * drops. */
             }
-            /* [2026-10-22 00:45] [imr0] (stdout, 40 lignes ; les traces [c54x] de stderr sont filtrees par
-             * verbosite.c) : Magnetite sur TCH, une trame puis IMR=0000 + IDLE pour toujours (piege de la ROM ?).
-             * Qui met l'IMR a zero, depuis ou, avec quelle pile de retour. */
-            /* [2026-10-22 00:50] [imrW] : TOUTES les ecritures de l'IMR hors boot (60 lignes), avec DP et les
-             * mots de la page DP que la routine 1:e4d1 (sauvegarde / restauration de l'IMR ?) lit et ecrit. */
+            /* [imr0] (stdout, 40 lines; the [c54x] traces of stderr are filtered by verbosite.c):
+             * an IMR=0000 followed by IDLE leaves the DSP asleep forever. Logged: who zeroes the
+             * IMR, from where, with which return stack. */
+            /* [imrW]: ALL the IMR writes after boot (60 lines), with DP and the words of the DP
+             * page that routine 1:e4d1 (IMR save / restore) reads and writes. */
             if (s->insn_count > 1000000 && (uint16_t)val != s->imr) {
                 static unsigned nw;
                 if (nw++ < 60) {
@@ -3084,13 +3079,13 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                            s->ar[2], s->insn_count);
                 }
             }
-            /* [2026-10-22 21:20] GARDE IMR DU CODEC FR. Appel au 600 de 21:17 (Magnetite, vocodeur ROM) : juste apres
-             * une FACCH montante, le codeur FR de la PDROM (appele en 0xe3fc, retour 0xe3fe) ecrit A par
-             * « STL A,*AR3+% » (0xe7ad, op 0x81d3) avec AR3 ~ 0 : IMR 0x7012 -> 0, toutes les IT du DSP masquees,
-             * port voix arrete (rint 0), trames a 27 ms, puis « >!PM 202 » en boucle et la cellule perdue. Le codec
-             * n'ecrit jamais l'IMR : c'est un pointeur corrompu (bug d'emulation a trouver, AR3 trace ci-dessous).
-             * Ecriture ignoree si elle vient de la PDROM du codec (0xe000..0xefff, XPC 0). CALYPSO_C54X_GARDE_IMR=0
-             * la laisse passer. */
+            /* IMR GUARD OF THE FR CODEC. Right after an uplink FACCH, the PDROM FR encoder (called
+             * at 0xe3fc, return 0xe3fe) can write A through "STL A,*AR3+%" (0xe7ad, op 0x81d3) with
+             * AR3 ~ 0: IMR 0x7012 -> 0, all DSP interrupts masked, voice port stopped (rint 0),
+             * 27 ms frames, then ">!PM 202" in a loop and the cell lost. The codec never writes
+             * the IMR: that is a corrupted pointer (AR3 traced below). The write is ignored if it
+             * comes from the codec PDROM (0xe000..0xefff, XPC 0). CALYPSO_C54X_GARDE_IMR=0 lets
+             * it through. */
             {
                 static int garde = -1;
                 if (garde < 0) garde = calypso_gate("CALYPSO_C54X_GARDE_IMR", 1);
@@ -3204,11 +3199,12 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                         val, s->sp, s->pc);
                 return;
             }
-            /* [2026-10-22 21:55] GARDE SP DU CODEC. Appel de 21:47 (Magnetite, vocodeur ROM) : PDROM 0xf15c
-             * `st #0x001f, *(0x18)` en adressage DIRECT avec DP=0 -> SP=0x001f (et 0xf152 `st #0x20, *(0x16)` -> AR6),
-             * DSP parti en 0x00c0 pour toujours, trames a 28 ms, synchro perdue. Ces ST visent une page de variables
-             * du codec : c'est DP qui est faux (a trouver, DP trace ici). Une pile sous 0x0060 (MMR, scratch) n'a pas
-             * de sens : ecriture ignoree depuis la PDROM (0xe000..0xffff, XPC 0). CALYPSO_C54X_GARDE_SP=0 coupe. */
+            /* SP GUARD OF THE CODEC. PDROM 0xf15c `st #0x001f, *(0x18)` in DIRECT addressing with
+             * DP=0 gives SP=0x001f (and 0xf152 `st #0x20, *(0x16)` -> AR6): DSP gone to 0x00c0
+             * forever, 28 ms frames, sync lost. Those ST target a page of codec variables: DP is
+             * what is wrong (DP traced here). A stack below 0x0060 (MMR, scratch) makes no sense:
+             * the write is ignored when it comes from the PDROM (0xe000..0xffff, XPC 0).
+             * CALYPSO_C54X_GARDE_SP=0 disables. */
             {
                 static int garde_sp = -1;
                 if (garde_sp < 0) garde_sp = calypso_gate("CALYPSO_C54X_GARDE_SP", 1);
@@ -3797,16 +3793,16 @@ inline uint32_t c54x_prog_xlate(const C54xState *s, uint16_t addr16)
      * fetch prog[0x3ee00], past the 8K of PROM3, which reads as empty (op=0x0000)
      * and sends the post-correlator FB stage running away. High ROM must ignore
      * XPC. */
-    /* [2026-10-22 10:45] SAUF EN PAGES 1 ET 2 : PROM1 (0x18000) et PROM2 (0x28000) font 32K et couvrent leur
-     * 0xE000-0xFFFF, qui n'a rien a voir avec PDROM (15886 octets differents sur 16384). Magnetite sur TCH :
-     * 1:bc82 `call 0xe4d1` (routine PROM1 « ld #150,dp ») executait PDROM 0xe4d1, le milieu du depaquetage du
-     * codec FR, avec AR5=0xffff -> `stl b,*ar5+` puis `andm #0x1f8,*ar5` sur l'IMR (MMR 0) : IMR=0, DSP muet,
-     * PM=0 sur chaque trame TCH, RECOVERY de la L1 et perte du reseau en appel. PROM3 (8K) garde le repli
-     * page 0. CALYPSO_XPC_HAUT=0 : ancien comportement. */
+    /* EXCEPT IN PAGES 1 AND 2: PROM1 (0x18000) and PROM2 (0x28000) are 32K and cover their own
+     * 0xE000-0xFFFF, unrelated to the PDROM (15886 bytes differ out of 16384). 1:bc82 `call 0xe4d1`
+     * (PROM1 routine "ld #150,dp") must not execute PDROM 0xe4d1, the middle of the FR codec
+     * unpacking, which with AR5=0xffff does `stl b,*ar5+` then `andm #0x1f8,*ar5` on the IMR
+     * (MMR 0): IMR=0, mute DSP, PM=0 on every TCH frame, L1 RECOVERY and network loss in call.
+     * PROM3 (8K) keeps the page 0 fallback. CALYPSO_XPC_HAUT=0: page 0 fallback for all pages. */
     if (addr16 >= 0x8000 && (addr16 < 0xE000 || c54x_xpc_haut_banque(s->xpc))) {
         return (((uint32_t)s->xpc << 16) | addr16) & (C54X_PROG_SIZE - 1);
     }
-    return addr16;   /* 0x0000-0x7FFF on-chip + 0xE000-0xFFFF PDROM en page 0 (et 3) */
+    return addr16;   /* 0x0000-0x7FFF on-chip + 0xE000-0xFFFF PDROM in page 0 (and 3) */
 }
 
 int g_c54x_xpc_haut = -1;
@@ -3820,8 +3816,8 @@ int c54x_xpc_haut_init(void)
     return g_c54x_xpc_haut;
 }
 
-/* [2026-09-23] Definition hors ligne, gardee pour les appelants externes
- * (pont.c) ; le coeur passe par la copie en ligne de c54x_internal.h. */
+/* Out-of-line definition, kept for the external callers (pont.c); the core
+ * goes through the inline copy of c54x_internal.h. */
 #undef prog_fetch
 uint16_t prog_fetch(C54xState *s, uint16_t pc)
 {
@@ -3839,7 +3835,7 @@ uint16_t prog_fetch(C54xState *s, uint16_t pc)
  * coef(prog)=0xf4e4). Gate CALYPSO_OVLY_SCRATCH, default 1.
  * Warning: GLOBAL effect - the alias serves everything executed or read in
  * overlay. */
-uint16_t g_c54x_ovly_bas = 0;   /* [2026-09-23] cache pour c54x_prog_fetch_vite */
+uint16_t g_c54x_ovly_bas = 0;   /* cache for c54x_prog_fetch_vite */
 uint16_t c54x_ovly_bas(void)
 {
     static int g = -1;

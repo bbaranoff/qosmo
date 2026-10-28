@@ -1397,20 +1397,20 @@ int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
 }
 static uint32_t g_ts0_fn_max;   /* most recent BTS frame stored */
 static unsigned long g_ts0_recales;      /* number of offset re-alignments (see bsp_ts0_service) */
-static unsigned long g_ts0_silences;     /* effacements deposes (voir bsp_ts0_service) */
-static long long     g_ts0_recul_total;  /* somme des reculs, en trames */
+static unsigned long g_ts0_silences;     /* erasures deposited (see bsp_ts0_service) */
+static long long     g_ts0_recul_total;  /* sum of the step-backs, in frames */
 static const uint8_t bsp_train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
 static int bsp_ts0_est_sb(const uint8_t *b) { for (int k = 0; k < 64; k++) if ((b[42 + k] & 1) != bsp_train_sb[k]) return 0; return 1; }
 static int bsp_ts0_est_fcch(const uint8_t *b) { for (int k = 0; k < 148; k++) if (b[k] & 1) return 0; return 1; }
-static int g_toa_bias = 0;   /* biais de placement, en echantillons ; voir calypso_bsp_toa_feedback() */
-static uint32_t g_tick_courant;        /* (definition anticipee : le tick en cours, pose par bsp_ts0_service) */
+static int g_toa_bias = 0;   /* placement bias, in samples; see calypso_bsp_toa_feedback() */
+static uint32_t g_tick_courant;        /* (forward definition: the current tick, set by bsp_ts0_service) */
 static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
 {
     if (!g_ts0) g_ts0 = calloc(BSP_TS0_RING, sizeof *g_ts0);
     if (!g_ts0) return;
     unsigned i = fn % BSP_TS0_RING;
-    /* [2026-10-20] mode TRX : marge d'arrivee du burst montant = (tick ou il sera joue) - (tick courant) ;
-     * <= 0 : arrive trop tard, perdu. Statistique sur les 2000 premiers, puis tous les 2000. */
+    /* TRX mode: arrival margin of the uplink burst = (tick where it will be played) - (current tick);
+     * <= 0: arrived too late, lost. Statistics over the first 2000, then every 2000. */
     if (g_trx_cale) {
         static long n, n_tard, somme; static int mini = 999;
         int64_t tj = ((int64_t)fn - g_ts0_offset) % (int64_t)BSP_FN_MAX; if (tj < 0) tj += BSP_FN_MAX;
@@ -1421,76 +1421,68 @@ static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
             printf("  [ts0] mode TRX : marge d'arrivee des bursts montants : min %d, moyenne %.1f trame(s), %ld/%ld en retard\n", mini, (double)somme / n, n_tard, n);
     }
     g_ts0[i].fn = fn; memcpy(g_ts0[i].bits, bits, 148); g_ts0[i].valid = 1; g_ts0[i].joue = 0;
-    /* [2026-09-22] La trame la plus recente recue du BTS. Sert a dire, sur un
-     * manque, DE QUEL COTE vient l'ecart : si la trame reclamee depasse
-     * celle-ci, le DSP court devant le BTS (il faut plus d'avance) ; si elle
-     * est en-dessous, le burst a bien existe et c'est autre chose. Sans ce
-     * signe, « pas de burst BTS » n'oriente vers rien. */
+    /* The most recent frame received from the BTS. On a miss it tells ON WHICH
+     * SIDE the gap is: if the requested frame is beyond it, the DSP runs ahead
+     * of the BTS (more lead is needed); if it is below, the burst did exist and
+     * the cause is elsewhere. */
     if (!g_ts0_any || (int32_t)(fn - g_ts0_fn_max) > 0) { g_ts0_fn_max = fn; }
     bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this does not move */
     if (!g_ts0_any) { g_ts0_any = 1; g_ts0_next = fn; }
 }
-/* [2026-09-21] L'INTERVALLE DE LA FENETRE, DIT PAR LE FIRMWARE.
+/* THE WINDOW'S TIMESLOT, AS TOLD BY THE FIRMWARE.
  *
- * tpu_window.c:89 : tpu_enq_offset((5000 + l1s.tpu_offset + 625*tn) % 5000).
- * Le registre TPU_OFFSET, que QEMU relaie dans chaque TICK, porte donc le
- * decalage de synchro ET la position de l'intervalle sur lequel la fenetre RX
- * est armee. Il etait stocke ici depuis le 2026-09-17 sans jamais etre lu.
+ * tpu_window.c:89: tpu_enq_offset((5000 + l1s.tpu_offset + 625*tn) % 5000).
+ * The TPU_OFFSET register, which QEMU relays in every TICK, therefore carries
+ * the sync offset AND the position of the timeslot the RX window is armed on.
  *
- * On ne connait pas l1s.tpu_offset, mais on n'en a pas besoin : hors mode
- * dedie l'ARM ecoute TS0, donc la valeur observee a ce moment-la EST la
- * reference. L'ecart a la reference, divise par 625, donne l'intervalle.
- * La reference se reapprend d'elle-meme a chaque resynchro, puisque le mobile
- * n'est alors pas en dedie. */
+ * l1s.tpu_offset is unknown but not needed: outside dedicated mode the ARM
+ * listens to TS0, so the value observed then IS the reference. The distance to
+ * the reference, divided by 625, gives the timeslot. The reference relearns
+ * itself on every resync, since the mobile is then not in dedicated mode. */
 static int g_bsp_tpu_offset = 0;
 static int g_tpu_ref = -1;
 
-/* Intervalle de la fenetre courante, 0 si on ne sait pas. */
+/* Timeslot of the current window, 0 if unknown. */
 static int bsp_fenetre_tn(void)
 {
     if (g_tpu_ref < 0) {
         return 0;
     }
     int d = ((g_bsp_tpu_offset - g_tpu_ref) % 5000 + 5000) % 5000;
-    return ((d + 312) / 625) % 8;   /* 625 qbits par intervalle, arrondi */
+    return ((d + 312) / 625) % 8;   /* 625 qbits per timeslot, rounded */
 }
-/* [2026-10-21] pour montant.c : l'intervalle de la fenetre RX courante du TPU (-1 si inconnu). Le mobile
- * s'en sert pour trouver SEUL le TS de son TCH quand personne ne lui a annonce l'ASSIGNMENT COMMAND
- * (chiffre A5/1 sur le SDCCH : ni le pont ni l'air ne peuvent le lire). */
+/* For montant.c: the timeslot of the TPU's current RX window (-1 if unknown). The mobile uses
+ * it to find the TS of its TCH ON ITS OWN when nobody announced the ASSIGNMENT COMMAND to it
+ * (A5/1-ciphered on the SDCCH: neither the bridge nor the air can read it). */
 int calypso_bsp_fenetre_tn(void) { return bsp_fenetre_tn(); }
 
-/* [2026-09-21] L'INTERVALLE DEDIE.
+/* THE DEDICATED TIMESLOT.
  *
- * Le pont envoie les huit intervalles de chaque trame, le magasin ci-dessus
- * n'en garde qu'un (TS0) et bsp_ts0_livrer() complete la trame avec du
- * bourrage a zero. Tant que le mobile lit la BCCH et la CCCH, c'est exact :
- * tout ce qui l'interesse est sur TS0. Des qu'il passe en mode dedie, non :
- * le BSC lui alloue un SDCCH/8 sur TS1 (mesure du 2026-09-21 :
- * « [dcch] canal dedie arme : chan_nr=0x51 SDCCH/8 SS=2 TN=1 », suivi d'une
- * liberation immediate), et il n'entendait donc ni le UA ni le LOCATION
- * UPDATING ACCEPT.
+ * The bridge sends the eight timeslots of every frame, the store above only
+ * keeps one (TS0) and bsp_ts0_livrer() completes the frame. As long as the
+ * mobile reads the BCCH and the CCCH this is exact: everything it needs is on
+ * TS0. Once it enters dedicated mode it is not: the BSC allocates it e.g. an
+ * SDCCH/8 on TS1, where the UA and the LOCATION UPDATING ACCEPT arrive.
  *
- * QEMU apprend cet intervalle du flux L1CTL du firmware et l'annonce par
- * PONT_DCCH ; on garde alors les bursts de CET intervalle-la, par numero de
- * trame du BTS, et bsp_ts0_livrer() les joue A LA PLACE de TS0. La trame
- * reste d'un seul burst par tick : le cadencement en 1250 symboles, si
- * durement regle, n'est pas touche.
+ * QEMU learns this timeslot from the firmware's L1CTL stream and announces it
+ * through PONT_DCCH; the bursts of THAT timeslot are then kept, by BTS frame
+ * number, and bsp_ts0_livrer() plays them INSTEAD of TS0. The frame stays one
+ * burst per tick: the 1250-symbol pacing is not touched.
  *
- * Un seul intervalle a la fois, comme le mobile : le magasin est alloue a
- * l'armement et repart a zero si l'intervalle change. */
-#define BSP_DEDIE_RING (1u << 16)   /* ~5 min de trames BTS : le DSP en pas-a-pas derive de plusieurs secondes */
+ * One timeslot at a time, like the mobile: the store is allocated when the
+ * channel is armed and restarts from scratch if the timeslot changes. */
+#define BSP_DEDIE_RING (1u << 16)   /* ~5 min of BTS frames: the lock-step DSP drifts by several seconds */
 static struct { uint32_t fn; uint8_t bits[148]; uint8_t valid; } *g_dedie;
 
-/* [2026-09-21] LA TRAME LIVREE AU DSP EST UNE VRAIE TRAME.
+/* THE FRAME DELIVERED TO THE DSP IS A REAL FRAME.
  *
- * bsp_ts0_livrer() assemblait « TS0 + sept intervalles de bourrage a zero ».
- * Le cadencement (un burst par tick, indexe par numero de trame BTS) n'est pas
- * une bequille : sans lui la ROM voit ~1526 symboles par trame au lieu de 1250
- * et son TOA ne se stabilise jamais -- mesure du 2026-09-21 en mode sans hack,
- * TOA a 2967, 3735, 4215, 48, 13536 et « BURST ID 3!=2 », « EMPTY ».
- * Le bourrage a zero, lui, EN EST une : le mobile n'entend rien de ce que la
- * BTS emet ailleurs que sur TS0. On garde donc les huit intervalles, et la
- * trame remise au DSP porte ce que la BTS a reellement emis. */
+ * The pacing (one burst per tick, indexed by BTS frame number) is not a
+ * crutch: without it the ROM sees ~1526 symbols per frame instead of 1250 and
+ * its TOA never settles (TOA at 2967, 3735, 4215, 48, 13536 and "BURST ID
+ * 3!=2", "EMPTY"). Zero filler for the other timeslots WOULD be one: the mobile
+ * would hear nothing of what the BTS emits outside TS0. All eight timeslots are
+ * therefore kept, and the frame handed to the DSP carries what the BTS really
+ * emitted. */
 
 static void bsp_autres_stocker(uint32_t fn, unsigned tn, const uint8_t *bits)
 {
@@ -1525,20 +1517,20 @@ static const uint8_t *bsp_autres_bits(uint32_t fn, unsigned tn)
     return g_autres[i].bits[tn - 1];
 }
 static int g_dedie_tn = -1, g_dedie_ss;
-/* [2026-09-22] genre du canal dedie : 0 = SDCCH/4, 1 = SDCCH/8,
- * BSP_DEDIE_TCH = TCH -- sur un TCH TOUTES les trames de l'intervalle sont
- * a la connexion (multitrame de 26 : 24 trafic + 1 SACCH + 1 libre), pas
- * seulement les blocs d'un sous-canal. */
+/* Kind of the dedicated channel: 0 = SDCCH/4, 1 = SDCCH/8,
+ * BSP_DEDIE_TCH = TCH -- on a TCH ALL the frames of the timeslot belong to
+ * the connection (26-multiframe: 24 traffic + 1 SACCH + 1 idle), not only
+ * the blocks of a sub-channel. */
 #define BSP_DEDIE_TCH 2
-/* [2026-10-15] PDCH (GPRS) : comme le TCH, toutes les trames de l intervalle
- * sont a la connexion (blocs B0..B11 de la 52-multitrame, PTCCH, idle). */
+/* PDCH (GPRS): like the TCH, all the frames of the timeslot belong to the
+ * connection (blocks B0..B11 of the 52-multiframe, PTCCH, idle). */
 #define BSP_DEDIE_PDCH 4
 static int g_dedie_genre = 1;
 static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
 
-/* [2026-10-22] DERNIERS BURSTS DU TCH LIVRES AU DSP, pour la prothese FACCH descendante de montant.c : sous la
- * L1 TI (Magnetite) la ROM decode la FACCH/F avec ses deux derniers bursts absents (« 01 8b 01 2b » au lieu de
- * l'UA « 01 73 01 2b »), alors que les bursts livres portent l'UA intact. */
+/* LAST TCH BURSTS DELIVERED TO THE DSP, for the downlink FACCH prosthesis of montant.c: under the
+ * TI L1 (Magnetite) the ROM decodes the FACCH/F with its last two bursts missing ("01 8b 01 2b"
+ * instead of the UA "01 73 01 2b"), while the delivered bursts carry the UA intact. */
 #define TCH_ANNEAU 64u
 static struct { uint32_t fn; uint8_t bits[148]; int ok; } g_tch_anneau[TCH_ANNEAU];
 static uint32_t g_tch_dernier_fn; static int g_tch_dernier_ok;
@@ -1555,52 +1547,48 @@ int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148])
     memcpy(bits, g_tch_anneau[k].bits, 148);
     return 1;
 }
-/* [2026-09-22] g_dedie_perdues : les trames dediees que bsp_ts0_service() saute
- * ENTIEREMENT, faute de burst du BTS pour la trame reclamee. Elle repart par un
- * `return` avant bsp_ts0_livrer(), donc ni `joues` ni `manques` ne les voient :
- * les deux comptaient 0 pendant que 79 trames dediees sur 172 n'etaient jamais
- * livrees. C'est ce zero qui m'a fait conclure « le pont livre tout, le defaut
- * est dans la demodulation du DSP » -- conclusion fausse, batie sur un
- * instrument aveugle a la perte majoritaire. Ne jamais lire manques=0 comme
- * « rien ne se perd » sans lire perdues en meme temps. */
+/* g_dedie_perdues: the dedicated frames that bsp_ts0_service() skips
+ * ENTIRELY, for lack of a BTS burst for the requested frame. It leaves through
+ * a `return` before bsp_ts0_livrer(), so neither `joues` nor `manques` see
+ * them. Never read manques=0 as "nothing is lost" without reading perdues at
+ * the same time. */
 static unsigned long g_dedie_perdues;
 
-/* Cette trame du BTS appartient-elle au canal dedie du mobile ?
+/* Does this BTS frame belong to the mobile's dedicated channel?
  *
- * [2026-09-21, mesure] Premiere version : une fois arme, l'intervalle dedie
- * remplacait TS0 a CHAQUE trame. Le BTS emet sur TS1 en permanence (bursts de
- * bourrage compris), donc le mobile n'avait plus de TS0 du tout : « FBSB RESP:
- * result=255 », « MON: no cell info », « LOS during RACH request » des qu'il
- * tentait une mise a jour, sans meme emettre un RACH. Il faut donc ne prendre
- * QUE les trames du canal, celles ou sa couche 1 arme justement sa fenetre sur
- * TS1 -- ailleurs il lit la BCCH et la CCCH sur TS0, et il en a besoin.
+ * Only the frames of the channel are taken, those where its layer 1 arms its
+ * window on the dedicated timeslot -- elsewhere it reads the BCCH and the
+ * CCCH on TS0, and needs them. (The BTS emits on TS1 permanently, filler
+ * bursts included: replacing TS0 on EVERY frame would leave the mobile with no
+ * TS0 at all.)
  *
- * 45.002, SDCCH/8 + SACCH/8, multitrame de 51 comptee par paires :
- *   SDCCH descendant, sous-voie i : trames 4i..4i+3 de chaque multitrame ;
- *   SACCH descendante, i = 0..3   : trames 32+4i..35+4i, multitrame paire ;
- *                      i = 4..7   : memes trames, multitrame impaire. */
+ * 45.002, SDCCH/8 + SACCH/8, 51-multiframe counted in pairs:
+ *   downlink SDCCH, sub-channel i : frames 4i..4i+3 of every multiframe;
+ *   downlink SACCH, i = 0..3      : frames 32+4i..35+4i, even multiframe;
+ *                   i = 4..7      : same frames, odd multiframe. */
 static bool bsp_dedie_trame(uint32_t fn)
 {
     if (g_dedie_genre == BSP_DEDIE_TCH || g_dedie_genre == BSP_DEDIE_PDCH) {
-        return true;    /* TCH, PDCH : tout l'intervalle est a la connexion */
+        return true;    /* TCH, PDCH: the whole timeslot belongs to the connection */
     }
-    /* [2026-10-22] FIRMWARE TI EN DEDIE SUR UN SDCCH/8 : TOUTES LES TRAMES DE L'INTERVALLE. Le banc ne sait pas
-     * quel sous-canal le mobile a accepte : la BSC repond a chaque RACH par un SDCCH/8 different (SS1, SS2...) et
-     * le pont annonce la derniere IMM ASS ; le mobile, lui, prend celle de SA reference. Mauvais sous-canal ->
-     * SABM sans UA, « lchan allocation failed ... WAIT_RLL_RTP_ESTABLISH: Timeout » (22/10 11:59). Une fois le
-     * firmware en dedie (g_dedie_ti : taches montantes postees, IMM ASS acceptee), il ne lit plus TS0 : on lui
-     * donne tout TS1, il y prend son sous-canal. AVANT (attente de l'IMM ASS), le SS seul : il a besoin de TS0.
-     * CALYPSO_BSP_SDCCH8_TOUT=0 pour revenir au sous-canal annonce. */
+    /* TI FIRMWARE IN DEDICATED MODE ON AN SDCCH/8: ALL THE FRAMES OF THE TIMESLOT. The bench does not
+     * know which sub-channel the mobile accepted: the BSC answers every RACH with a different SDCCH/8
+     * (SS1, SS2...) and the bridge announces the last IMM ASS, while the mobile takes the one of ITS
+     * reference. Wrong sub-channel -> SABM without UA, "lchan allocation failed ...
+     * WAIT_RLL_RTP_ESTABLISH: Timeout". Once the firmware is in dedicated mode (g_dedie_ti: uplink
+     * tasks posted, IMM ASS accepted) it no longer reads TS0: it gets the whole TS1 and picks its
+     * sub-channel there. BEFORE (waiting for the IMM ASS), the SS alone: it needs TS0.
+     * CALYPSO_BSP_SDCCH8_TOUT=0 falls back to the announced sub-channel. */
     if (g_dedie_genre == 1 && g_dedie_ti) {
         static int tout = -1;
         if (tout < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SDCCH8_TOUT"); tout = !(e && *e == '0'); }
         if (tout) return true;
     }
-    /* [2026-10-22 14:30] ET AVANT, RIEN. Run de 14:25 : des la 1re IMM ASS annoncee par le pont (SS0, p51 0..3),
-     * les trames du SS remplacaient TS0 alors que le mobile n'avait encore rien accepte : BCCH (2..5) en erreur
-     * (BS_I 1 a partir de 13164), blocs CCCH 6..9 / 12..15 ecrases par SS1 / SS3 -> l'IMM ASS de son RACH (pourtant
-     * bien date) jamais lue, nouveau RACH, SDCCH en Timeout a la BSC. Firmware TI (MS_MAGNETITE) : TS0 intact
-     * jusqu'a l'entree en dedie (g_dedie_ti). CALYPSO_BSP_SDCCH_TS0_ATTENTE=0 : ancien comportement. */
+    /* AND BEFORE THAT, NOTHING. Replacing TS0 with the SS frames as soon as the bridge announces an
+     * IMM ASS (SS0, p51 0..3), while the mobile has accepted nothing yet, breaks the BCCH (2..5) and
+     * overwrites the CCCH blocks 6..9 / 12..15 with SS1 / SS3: the IMM ASS of its own RACH is never
+     * read, new RACH, SDCCH Timeout at the BSC. TI firmware (MS_MAGNETITE): TS0 intact until the entry
+     * in dedicated mode (g_dedie_ti). CALYPSO_BSP_SDCCH_TS0_ATTENTE=0: SS frames replace TS0 at once. */
     if (g_dedie_genre == 1 && !g_dedie_ti) {
         static int attente = -1;
         if (attente < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SDCCH_TS0_ATTENTE");
@@ -1619,11 +1607,11 @@ static bool bsp_dedie_trame(uint32_t fn)
     return false;
 }
 
-/* Etat du canal dedie, lisible sans le terminal du DSP :
- * /dev/shm/calypso_bsp_dedie, une ligne reecrite a chaque changement notable.
- * C'est la seule facon de savoir, de l'exterieur, si les bursts de
- * l'intervalle dedie arrivent jusqu'ici et s'ils sont joues. */
-static unsigned long g_dedie_replis;   /* voir bsp_dedie_bits() */
+/* State of the dedicated channel, readable without the DSP terminal:
+ * /dev/shm/calypso_bsp_dedie, one line rewritten on every notable change.
+ * It is the only way to know, from outside, whether the bursts of the
+ * dedicated timeslot reach this point and whether they are played. */
+static unsigned long g_dedie_replis;   /* see bsp_dedie_bits() */
 static void bsp_dedie_etat(const char *quoi)
 {
     static unsigned long dernier_joues, dernier_stockes, dernier_perdues;
@@ -1697,32 +1685,23 @@ static void bsp_dedie_stocker(uint32_t fn, const uint8_t *bits)
     g_dedie_stockes++;
 }
 
-/* [2026-09-22] LE MAGASIN DEDIE COMMENCE TROP TARD : ON RETOMBE SUR g_autres.
+/* THE DEDICATED STORE STARTS TOO LATE: FALL BACK ON g_autres.
  *
- * `g_dedie` n'est alloue et rempli qu'a l'ARMEMENT du canal
- * (`calypso_bsp_set_dedie`), et l'armement vient du tap L1CTL de QEMU, donc du
- * PREMIER bloc dedie recu -- pas de l'IMMEDIATE ASSIGNMENT. Or le BSP joue la
- * trame BTS `tick + g_ts0_offset`, en retard sur celle qui arrive : toutes les
- * trames du canal anterieures a l'armement etaient jouees VIDES.
+ * `g_dedie` is only allocated and filled when the channel is ARMED
+ * (`calypso_bsp_set_dedie`), and the arming comes from QEMU's L1CTL tap, i.e.
+ * from the FIRST dedicated block received -- not from the IMMEDIATE
+ * ASSIGNMENT. The BSP plays BTS frame `tick + g_ts0_offset`, behind the one
+ * arriving: the channel frames older than the arming would be played EMPTY
+ * (one frame in four without burst, the signature of "Dropping frame with 110
+ * bit errors" and of blocks rebuilt from three bursts out of four).
  *
- * Mesure du 2026-09-22, `/dev/shm/calypso_bsp_dedie` a la liberation :
- *     stockes=4311 joues=404 manques=138
- * 138 sur 542 trames du canal, soit une sur quatre sans burst -- exactement la
- * signature des « Dropping frame with 110 bit errors » (110 sur 456 = un burst
- * sur quatre), des « MON: lev=<=-110 snr=0 » sur l'intervalle dedie, et des
- * « Received frame for unsupported SAPI 2 » / « MDL-ERROR-IND cause 3 » que
- * LAPDm sort d'un bloc reconstitue a partir de trois bursts sur quatre.
- * Cote TS0 au meme moment : 11 manques en tout. Ce n'est donc pas la BTS qui
- * est en retard, c'est ce magasin-ci qui ne couvre pas assez loin.
+ * `g_autres` ALREADY keeps the seven other timeslots of every frame,
+ * unconditionally and from the first burst (it serves to complete the
+ * continuous frame). `g_dedie` is a partial duplicate of it, kept because it
+ * counts the channel bursts; when it does not have the frame, the one of
+ * `g_autres` is taken instead of returning NULL.
  *
- * Il n'y avait rien a stocker de plus : `g_autres` garde DEJA les sept
- * intervalles de chaque trame, sans condition et des le premier burst (il sert
- * a completer la trame continue). `g_dedie` en est un doublon partiel. On le
- * garde -- c'est lui qui compte les bursts du canal -- mais quand il n'a pas la
- * trame, on prend celle de `g_autres` au lieu de rendre NULL.
- *
- * MONTANT_DEDIE_STRICT=1 retablit l'ancien comportement (sans repli), pour
- * pouvoir remesurer l'ecart. */
+ * MONTANT_DEDIE_STRICT=1 disables the fallback, to measure the gap. */
 static const uint8_t *bsp_dedie_bits(uint32_t fn)
 {
     if (g_dedie_tn <= 0) {
@@ -1749,58 +1728,42 @@ static const uint8_t *bsp_dedie_bits(uint32_t fn)
     return b;
 }
 
-/* [2026-09-29] LE SCH HORS FENETRE ONE-SHOT : bloc SB en attente d'une DMA armee.
+/* THE SCH OUTSIDE A ONE-SHOT WINDOW: SB block waiting for an armed DMA.
  *
- * Mesure du 2026-09-29 (run dsp de 22:38, 600 tentatives SB) : la ROM ne
- * decode le SCH que 131 fois (22 %), alors que le TOA du FB est identique a
- * chaque fois (8743) et que la tache SB est postee a la bonne phase de la
- * multitrame dans 94 % des cas. Le temps est donc juste ; c'est le CONTENU que
- * la ROM lit qui varie. Les traces [a_sch] le montrent : a chaque paire de
- * tentatives, la page 0 recoit TOUJOURS le meme resultat (8100 0016 f85d 01fb),
- * donc un tampon au contenu constant, sans burst ; la page 1 recoit un contenu
- * variable et decode parfois (a_sch[3]=001c, BSIC 7).
+ * The ROM's SB task does not work on the continuous stream of the FB search:
+ * it programs a task page (ALGTH >= 302 words, i.e. >= 151 samples), double
+ * page, and expects the burst 23 symbols from the start of its window
+ * (tpu_window.c: L1_SB_MARGIN_Q = 23 * 4). What it receives depends on the
+ * RIF residue (4 words per FB search frame, never empty) and on the instant it
+ * arms its DMA relative to the deposit: if the DMA is not armed when
+ * bsp_ts0_livrer() deposits the SCH, calypso_rif_rx_burst() drops the burst
+ * ("n_muets") and the page only holds stale data.
  *
- * Pourquoi : au moment ou bsp_ts0_livrer() depose le SCH, ONE_SHOT vaut 0
- * (la sonde [sbwin] le mesure sur 100 % des SCH), et la fonction en deduisait
- * nwin=0, marge=0 : le burst partait a l'offset zero d'une trame de 1250
- * echantillons, suivie des sept intervalles de bourrage. Or la tache SB de la
- * ROM ne travaille pas sur le flux continu de la recherche FB : elle programme
- * une page de tache (ALGTH >= 302 mots, soit >= 151 echantillons), en double
- * page, et attend le burst a 23 symboles du debut de sa fenetre
- * (tpu_window.c : L1_SB_MARGIN_Q = 23 * 4). Ce qu'elle recevait dependait du
- * residu du RIF (4 mots par trame de recherche FB, jamais vides) et de
- * l'instant ou elle armait sa DMA par rapport au depot : si la DMA n'etait pas
- * armee, calypso_rif_rx_burst() jetait le burst (« n_muets ») et la page ne
- * contenait que du perime -- le resultat constant de la page 0.
- *
- * Correctif (v2, apres mesure du premier jet -- voir calypso_bsp_sb_retenter()),
- * derriere CALYPSO_BSP_SB_FENETRE (1 par defaut, 0 = comportement d'avant) :
- *   1. un SCH depose alors que la DMA n'est pas armee n'est plus jete : il est
- *      garde UN tick et livre, cadre a 21 (TOA 23), dans la fenetre SB one-shot
- *      (>= 190 echantillons) que la ROM arme juste apres ; l'offset ARM-tick
- *      est recale sur le tick de la livraison effective ;
- *   2. il n'est JAMAIS livre dans une autre fenetre (NB 151, continue) : un
- *      bloc non reclame expire ;
- *   3. la trace [sbwin] dit armee/one_shot/page programmee/residu RIF et
- *      l'action, et pont.c ajoute TOA/PM/SNR aux traces [a_sch] : un SB bien
- *      cadre lit TOA=23 ou 24.
- * La recherche FB (page de 48 echantillons, DMA armee en continu) et les
- * fenetres one-shot armees avant le depot ne changent pas. */
+ * Behind CALYPSO_BSP_SB_FENETRE (1 by default, 0 = no retention):
+ *   1. an SCH deposited while the DMA is not armed is not dropped: it is kept
+ *      ONE tick and delivered, framed at 21 (TOA 23), in the one-shot SB window
+ *      (>= 190 samples) the ROM arms right after; the ARM-tick offset is
+ *      realigned on the tick of the actual delivery;
+ *   2. it is NEVER delivered in another window (NB 151, continuous): an
+ *      unclaimed block expires;
+ *   3. the [sbwin] trace tells armed/one_shot/programmed page/RIF residue and
+ *      the action, and pont.c adds TOA/PM/SNR to the [a_sch] traces: a well
+ *      framed SB reads TOA=23 or 24.
+ * The FB search (48-sample page, DMA armed continuously) and the one-shot
+ * windows armed before the deposit do not change. */
 static int16_t  g_sb_attente_iq[2 * 512];
-/* [2026-09-29 v3] LE DERNIER SCH DEPOSE, quel que soit l'etat de la DMA au depot.
- * Mesure du run de 23:41 : au depot du SCH la DMA est le plus souvent ARMEE
- * pour autre chose (fenetre PM de 64 echantillons, one_shot=1 : le SCH y est
- * consomme), puis la fenetre SB s'arme et ne trouve rien (page 0 : TOA=0
- * SNR=12, toujours vide). La v2 ne retenait le SCH que si la DMA n'etait pas
- * armee : une seule relivraison sur le run. Desormais on retient TOUJOURS le
- * dernier SCH (fn, tick, bits) et on note s'il a ete livre dans une fenetre SB ;
- * s'il ne l'a pas ete et qu'une fenetre SB s'arme dans le tick ou le suivant,
- * il y est livre. Sur silicium, la fenetre SB couvre l'instant du burst quoi
- * qu'ait fait le DSP avant : c'est ce que ceci reconstitue. */
+/* THE LAST DEPOSITED SCH, whatever the DMA state at the deposit. At the
+ * deposit of the SCH the DMA is most often ARMED for something else (64-sample
+ * PM window, one_shot=1: the SCH is consumed there), then the SB window arms
+ * and finds nothing. The last SCH (fn, tick, bits) is therefore ALWAYS kept,
+ * with a note of whether it was delivered in an SB window; if it was not and
+ * an SB window arms in this tick or the next, it is delivered there. On
+ * silicon the SB window covers the instant of the burst whatever the DSP did
+ * before: this is what it reconstructs. */
 static struct { uint32_t fn; uint32_t tick; uint8_t bits[148]; int livre_sb; int valide; } g_dernier_sch;
-static uint32_t g_sb_trace_jusqua;     /* tick jusqu'auquel CHAQUE SCH est trace ([sbwin]) */
+static uint32_t g_sb_trace_jusqua;     /* tick up to which EVERY SCH is traced ([sbwin]) */
 static unsigned long g_sb_relivres, g_sb_expires;
-static uint32_t g_tick_courant;        /* tick en cours (bsp_ts0_service), pour dater la relivraison */
+static uint32_t g_tick_courant;        /* current tick (bsp_ts0_service), to date the redelivery */
 static int sb_fenetre_on(void)
 {
     static int on = -1;
@@ -1808,27 +1771,25 @@ static int sb_fenetre_on(void)
                   if (on) BSP_LOG("SB_FENETRE on : un SCH depose alors que la DMA n'est pas armee est garde un tick et livre dans la fenetre SB one-shot qui suit"); }
     return on;
 }
-/* Cadre le burst SB dans `iq` pour la fenetre one-shot telle qu'elle est
- * programmee a cet instant (191 echantillons, burst a 21 : TOA 23) ; rend le
- * nombre d'echantillons du bloc, 0 si ce n'est pas une fenetre SB. */
-/* [2026-09-30] LA MODULATION DU SCH, MESUREE EN REJEU (c54x_exe --rejouer,
- * REJEU_CONTINUER=1, 8000 trames, deterministe) : la ROM ne decodait que 34 %
- * des SCH poses au bon TOA (121 sur 352 a 12000 trames), et sur le banc 48 %
- * des fenetres SB natives (run du 29/09 23:50). Sur les echecs, seuls les bits
- * 0-2 du mot SB sont faux le plus souvent : le profil « fil du rasoir » des NB
- * avant gmsk_elargir. Balayage (SCH decodes / SCH presentes, 8000 trames) :
- *   elargissement a : 0 -> 34 %, 0.15 -> 50 %, 0.3 -> 60 %, 0.5-1.5 -> 63-66 %
- *   + instant d'echantillonnage 0.35 (au lieu de 0.5)          -> 76 %
- *   + bruit gaussien sigma 3000 (10 % de l'amplitude)           -> 82 %
- *   phase porteuse, marge de tete : sans effet ; amplitude < 22000 : plus de FB.
- * Ces trois reglages sont les defauts ici (CALYPSO_BSP_SB_SYM, _SB_DEC,
- * _SB_NOISE ; 0 / 0.5 / 0 = comportement d'avant). Le bruit est seme par le fn
- * de la trame : deterministe, rejouable. */
-/* [2026-09-30] DEUX FORMES D'ONDE POUR LE SCH. Mesure en rejeu (8000 trames,
- * 209 SCH) : la forme A (ci-dessous) rate 20 % des SCH ; la forme D (A + traine
- * causale 0.8, 0.4 et autre graine de bruit) en rate 17 % ; les deux ensemble
- * n'en ratent que 7 % en commun (A+D = 15/209). g_sb_variante = 1 selectionne D,
- * utilisee par la seconde chance (voir bsp_ts0_service). */
+/* Frames the SB burst in `iq` for the one-shot window as programmed at this
+ * instant (191 samples, burst at 21: TOA 23); returns the number of samples
+ * of the block, 0 if it is not an SB window. */
+/* SCH MODULATION, TUNED IN REPLAY (c54x_exe --rejouer, REJEU_CONTINUER=1,
+ * 8000 frames, deterministic). On the failures, mostly only bits 0-2 of the
+ * SB word are wrong: the "razor's edge" profile of the NBs before
+ * gmsk_elargir. Sweep (SCH decoded / SCH present, 8000 frames):
+ *   widening a: 0 -> 34 %, 0.15 -> 50 %, 0.3 -> 60 %, 0.5-1.5 -> 63-66 %
+ *   + sampling instant 0.35 (instead of 0.5)                     -> 76 %
+ *   + gaussian noise sigma 3000 (10 % of the amplitude)           -> 82 %
+ *   carrier phase, head margin: no effect; amplitude < 22000: no more FB.
+ * Those three settings are the defaults here (CALYPSO_BSP_SB_SYM, _SB_DEC,
+ * _SB_NOISE; 0 / 0.5 / 0 = none of them). The noise is seeded by the fn of
+ * the frame: deterministic, replayable. */
+/* TWO WAVEFORMS FOR THE SCH. In replay (8000 frames, 209 SCH): waveform A
+ * (below) misses 20 % of the SCHs; waveform D (A + causal tail 0.8, 0.4 and
+ * another noise seed) misses 17 %; both together only miss 7 % in common
+ * (A+D = 15/209). g_sb_variante = 1 selects D, used by the second chance
+ * (see bsp_ts0_service). */
 static int g_sb_variante = 0;
 static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn)
 {
@@ -1879,20 +1840,16 @@ static int sb_cadrer(const uint8_t *bits, int16_t *iq, int cap_ech, int *marge_o
     *marge_out = marge;
     return total;
 }
-/* [2026-09-29 23:40] MESURE DU PREMIER JET (run de 23:33) : la ROM arme bien une
- * fenetre SB one-shot de 191 echantillons (SB #7 : one_shot=1 page_prog=191,
- * TOA=24 CRC_OK) -- contrairement a ce que le MAILBOX du 22/09 concluait. Le
- * defaut est un defaut d'ORDRE : la fenetre est souvent armee APRES le depot
- * du SCH dans le tick, et calypso_rif_rx_burst() jette alors le burst
- * (fenetre vide sur la page 0 : TOA=0 SNR=12, resultat constant) ; la page 1
- * recoit le burst de la trame SUIVANTE a TOA 24, d'ou un CRC faux.
- * Le premier jet relivrait le bloc garde a N'IMPORTE QUEL armement, y compris
- * les fenetres NB de la lecture BCCH (one_shot=0 page=151) : le SCH y
- * remplacait le burst BCCH, plus aucune SI ne passait, le mobile tombait en
- * « C6 any cell selection ». Desormais : relivraison UNIQUEMENT dans une
- * fenetre SB one-shot (>= 190), au plus un tick apres le depot, et l'offset
- * ARM-tick est recale sur le tick de la livraison effective, comme le fait la
- * livraison native d'un SCH en fenetre SB. Un bloc non reclame expire. */
+/* The ROM arms a one-shot SB window of 191 samples (one_shot=1
+ * page_prog=191, TOA=24 CRC_OK), often AFTER the deposit of the SCH in the
+ * tick; calypso_rif_rx_burst() then drops the burst (empty window on page 0:
+ * TOA=0 SNR=12) and page 1 receives the burst of the NEXT frame at TOA 24,
+ * hence a wrong CRC. The kept block is redelivered ONLY in a one-shot SB
+ * window (>= 190), at most one tick after the deposit -- never in the NB
+ * windows of the BCCH reading (one_shot=0 page=151), where it would replace
+ * the BCCH burst -- and the ARM-tick offset is realigned on the tick of the
+ * actual delivery, as the native delivery of an SCH in an SB window does. An
+ * unclaimed block expires. */
 int calypso_bsp_sb_retenter(void)
 {
     if (!g_dernier_sch.valide || g_dernier_sch.livre_sb) return 0;
@@ -1909,12 +1866,12 @@ int calypso_bsp_sb_retenter(void)
     bsp.bursts_written++;
     g_sb_relivres++;
     g_dernier_sch.livre_sb = 1;
-    /* Le SCH est livre a ce tick-ci : c'est lui qui fixe l'offset ARM-tick,
-     * exactement comme la livraison native en fenetre SB (bsp_ts0_livrer). */
+    /* The SCH is delivered at this tick: it is the one that sets the ARM-tick
+     * offset, exactly like the native delivery in an SB window (bsp_ts0_livrer). */
     int64_t off = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant - sb_fin_trame();
-    /* [2026-10-22] plus apres un RA_C : le mobile ne recale pas son fn sur ces SB (offset RA_C 752, SB 758 au
-     * meme moment, 22/10 12:20) ; les SDCCH etaient livres six trames a cote (a_cd FIRE KO 184/250). */
-    if (!g_off_rac_vu) g_off_mobile = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant;   /* ce que le mobile vient d'apprendre */
+    /* Not after a RA_C: the mobile does not realign its fn on those SBs (RA_C offset 752, SB 758 at
+     * the same moment); the SDCCHs would be delivered six frames off (a_cd FIRE KO). */
+    if (!g_off_rac_vu) g_off_mobile = (int64_t)g_dernier_sch.fn - (int64_t)g_tick_courant;   /* what the mobile just learnt */
     int recale = (off != g_ts0_offset);
     if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
     if (g_sb_relivres <= 100 || g_sb_relivres % 100 == 0)
@@ -1923,30 +1880,28 @@ int calypso_bsp_sb_retenter(void)
                recale ? ", offset ARM-tick recale" : "", g_sb_relivres, g_sb_expires);
     return 1;
 }
-/* [2026-10-21 22:45] ROUTAGE DES FENETRES EN DEDIE (firmware TI). Le banc depose UN burst (148 echantillons,
- * TS0) par tick ; en dedie la ROM arme DEUX fenetres one-shot par trame : la mesure de puissance (64) puis la
- * reception NB (151), 215 echantillons (CALYPSO_BSP_TS0_DEBUG, run de 22:19 : SDCCH p51 22..25 deposes en
- * « fenetre=64 », les 151 armees 3 a 5 ticks plus tard et de plus en plus tard : +67 echantillons par trame).
- * Sur silicium la mesure tombe sur un autre intervalle et consomme du vide. Ici : fenetre de mesure (< 150)
- * <- remplissage (bsp_remplissage), fenetre NB (150..189) <- le vrai burst, garde dans un anneau si la NB
- * n'est pas armee au depot ; pont.c fait tourner le DSP entre deux livraisons dans le meme tick (boucle
- * pump). Seulement en dedie TI (calypso_bsp_set_dedie_ti) ; CALYPSO_BSP_NB_RETENTER=0 pour couper. */
+/* WINDOW ROUTING IN DEDICATED MODE (TI firmware). The bench deposits ONE burst (148 samples, TS0)
+ * per tick; in dedicated mode the ROM arms TWO one-shot windows per frame: the power measurement
+ * (64) then the NB reception (151), 215 samples. On silicon the measurement falls on another
+ * timeslot and consumes emptiness. Here: measurement window (< 150) <- filler (bsp_remplissage),
+ * NB window (150..189) <- the real burst, kept in a ring if the NB is not armed at the deposit;
+ * pont.c runs the DSP between two deliveries within the same tick (pump loop). Only in TI
+ * dedicated mode (calypso_bsp_set_dedie_ti); CALYPSO_BSP_NB_RETENTER=0 disables. */
 #define NB_GARDE_N 4
 static struct { int valide; uint32_t fn, tick; uint8_t bits[148]; } g_nb_garde[NB_GARDE_N];
 static unsigned g_nb_garde_w;
 static unsigned long g_nb_relivres, g_nb_expires, g_pm_servies;
 static int nb_retenter_on(void)
 {
-    /* [2026-10-21 23:00] EN VEILLE AUSSI (plus seulement en dedie TI) : la L1 TI mesure des voisins sur les
-     * trames de paging et de BCCH ; archive 22:40 (TS0_DEBUG) : au depot, fenetre de mesure (64) sur 661 des
-     * 1972 trames de paging (p51 16..19) et 516 des 2364 BCCH -> bloc de paging en erreur (NP_I error_flag=1,
-     * IL 59), compteur DSC epuise, reselection de cellule toutes les ~8 s (BS_S, BAND_R, RXL_R, CEL_R : les
-     * barres d'antenne apparaissent 5 s puis disparaissent), et aucun paging recu (pas de SMS/appel entrant).
-     * CALYPSO_BSP_NB_RETENTER=0 pour couper, =2 : dedie seul. */
-    /* [2026-10-22 21:10] DEFAUT SELON LE FIRMWARE. La garde en veille sert la L1 TI (MS_MAGNETITE) : sans elle,
-     * NP_I tous en erreur, aucun appel entrant (run de 21:01 en =2). Le firmware osmocom n'en a jamais eu besoin et
-     * elle lui vidait la recherche FB (FBSB result=255, voir continue_fb dans bsp_ts0_livrer) : 2 (dedie seul) par
-     * defaut sans MS_MAGNETITE. CALYPSO_BSP_NB_RETENTER force la valeur dans les deux cas. */
+    /* IN IDLE MODE TOO (not only in TI dedicated mode): the TI L1 measures neighbours on the paging
+     * and BCCH frames, so at the deposit a measurement window (64) is often the armed one; without
+     * the retention the paging blocks come out in error (NP_I error_flag=1), the DSC counter runs
+     * out, the cell is reselected every ~8 s and no paging is received (no MT SMS/call).
+     * CALYPSO_BSP_NB_RETENTER=0 disables, =2: dedicated mode only. */
+    /* DEFAULT ACCORDING TO THE FIRMWARE. The idle-mode retention serves the TI L1 (MS_MAGNETITE):
+     * without it, every NP_I in error, no incoming call. The osmocom firmware does not need it and
+     * it empties its FB search (FBSB result=255, see continue_fb in bsp_ts0_livrer): 2 (dedicated
+     * only) by default without MS_MAGNETITE. CALYPSO_BSP_NB_RETENTER forces the value in both cases. */
     static int on = -1;
     if (on < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER");
@@ -1956,7 +1911,7 @@ static int nb_retenter_on(void)
     }
     return on == 1 || (on == 2 && g_dedie_ti);
 }
-static int pm_sur_cellule(void);   /* la mesure vise-t-elle la frequence de la cellule ? (faux air) */
+static int pm_sur_cellule(void);   /* does the measurement target the cell frequency? (fake air) */
 static void nb_garde_poser(uint32_t fn, uint32_t tick, const uint8_t *bits)
 {
     unsigned k = g_nb_garde_w++ % NB_GARDE_N;
@@ -1964,15 +1919,16 @@ static void nb_garde_poser(uint32_t fn, uint32_t tick, const uint8_t *bits)
     g_nb_garde[k].fn = fn; g_nb_garde[k].tick = tick; g_nb_garde[k].valide = 1;
     memcpy(g_nb_garde[k].bits, bits, 148);
 }
-/* [2026-10-22 10:30] L'AGC SUR LES BURSTS NORMAUX. La L1 TI tire l'IL de la cellule de a_serv_demod[D_PM], que le
- * DSP mesure sur les echantillons de la fenetre NB (l1ctl_pagc : IL = -(pm - agc programme ...)). Le banc les
- * modulait a 30000 quel que soit le gain TRF6151 programme : pm fige a 169, la boucle PAGC tournait a vide (gain
- * 112/124/136, IL 59/19, s_rxlev 69/101 > 63) et l'icone d'antenne disparaissait (rxlev*5/64 >= 5, iconsShowSignal).
- * L'amplitude suit maintenant le gain de la fenetre : 30000 au gain de reference CALYPSO_BSP_NB_GAIN_REF (dB, ancre
- * du niveau vu par le mobile : +1 dB -> rxlev -1 ; 124 : gain plancher 92, IL 83, s_rxlev 63/69 ; 148 : gain
- * 112..124, IL 131, s_rxlev 45 = le voisin ARFCN 1 mesure par a_pm, runs du 22/10 10:15 et 10:21),
- * CALYPSO_BSP_NB_AGC=0 pour revenir a 30000 fixe. Seulement les
- * fenetres NB : les fenetres de mesure passent par le modele a_pm, qui ajoute deja le gain (bsp_apm_de_mav). */
+/* AGC ON THE NORMAL BURSTS. The TI L1 derives the cell's IL from a_serv_demod[D_PM], which the DSP
+ * measures on the samples of the NB window (l1ctl_pagc: IL = -(pm - programmed agc ...)). A fixed
+ * amplitude of 30000 whatever the programmed TRF6151 gain would freeze pm at 169, let the PAGC loop
+ * run idle (gain 112/124/136, IL 59/19, s_rxlev 69/101 > 63) and hide the antenna icon
+ * (rxlev*5/64 >= 5, iconsShowSignal). The amplitude follows the gain of the window: 30000 at the
+ * reference gain CALYPSO_BSP_NB_GAIN_REF (dB, anchor of the level seen by the mobile: +1 dB ->
+ * rxlev -1; 124: floor gain 92, IL 83, s_rxlev 63/69; 148: gain 112..124, IL 131, s_rxlev 45 = the
+ * neighbour ARFCN 1 measured by a_pm). CALYPSO_BSP_NB_AGC=0 goes back to a fixed 30000. Only the
+ * NB windows: the measurement windows go through the a_pm model, which already adds the gain
+ * (bsp_apm_de_mav). */
 static int nb_amp(uint32_t tick)
 {
     static int on = -1; static double ref;
@@ -2009,8 +1965,8 @@ static int nb_marge_ti(void)
                         if (nb_marge < 0 || nb_marge > 3) nb_marge = 3; }
     return nb_marge;
 }
-/* la fenetre de mesure armee recoit de quoi se terminer (la ROM arme alors la suivante) : la tete du dernier
- * burst garde si la mesure vise la cellule (sa puissance est la bonne), du remplissage sinon */
+/* the armed measurement window receives enough to complete (the ROM then arms the next one): the head of
+ * the last kept burst if the measurement targets the cell (its power is the right one), filler otherwise */
 static int pm_servir(int nwin)
 {
     static int16_t iq[2 * 256];
@@ -2024,10 +1980,9 @@ static int pm_servir(int nwin)
         nb_moduler(g_nb_garde[k_rec].bits, iq, 0);
         src = iq;
     }
-    /* [2026-10-21 23:45] SONDE : en veille paging (Magnetite, IBA_I), la mesure de la cellule (ARFCN 1) tombe
-     * au plancher de bruit (54 -> 8, comme le voisin vide) et les barres disparaissent : la fenetre de
-     * mesure recoit-elle du remplissage faute de burst garde (k_rec<0) ou parce que le faux air la voit
-     * accordee ailleurs ? 40 premieres puis 1 sur 500. */
+    /* PROBE: in paging idle mode (Magnetite, IBA_I), when the cell measurement (ARFCN 1) falls to the
+     * noise floor, tells whether the measurement window receives filler for lack of a kept burst
+     * (k_rec<0) or because the fake air sees it tuned elsewhere. First 40 then 1 in 500. */
     {
         static unsigned long n, n_sans_garde, n_hors;
         n++; if (k_rec < 0) n_sans_garde++; if (!sur_cell) n_hors++;
@@ -2045,15 +2000,14 @@ static int pm_servir(int nwin)
     g_pm_servies++;
     return 1;
 }
-/* [2026-10-21 22:55] SONDE DMA (CALYPSO_BSP_DMA_TRACE=1) : chaque changement d'etat du canal RX (armee,
- * one-shot, longueur) avec le tick, pendant le dedie TI. Le modele rhea-dma trace ses registres sur stderr,
- * mais c54x_exe (verbosite.c) les avale. Sert a voir ce que la ROM arme sur le TCH (TS1), ou aucune fenetre
- * n'etait armee au depot (appel du 21/10 22:42 : a_dd BFI, « >N200 of SABM » sur la FACCH). 3000 lignes. */
+/* DMA PROBE (CALYPSO_BSP_DMA_TRACE=1): every state change of the RX channel (armed, one-shot, length)
+ * with the tick, during TI dedicated mode. The rhea-dma model traces its registers on stderr, but
+ * c54x_exe (verbosite.c) swallows them. Shows what the ROM arms on the TCH (TS1). 3000 lines. */
 static int pm_sur_cellule(void)
 {
     int cell = faux_air_cellule();
     if (cell < 0) return 1;
-    int a = faux_air_arfcn(g_tick_courant, pm_limite_qbit(pm_rang_fenetre()));   /* voir pm_rang_fenetre() */
+    int a = faux_air_arfcn(g_tick_courant, pm_limite_qbit(pm_rang_fenetre()));   /* see pm_rang_fenetre() */
     return a < 0 || a == cell;
 }
 static void dma_trace(const char *ou)
@@ -2067,7 +2021,7 @@ static void dma_trace(const char *ou)
     printf("  [dma] tick=%u %s : armee=%d one_shot=%d fenetre=%d rif=%d\n", g_tick_courant, ou, armee, os, len, calypso_rif_level());
 }
 void calypso_bsp_dma_trace(const char *ou) { dma_trace(ou); }
-/* [2026-10-22] trace des armements et depots en dedie TI (calypso_rhea_dma.c [dma-arm], rx_burst [dma-dep]) */
+/* trace of the armings and deposits in TI dedicated mode (calypso_rhea_dma.c [dma-arm], rx_burst [dma-dep]) */
 int calypso_bsp_dma_trace_on(void)
 {
     static int on = -1; static unsigned n;
@@ -2083,20 +2037,19 @@ int calypso_bsp_nb_retenter(void)
 {
     dma_trace("pump");
     if (!nb_retenter_on()) return 0;
-    /* [2026-10-21 23:40] PAS SUR LE TCH. pont.c y depose deja apres l'IDLE, fenetre armee (PONT_TCH_DEPOT_IDLE).
-     * Appel Magnetite de 23:34 : deux NB gardes relivres dans le meme tick 11084, IT DMA en attente (IFR=4000)
-     * avec le bit 14 retire de l'IMR (3000), puis la ROM part a pc=0 (SP-CORRUPT) ; la L1 TI reinitialise
-     * le DSP ~1400 trames plus tard et le mobile perd la cellule a chaque appel.
-     * CALYPSO_BSP_NB_RETENTER_TCH=1 : ancien comportement. */
+    /* NOT ON THE TCH. pont.c already deposits there after the IDLE, window armed (PONT_TCH_DEPOT_IDLE).
+     * Two kept NBs redelivered in the same tick, with a DMA interrupt pending (IFR=4000) and bit 14
+     * removed from the IMR (3000), send the ROM to pc=0 (SP-CORRUPT); the TI L1 then reinitialises
+     * the DSP ~1400 frames later and the mobile loses the cell on every call.
+     * CALYPSO_BSP_NB_RETENTER_TCH=1: redeliver on the TCH too. */
     {
         static int sur_tch = -1;
         if (sur_tch < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER_TCH"); sur_tch = (e && *e == '1'); }
-        /* [2026-10-22 13:40] MAIS LA FENETRE DE MESURE, OUI. Enregistrement de l'appel de 13:20 (rejeu, 'B') :
-         * apres la NB du TCH, la ROM arme dans la meme trame une fenetre PM de 64 (voisins) ; personne ne la
-         * servait, elle restait armee au tick suivant et le burst TS2 de cette trame y tombait (64 echantillons,
-         * fn 19663, 19665... jamais livres en NB). Une NB sur deux : parole « bourrage » encore decodee (bits
-         * nuls), UA de la FACCH (fn 19789) et SACCH 38/90 perdus -> Assignment Failure. On sert la mesure
-         * (pas de NB relivree), une par tick, jamais sur une IT DMA en attente. CALYPSO_BSP_PM_TCH=0 coupe. */
+        /* BUT THE MEASUREMENT WINDOW, YES. After the NB of the TCH, the ROM arms in the same frame a
+         * 64-sample PM window (neighbours); if nobody serves it, it stays armed at the next tick and the
+         * TS2 burst of that frame falls into it (64 samples, never delivered as NB): one NB in two lost,
+         * FACCH UA and SACCH lost -> Assignment Failure. The measurement is served (no NB redelivered),
+         * one per tick, never on a pending DMA interrupt. CALYPSO_BSP_PM_TCH=0 disables. */
         if (!sur_tch && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
             static int pm_tch = -1; static uint32_t t_pm = 0xffffffffu;
             if (pm_tch < 0) { const char *e = calypso_getenv("CALYPSO_BSP_PM_TCH"); pm_tch = !(e && *e == '0'); }
@@ -2109,7 +2062,7 @@ int calypso_bsp_nb_retenter(void)
             return pm_servir(nw);
         }
     }
-    /* [2026-10-22 11:50] [nb-etat] 0 NB relivre sur tous les runs (milliers d'expires) : l'etat DMA vu ici. */
+    /* [nb-etat] the DMA state as seen here (redelivered vs expired NBs). */
     if (g_dedie_ti) {
         static unsigned n_et; static uint32_t t_et;
         int ng = 0; for (int k = 0; k < NB_GARDE_N; k++) ng += g_nb_garde[k].valide;
@@ -2123,10 +2076,10 @@ int calypso_bsp_nb_retenter(void)
     if (!calypso_rhea_dma_rx_armed() || !calypso_rhea_dma_one_shot()) return 0;
     int nwin = calypso_rhea_dma_get_len_words() / 2;
     if (nwin <= 0) return 0;
-    /* [2026-10-22 12:00] SUR LE TCH : UNE LIVRAISON PAR TICK, JAMAIS SUR UNE IT DMA EN ATTENTE. Le plantage du
-     * 21/10 23:34 (deux NB gardes relivres dans le meme tick, IFR bit 14 pendant, ROM a pc=0) se reproduit
-     * avec CALYPSO_BSP_NB_RETENTER_TCH=1 (22/10 11:43, 11:56 : saut hors ROM depuis 1:e9bd). Sans relivraison,
-     * 70 % des fenetres NB du TCH restent vides (TOA=0, SNR=0) : FACCH descendant (UA) jamais decode. */
+    /* ON THE TCH: ONE DELIVERY PER TICK, NEVER ON A PENDING DMA INTERRUPT (two kept NBs redelivered
+     * in the same tick with IFR bit 14 pending send the ROM to pc=0, jump outside the ROM from
+     * 1:e9bd). Without redelivery, 70 % of the TCH NB windows stay empty (TOA=0, SNR=0): downlink
+     * FACCH (UA) never decoded. */
     if (g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
         static uint32_t t_livre = 0xffffffffu;
         if (t_livre == g_tick_courant) return 0;
@@ -2134,8 +2087,8 @@ int calypso_bsp_nb_retenter(void)
         if (nwin >= 150 && nwin < 190) t_livre = g_tick_courant;
     }
     if (nwin < 150) return pm_servir(nwin);
-    if (nwin >= 190) return 0;                                  /* fenetre SB : calypso_bsp_sb_retenter */
-    /* la NB est armee : le plus ancien burst garde encore frais (2 ticks) */
+    if (nwin >= 190) return 0;                                  /* SB window: calypso_bsp_sb_retenter */
+    /* the NB is armed: the oldest kept burst still fresh (2 ticks) */
     int k_min = -1;
     for (int k = 0; k < NB_GARDE_N; k++) {
         if (!g_nb_garde[k].valide) continue;
@@ -2160,17 +2113,17 @@ int calypso_bsp_nb_retenter(void)
                g_nb_relivres, g_nb_expires, g_pm_servies);
     return 1;
 }
-/* pont.c : tracer CHAQUE SCH pendant `ticks` ticks (apres une detection FB, ou
- * quand l'ARM poste une tache SB), pour voir le depot exact autour des tentatives. */
+/* pont.c: trace EVERY SCH for `ticks` ticks (after an FB detection, or when
+ * the ARM posts an SB task), to see the exact deposit around the attempts. */
 void calypso_bsp_sb_trace(unsigned ticks)
 {
     uint32_t j = g_tick_courant + ticks;
     if ((int32_t)(j - g_sb_trace_jusqua) > 0) g_sb_trace_jusqua = j;
 }
-/* [2026-10-21] SB_FIN_TRAME : la lecture BCCH (p51 2..5) dit ou la L1 croit le bloc. Fenetres NB
- * armees sur 3..6 = flux en avance d'une trame (offset - 1) ; sur 1..4 = en retard (offset + 1).
- * Deux blocs de suite avant de corriger ; un bloc bien cale verrouille l'offset (les SCH relus ne le
- * recalent plus), deverrouille quand plus aucune fenetre BCCH n'est vue (la L1 a perdu la cellule). */
+/* SB_FIN_TRAME: the BCCH reading (p51 2..5) tells where the L1 believes the block is. NB windows
+ * armed on 3..6 = stream one frame ahead (offset - 1); on 1..4 = behind (offset + 1). Two blocks
+ * in a row before correcting; a well aligned block locks the offset (re-read SCHs no longer
+ * realign it), unlocked when no BCCH window is seen any more (the L1 has lost the cell). */
 static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
 {
     static uint8_t arme[7];
@@ -2206,12 +2159,12 @@ static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
         printf("  [bcch] tick=%u plus de lecture BCCH depuis %u trames : offset deverrouille\n", tick, tick - g_bcch_vu_tick);
     }
 }
-/* [2026-10-22 14:00] LE MEME CALAGE SUR LES BLOCS CCCH (paging). En veille la L1 ne relit presque plus la
- * BCCH : apres un dedie (LU, appel) l'offset restait faux de quelques trames (761 avant le LU de 13:51,
- * 758 au recalage SB qui a suivi), chaque NP_I en erreur, aucune page vue (MT SMS, appel entrant) jusqu'a
- * la perte de la cellule. Une serie de fenetres NB doit commencer sur un debut de bloc CCCH (6, 12, 16, 22,
- * 26, 32, 36, 42, 46) ; decalee de d (|d| <= 3) deux fois de suite -> offset - d. La BCCH (2..5) reste a
- * bsp_bcch_calage(). Hors dedie, offset non verrouille par la BCCH. CALYPSO_BSP_CCCH_CALAGE=0 coupe. */
+/* THE SAME ALIGNMENT ON THE CCCH BLOCKS (paging). In idle mode the L1 hardly re-reads the BCCH:
+ * after a dedicated phase (LU, call) the offset could stay wrong by a few frames, every NP_I in
+ * error, no page seen (MT SMS, incoming call) until the cell is lost. A series of NB windows must
+ * start on a CCCH block start (6, 12, 16, 22, 26, 32, 36, 42, 46); shifted by d (|d| <= 3) twice
+ * in a row -> offset - d. The BCCH (2..5) stays with bsp_bcch_calage(). Outside dedicated mode,
+ * offset not locked by the BCCH. CALYPSO_BSP_CCCH_CALAGE=0 disables. */
 static void bsp_ccch_calage(uint32_t tick, unsigned p, bool nb)
 {
     static const unsigned debuts[] = { 6, 12, 16, 22, 26, 32, 36, 42, 46 };
@@ -2244,29 +2197,22 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
 {
     static int16_t iq[2 * 512];
     const uint8_t *bits = g_ts0[i].bits;
-    /* [2026-09-22] Ce que la trace [ts0] ne disait pas : si la trame livree
-     * appartient au canal dedie, et si son burst vient bien de cet
-     * intervalle-la. Sans quoi on ne peut pas comparer la geometrie de fenetre
-     * d'un bloc SDCCH a celle d'un bloc BCCH -- la question ouverte apres
-     * « manques=0 » et des blocs a 96 erreurs sur 456. */
+    /* For the [ts0] trace: whether the delivered frame belongs to the
+     * dedicated channel, and whether its burst does come from that timeslot.
+     * Needed to compare the window geometry of an SDCCH block with that of a
+     * BCCH block. */
     bool trame_dediee = false, burst_dedie = false;
-    {   /* Sur les trames du canal dedie, c'est son intervalle qui compte. */
-        /* Deux verdicts : la table 45.002 (trames du canal) et ce que dit le
-         * firmware (intervalle de la fenetre). MONTANT_TPU_TN=1 fait foi au
-         * second ; par defaut on garde le premier et on JOURNALISE les
-         * desaccords, parce que la valeur du TICK peut avoir une trame de
-         * retard sur la programmation reelle de la fenetre -- c'est justement
-         * ce qu'il faut mesurer avant de s'y fier. */
-        /* [2026-09-22] SANS CANAL ARME, AUCUNE TRAME N'EST « A NOUS ».
-         * bsp_dedie_trame() lit g_dedie_ss, qui vaut 0 tant que rien n'est
-         * arme : hors connexion, une trame sur huit etait donc declaree du
-         * canal, bsp_dedie_bits() rendait NULL sur sa garde g_dedie_tn <= 0 et
-         * g_dedie_manques montait. Le compteur melangeait ainsi le temps de
-         * campement (ou jouer TS0 est la bonne chose) avec les vrais trous du
-         * canal -- releve du 2026-09-22 : « joues=72 manques=162 », plus de
-         * manques que de trames jouees, ce qui n'a aucun sens pour un canal
-         * ouvert quelques secondes. Un compteur qu'on ne peut pas lire est
-         * pire qu'absent : il a servi de preuve a un diagnostic faux. */
+    {   /* On the frames of the dedicated channel, its timeslot is what counts. */
+        /* Two verdicts: the 45.002 table (channel frames) and what the firmware
+         * says (window timeslot). MONTANT_TPU_TN=1 trusts the second; by default
+         * the first is kept and the disagreements are LOGGED, because the TICK
+         * value may be one frame behind the real programming of the window. */
+        /* WITHOUT AN ARMED CHANNEL, NO FRAME IS "OURS". bsp_dedie_trame() reads
+         * g_dedie_ss, which is 0 while nothing is armed: outside a connection
+         * one frame in eight would otherwise be declared part of the channel,
+         * bsp_dedie_bits() would return NULL on its g_dedie_tn <= 0 guard and
+         * g_dedie_manques would mix camping time (where playing TS0 is right)
+         * with the real holes of the channel. */
         bool a_nous = g_dedie_tn > 0 && bsp_dedie_trame(g_ts0[i].fn);
         {
             static int suit_tpu = -1;
@@ -2275,10 +2221,10 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             if (g_dedie_tn > 0 && selon_tpu != a_nous) {
                 static unsigned long n;
                 if (++n <= 40 || (n % 200) == 0) {
-                    /* [2026-09-23] printf et non BSP_LOG : CALYPSO_DEBUG=BSP
-                     * allume toutes les traces du BSP et fait perdre le temps
-                     * reel au banc ; celle-ci est deja plafonnee (40, puis 1
-                     * sur 200) et sert a juger la SACCH du SDCCH/8. */
+                    /* printf and not BSP_LOG: CALYPSO_DEBUG=BSP turns on all
+                     * the BSP traces and makes the bench lose real time; this
+                     * one is already capped (40, then 1 in 200) and serves to
+                     * judge the SACCH of the SDCCH/8. */
                     printf("  [BSP] dedie : DESACCORD fn=%u p51=%u p102=%u : table=%d "
                             "tpu=%d (offset=%d ref=%d, tn_fenetre=%d) [%lu fois]\n",
                             g_ts0[i].fn, g_ts0[i].fn % 51u, g_ts0[i].fn % 102u,
@@ -2292,11 +2238,9 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         }
         trame_dediee = a_nous;
         const uint8_t *d = a_nous ? bsp_dedie_bits(g_ts0[i].fn) : NULL;
-        /* [2026-09-23] SONDE SACCH/TF : sur TCH/F la parole et la FACCH suivent
-         * la 26-multitrame, la SACCH la 104 (TS pair : fn%26 == 12, bloc de TS2
-         * aux fn%104 = 38, 64, 90, 12). Appel de 15:42 : a_dd et a_fd bons,
-         * a_cd FIRE KO a chaque bloc avec deux contenus constants, LOS au bout
-         * de 32 blocs. On journalise ce que le BSP joue sur ces trames-la. */
+        /* SACCH/TF PROBE: on TCH/F the speech and the FACCH follow the
+         * 26-multiframe, the SACCH the 104 (even TS: fn%26 == 12, TS2 block at
+         * fn%104 = 38, 64, 90, 12). Logs what the BSP plays on those frames. */
         if (g_dedie_genre == BSP_DEDIE_TCH && a_nous && (g_ts0[i].fn % 26u) == 12u) {
             static unsigned long n_sacch;
             if (n_sacch++ < 24) {
@@ -2307,11 +2251,11 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                        d ? "oui" : "NON", uns, (int)calypso_rhea_dma_one_shot(),
                        calypso_rhea_dma_one_shot() ? calypso_rhea_dma_get_len_words() / 2 : 0);
             }
-            /* [2026-09-23] Les bits eux-memes, pour decoder la SACCH hors DSP
-             * (A5 + gsm0503_xcch_decode) : si elle decode la, le defaut est
-             * dans le chemin BSP/ROM, sinon dans ce que le BSP recoit.
-             * Enregistrements de 156 octets : tick BE32, fn BE32, 148 bits 0/1.
-             * 256 bursts au plus (64 blocs), fichier remis a zero au lancement. */
+            /* The bits themselves, to decode the SACCH outside the DSP (A5 +
+             * gsm0503_xcch_decode): if it decodes there, the defect is in the
+             * BSP/ROM path, otherwise in what the BSP receives.
+             * 156-byte records: tick BE32, fn BE32, 148 bits 0/1.
+             * 256 bursts at most (64 blocks), file reset at startup. */
             static FILE *f_sacch;
             static unsigned n_sacch_bits;
             if (!f_sacch && n_sacch_bits == 0)
@@ -2325,15 +2269,12 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 if (++n_sacch_bits == 256) { fclose(f_sacch); f_sacch = NULL; }
             }
         }
-        /* [2026-09-23] TOUS LES BURSTS DU TCH, POUR LES DECODER HORS DSP.
-         * La SACCH/TF seule (calypso_sacch_tf.bin) ne dit rien de la parole
-         * ni de la FACCH. Run de 21:29 : au raccroche, le pont decode les
-         * FACCH de la BTS (facch 42 -> 69) quand la ROM les rate toutes
-         * (a_fd FIRE=1 sur chaque bloc) ; et la parole livree a toujours
-         * B_BFI. Meme format que calypso_sacch_tf.bin (tick BE32, fn BE32,
-         * 148 bits 0/1), fichier remis a zero a chaque TCH, 20000 bursts au
-         * plus (~92 s). tools/comparer_parole.py les decode (A5 + FR/FACCH)
-         * et les met en regard de /dev/shm/calypso_add_dl.bin. */
+        /* ALL THE TCH BURSTS, TO DECODE THEM OUTSIDE THE DSP. The SACCH/TF
+         * alone (calypso_sacch_tf.bin) says nothing about the speech nor the
+         * FACCH. Same format as calypso_sacch_tf.bin (tick BE32, fn BE32,
+         * 148 bits 0/1), file reset on every TCH, 20000 bursts at most
+         * (~92 s). tools/comparer_parole.py decodes them (A5 + FR/FACCH) and
+         * compares them with /dev/shm/calypso_add_dl.bin. */
         if (g_dedie_genre == BSP_DEDIE_TCH && a_nous && d) {
             static FILE *f_tch;
             static unsigned n_tch;
@@ -2344,7 +2285,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 n_tch = 0;
             }
             tick_prec = tick_fn;
-            {   /* [2026-10-22] pour la prothese FACCH descendante (montant.c) */
+            {   /* for the downlink FACCH prosthesis (montant.c) */
                 unsigned k = g_ts0[i].fn % TCH_ANNEAU;
                 g_tch_anneau[k].fn = g_ts0[i].fn; memcpy(g_tch_anneau[k].bits, d, 148); g_tch_anneau[k].ok = 1;
                 g_tch_dernier_fn = g_ts0[i].fn; g_tch_dernier_ok = 1;
@@ -2362,17 +2303,17 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             burst_dedie = true;
             g_dedie_joues++;
             if (g_dedie_joues <= 40 || g_dedie_joues % 1000 == 0) {
-                /* Combien de 1 dans les 148 bits : un burst de bourrage en a
-                 * toujours le meme nombre, un vrai bloc varie. De quoi voir
-                 * d'un coup d'oeil si la BTS emet vraiment le SDCCH. */
+                /* How many 1s in the 148 bits: a filler burst always has the
+                 * same number, a real block varies. Enough to see at a glance
+                 * whether the BTS really emits the SDCCH. */
                 int uns = 0;
                 for (int k = 0; k < 148; k++) uns += (d[k] & 1);
                 BSP_LOG("dedie : TS%d joue (fn=%u p51=%u uns=%d, %lu fois)",
                         g_dedie_tn, g_ts0[i].fn, g_ts0[i].fn % 51u, uns, g_dedie_joues);
             }
         } else if (a_nous) {
-            /* La trame est au canal, mais aucun burst de cet intervalle n'est
-             * arrive : le bloc sera incomplet et echouera au code de Fire. */
+            /* The frame belongs to the channel, but no burst of that timeslot
+             * arrived: the block will be incomplete and fail the Fire code. */
             g_dedie_manques++;
             if (g_dedie_manques <= 40 || g_dedie_manques % 1000 == 0) {
                 BSP_LOG("dedie : TS%d MANQUANT pour fn=%u p51=%u (%lu fois) - "
@@ -2388,18 +2329,18 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     memset(iq, 0, sizeof iq);
     const bool one_shot = calypso_rhea_dma_one_shot();
     const bool armee = calypso_rhea_dma_rx_armed();
-    const int page_prog = calypso_rhea_dma_get_len_words() / 2;   /* ALGTH/2 mots = echantillons par page, ONE_SHOT ou pas */
+    const int page_prog = calypso_rhea_dma_get_len_words() / 2;   /* ALGTH/2 words = samples per page, ONE_SHOT or not */
     const int rif_avant = calypso_rif_level();
     int nwin = one_shot ? page_prog : 0;
-    /* [2026-10-21] CALYPSO_BSP_NB_MARGE : la L1 TI vise un TOA NB de 3 (l1ctl_toa_update : ISH =
-     * TOA_estime - 16 qbits) ; a la marge 3 le DSP mesure 5, d'ou +8 qbits de tpu_offset a chaque
-     * periode sans fin (le banc ne deplace pas le burst). Magnetite : 1. */
+    /* CALYPSO_BSP_NB_MARGE: the TI L1 aims at an NB TOA of 3 (l1ctl_toa_update: ISH =
+     * estimated_TOA - 16 qbits); with margin 3 the DSP measures 5, hence +8 qbits of tpu_offset
+     * every period without end (the bench does not move the burst). Magnetite: 1. */
     static int nb_marge = -1;
     if (nb_marge < 0) { const char *e = calypso_getenv("CALYPSO_BSP_NB_MARGE"); nb_marge = (e && *e) ? atoi(e) : 3;
                         if (nb_marge < 0 || nb_marge > 3) nb_marge = 3; }
     int marge = nwin >= 190 ? 21 : nwin >= 150 ? nb_marge : 0;
-    /* [2026-10-21] faux air : fenetre NB (debut de trame) -> synthetiseur programme avant 1250 qbits ;
-     * fenetre SB (fin de trame), PM ou continue -> derniere programmation de la trame. */
+    /* fake air: NB window (start of frame) -> synthesizer programmed before 1250 qbits;
+     * SB window (end of frame), PM or continuous -> last programming of the frame. */
     bool hors_freq = false;
     if (faux_air_cellule() >= 0) {
         int a = faux_air_arfcn(tick_fn, (nwin >= 150 && nwin < 190) ? 1250 : 5000);
@@ -2411,8 +2352,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                    tick_fn, g_ts0[i].fn, nwin, a, n_hors, n_dans);
         if (hors_freq) sb = fcch = 0;
     }
-    /* [2026-10-23] air realiste : quel burst (descendant de cet intervalle, montant du mobile, ou bruit) et a quel
-     * niveau. Une fenetre de mesure (< 150) vise l'intervalle tire du reglage du synthe ; NB/SB : TS0. */
+    /* realistic air: which burst (downlink of this timeslot, uplink of the mobile, or noise) and at which
+     * level. A measurement window (< 150) targets the timeslot derived from the synth setting; NB/SB: TS0. */
     int amp_ts0 = (one_shot && nwin >= 150 && nwin < 190) ? nb_amp(tick_fn) : 30000;
     const uint8_t *bits_mod = bits;
     if (air_niveaux_on() && !hors_freq) {
@@ -2422,8 +2363,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         if (!bits_mod) { hors_freq = true; bits_mod = bits; }
         if (bits_mod != bits || hors_freq) sb = fcch = 0;
     }
-    /* [2026-09-29] Un SCH est memorise ici (g_dernier_sch) ; si la fenetre SB
-     * ne s'arme qu'apres ce depot, calypso_bsp_sb_retenter() l'y livrera. */
+    /* An SCH is memorised here (g_dernier_sch); if the SB window only arms
+     * after this deposit, calypso_bsp_sb_retenter() will deliver it there. */
     const char *sb_action = "cadree comme un burst normal";
     if (sb && sb_fenetre_on()) {
         g_dernier_sch.fn = g_ts0[i].fn; g_dernier_sch.tick = tick_fn;
@@ -2433,21 +2374,20 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         if (!armee) sb_action = "DMA NON ARMEE (le RIF jette) : SCH memorise pour la fenetre SB";
         else if (!(one_shot && nwin >= 190)) sb_action = "autre fenetre (PM/NB/continue) : SCH memorise pour la fenetre SB";
     }
-    /* [2026-10-20] mode TRX : le burst montant NB joue ici est memorise ; a la phase A de la trame
-     * suivante, calypso_bsp_trx_ul_prothese() ecrit ses bits exacts dans la page de resultat de
-     * l'extcode (voir la fonction). */
+    /* TRX mode: the uplink NB burst played here is memorised; at phase A of the next frame,
+     * calypso_bsp_trx_ul_prothese() writes its exact bits into the result page of the extcode
+     * (see the function). */
     if (g_trx_cale && !sb && !fcch && !bsp_ts0_est_rach(bits)) {
         g_trx_ul.fn = g_ts0[i].fn; g_trx_ul.tick = tick_fn; memcpy(g_trx_ul.bits, bits, 148); g_trx_ul.valide = 1;
     }
-    /* [2026-10-21 22:45] dedie TI (routage, voir calypso_bsp_nb_retenter) : la NB n'est pas armee au depot ->
-     * le burst va dans l'anneau de garde, et une fenetre de mesure armee recoit du remplissage a sa place */
+    /* TI dedicated mode (routing, see calypso_bsp_nb_retenter): the NB is not armed at the deposit ->
+     * the burst goes into the keep ring, and an armed measurement window receives filler instead */
     dma_trace("depot");
     bool devie = false;
-    /* [2026-10-22 20:40] JAMAIS EN DMA CONTINUE (recherche FB). Depuis le 21/10 23:46 (garde en veille aussi), chaque
-     * NB de la recherche FB partait dans l'anneau sans rien livrer, ni TS0 ni les sept intervalles de bourrage : la
-     * ROM ne comptait plus que les ticks FCCH/SCH, TOA FB ~1255 au lieu de ~8 trames, le firmware osmocom posait sa
-     * fenetre SB 7 trames trop tot (FBSB result=255 en boucle, le mobile ne se cale plus). Voir la trame complete
-     * plus bas. */
+    /* NEVER IN CONTINUOUS DMA (FB search). An NB of the FB search sent to the ring without delivering
+     * anything (neither TS0 nor the seven filler timeslots) would make the ROM count only the FCCH/SCH
+     * ticks (FB TOA ~1255 instead of ~8 frames) and the osmocom firmware would place its SB window 7
+     * frames too early (FBSB result=255 in a loop). See the full frame below. */
     const bool continue_fb = armee && !one_shot;
     if (!sb && !fcch && !hors_freq && !continue_fb && nb_retenter_on() && !(one_shot && nwin >= 150 && nwin < 190)) {
         nb_garde_poser(g_ts0[i].fn, tick_fn, bits);
@@ -2456,8 +2396,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     if (hors_freq) { if (air_niveaux_on()) air_bruit(iq + 2 * marge, 148); else faux_air_bruit(iq + 2 * marge, 148); }
     else if (sb) {
-        sb_moduler(bits, iq + 2 * marge, g_ts0[i].fn);   /* [2026-09-30] voir sb_moduler() */
-        if (air_niveaux_on()) air_echelle(iq + 2 * marge, 148, amp_ts0);   /* [2026-10-23] meme niveau que la cellule */
+        sb_moduler(bits, iq + 2 * marge, g_ts0[i].fn);   /* see sb_moduler() */
+        if (air_niveaux_on()) air_echelle(iq + 2 * marge, 148, amp_ts0);   /* same level as the cell */
     }
     else    gmsk_moduler(bits_mod, 148, amp_ts0, 0.0, 0.5, iq + 2 * marge);
     if (!sb && !fcch && !hors_freq) {
@@ -2468,18 +2408,17 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
     if (total > 256) total = 256;
     if (sb) {
-        /* [2026-09-22] SONDE : la SB arrive-t-elle dans une VRAIE fenetre SB ?
-         * Le calage de g_ts0_offset et la marge de 21 echantillons exigent
-         * nwin >= 190 (fenetre de 382 mots). Mesure prealable : les fenetres
-         * demandees font 151 et 64, jamais 382. Si c'est le cas, la SB est
-         * cadree comme un burst normal (marge 3) et le calage ne se fait pas
-         * par ce chemin. On compte les deux cas. */
+        /* PROBE: does the SB land in a REAL SB window? The alignment of
+         * g_ts0_offset and the 21-sample margin require nwin >= 190 (382-word
+         * window). Otherwise the SB is framed like a normal burst (margin 3)
+         * and the alignment does not happen through this path. Both cases are
+         * counted. */
         static unsigned n_sb, n_sb_fenetre;
         n_sb++;
         if (one_shot && nwin >= 190) n_sb_fenetre++;
         if (one_shot && nwin >= 190) sb_action = "FENETRE SB (one-shot)";
-        /* [2026-09-29] Toutes les SCH des 200 premieres, puis 1 sur 10 : c'est la
-         * mesure du correctif, il faut la voir sur chaque resynchro. */
+        /* All the SCHs of the first 200, then 1 in 10: it must be visible on
+         * every resync. */
         if (n_sb <= 200 || n_sb % 10 == 0 || (int32_t)(g_sb_trace_jusqua - tick_fn) > 0) {
             printf("  [sbwin] SB #%u fn=%u p51=%u tick=%u : armee=%d one_shot=%d page_prog=%d rif_avant=%d nwin=%d marge=%d -> %s (dans une vraie fenetre SB : %u/%u)\n",
                    n_sb, g_ts0[i].fn, g_ts0[i].fn % 51u, tick_fn, (int)armee, (int)one_shot, page_prog, rif_avant, nwin, marge,
@@ -2493,25 +2432,25 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                                         g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
         if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
     }
-    /* [2026-09-21] Une ligne par trame livree : c'etait la sonde de calage des
-     * fenetres (nwin > 0 est vrai pour TOUT burst normal depuis la DMA one-shot,
-     * donc elle imprimait en continu). Repliee derriere
-     * CALYPSO_BSP_TS0_DEBUG=1 ; par defaut, les 20 premieres livraisons puis
-     * une sur 5000, de quoi voir que le flux tourne sans noyer la console. */
+    /* One line per delivered frame: the window alignment probe (nwin > 0 is
+     * true for EVERY normal burst with the one-shot DMA, so it would print
+     * continuously). Behind CALYPSO_BSP_TS0_DEBUG=1; by default, the first 20
+     * deliveries then one in 5000, enough to see that the stream runs without
+     * flooding the console. */
     { static int ts0_dbg = -1;
       if (ts0_dbg < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TS0_DEBUG"); ts0_dbg = (e && *e && *e != '0'); }
       static unsigned nl, nd;
-      /* Les trames du canal dedie sont rares (4 sur 51, plus la SACCH) et ne
-       * durent que le temps d'une connexion : on les trace TOUTES, jusqu'a 300,
-       * sans dependre de CALYPSO_BSP_TS0_DEBUG. C'est la seule facon de
-       * comparer leur fenetre et leur marge a celles d'un bloc BCCH. */
+      /* The frames of the dedicated channel are rare (4 in 51, plus the SACCH)
+       * and only last for a connection: ALL of them are traced, up to 300,
+       * independently of CALYPSO_BSP_TS0_DEBUG. It is the only way to compare
+       * their window and margin with those of a BCCH block. */
       bool trace = ts0_dbg ? (nl < 400 || nl % 5000 == 0 || fcch || sb || nwin > 0)
                            : (nl < 20 || nl % 5000 == 0);
       nl++;
       if (trame_dediee && nd < 300) { trace = true; nd++; }
-      /* [2026-10-21] Magnetite : SB decodee (BSIC 7) mais chaque bloc BCCH en CRC KO (BS_I
-       * error_flag=1) ; les 400 premieres trames BCCH normal (p51 2..5) disent quelle fenetre
-       * DMA la ROM avait armee quand le burst est arrive. */
+      /* The first 400 normal BCCH frames (p51 2..5) tell which DMA window the ROM had
+       * armed when the burst arrived (diagnoses an SB decoded with every BCCH block in
+       * CRC KO, BS_I error_flag=1). */
       if (sb_fin_trame() && g_dedie_tn <= 0)
           bsp_bcch_calage(tick_fn, g_ts0[i].fn % 51u, nwin >= 150 && nwin < 190);
       if (sb_fin_trame() && g_dedie_tn <= 0 && !g_dedie_ti)
@@ -2554,7 +2493,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             }
             memset(iq_autre, 0, sizeof iq_autre);
             gmsk_moduler(b, 148, amp_autre, 0.0, 0.5, iq_autre);
-            {   /* meme elargissement que les bursts normaux de TS0 */
+            {   /* same widening as the normal bursts of TS0 */
                 static double sym2 = -2;
                 if (sym2 == -2) { const char *e = calypso_getenv("CALYPSO_BSP_NB_SYM"); sym2 = (e && *e) ? atof(e) : 0.3; }
                 gmsk_elargir(iq_autre, 148, sym2);
@@ -2569,36 +2508,25 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         }
     }
 }
-/* [2026-09-22] L'HORLOGE DU BANC EST CELLE DU DSP, PAS CELLE DU MUR.
+/* THE BENCH CLOCK IS THE DSP'S, NOT THE WALL'S.
  *
- * bsp_ts0_service() joue la trame BTS `tick + g_ts0_offset`. L'offset est fixe
- * une fois pour toutes sur la premiere SB, et le tick de l'ARM avance au
- * rythme du C54x emule (~6,7 ms par trame) alors que la BTS, elle, tourne en
- * temps reel (4,615 ms). Le DSP consomme donc l'anneau 20 % moins vite qu'il
- * ne se remplit, et le retard n'est borne par rien.
+ * bsp_ts0_service() plays BTS frame `tick + g_ts0_offset`. The ARM tick
+ * advances at the pace of the emulated C54x (~6.7 ms per frame) while the BTS
+ * runs in real time (4.615 ms). The DSP therefore consumes the ring 20 %
+ * slower than it fills, and the lag is bounded by nothing. Catching up on the
+ * DSP side is impossible (it already runs flat out), so the BTS must slow
+ * down: the frame the DSP requests is published here, and pont.py
+ * (pont/trx.py, class Clock) brakes its clock -- hence the BTS's IND CLOCK --
+ * so as never to run ahead by more than a few frames.
  *
- * Mesure du 2026-09-22 (run de 10:01) : a 10:09, pont.py annoncait fn=99674
- * et le BSP jouait la trame BTS 80410 -- 19000 trames, 87 secondes de retard.
- * A 10 s de banc la mise a jour de localisation passait encore (retard ~2 s) ;
- * a 10:04 l'IMMEDIATE ASSIGNMENT arrivait 40 s apres le RACH (T3126 expire,
- * « lchan allocation failed : Timeout » cote BSC) ; a 10:06 plus rien ne
- * passait. Meme cause pour les « Dropping frame with 110 bit errors » du canal
- * dedie : l'anneau TS1 ne commence a se remplir qu'a l'armement du canal, or le
- * DSP lit des trames d'AVANT cet instant, d'ou les bursts « MANQUANT ».
- *
- * Le rattrapage cote DSP est impossible (il tourne deja a fond). C'est donc la
- * BTS qui doit ralentir : on publie ici la trame que le DSP reclame, et
- * pont.py (pont/trx.py, classe Clock) freine son horloge -- donc les IND CLOCK
- * de la BTS -- pour ne jamais la devancer de plus de quelques trames.
- *
- * Format, 16 octets : seq (non nul, incremente a chaque ecriture), cale
- * (0 avant le premier calage sur SB : l'horloge reste libre), trame BTS
- * reclamee, tick de l'ARM. CALYPSO_BSP_HORLOGE=0 coupe la publication. */
+ * Format, 16 bytes: seq (non-zero, incremented on every write), cale (0 before
+ * the first alignment on SB: the clock stays free), requested BTS frame, ARM
+ * tick. CALYPSO_BSP_HORLOGE=0 disables the publication. */
 #define SHM_HORLOGE "/dev/shm/calypso_horloge"
-/* [2026-10-21 18:45] trame BTS d'un tick, d'apres le calage du flux TS0 (SB, puis verrou BCCH) : la
- * trame que la L1 du telephone croit vivre a ce tick. pont.c (tx_tsp_fn) en date les bursts montants
- * quand le firmware ne pose pas a_a5fn (L1 TI : le RACH de Magnetite partait « TICK NU », l'air ne le
- * placait pas, B->A 0). 0 si pas encore cale. */
+/* BTS frame of a tick, from the alignment of the TS0 stream (SB, then BCCH lock): the frame the
+ * phone's L1 believes it lives in at this tick. pont.c (tx_tsp_fn) dates the uplink bursts with it
+ * when the firmware does not set a_a5fn (TI L1: the RACH would otherwise leave as a "bare TICK" and
+ * the air would not place it). 0 if not aligned yet. */
 int calypso_bsp_fn_bts_du_tick(uint32_t tick, uint32_t *fn_bts)
 {
     if (g_ts0_offset == INT64_MIN) return 0;
@@ -2630,42 +2558,38 @@ static void bsp_horloge_publier(uint32_t fn_bts, uint32_t tick_fn, int cale)
     }
     uint32_t rec[4] = { seq, (uint32_t)cale, fn_bts, tick_fn };
     if (pwrite(fd, rec, sizeof rec, 0) != (ssize_t)sizeof rec) {
-        /* rien a faire : l'horloge libre reprend la main cote pont */
+        /* nothing to do: the free clock takes over on the bridge side */
     }
 }
 
-/* [2026-09-30] LA SECONDE CHANCE. Le firmware poste deux taches SB sur deux
- * trames consecutives ; la premiere tombe sur la trame FCCH (burst nul), fenetre
- * vide, chance perdue ; la seconde sur le SCH. Or le BSP a deja le SCH de la
- * trame suivante dans son anneau (la BTS est en avance). On le livre donc dans la
- * fenetre de la tentative 1, en forme D, puis on lit le resultat de la ROM dans
- * l'API RAM au tick suivant (a_sch page R : B_BLUD sans B_SCH_CRC, T2 <= 25,
- * T3' <= 4) :
- *   - decode : le firmware a pose son horloge sur fn=SCH a ce tick-la ; on recale
- *     l'offset ARM-tick d'une trame (fn_sch - tick), la trame du tick suivant est
- *     fn_sch+1, le flux reste contigu (le SCH lui-meme n'est pas rejoue : pas
- *     besoin) ;
- *   - rate : rien ne change, le SCH natif part en tentative 2 (forme A) comme
- *     avant.
- * Rejeu : A seule rate 20 %, A+D en commun 7 %. CALYPSO_BSP_SB_DOUBLE=0 coupe. */
+/* THE SECOND CHANCE. The firmware posts two SB tasks on two consecutive
+ * frames; the first falls on the FCCH frame (null burst), empty window, chance
+ * lost; the second on the SCH. The BSP already has the SCH of the next frame
+ * in its ring (the BTS is ahead). It is therefore delivered in the window of
+ * attempt 1, in waveform D, then the ROM's result is read in the API RAM at
+ * the next tick (a_sch R page: B_BLUD without B_SCH_CRC, T2 <= 25, T3' <= 4):
+ *   - decoded: the firmware set its clock on fn=SCH at that tick; the ARM-tick
+ *     offset is realigned by one frame (fn_sch - tick), the frame of the next
+ *     tick is fn_sch+1, the stream stays contiguous (the SCH itself is not
+ *     replayed: no need);
+ *   - missed: nothing changes, the native SCH goes out in attempt 2
+ *     (waveform A).
+ * Replay: A alone misses 20 %, A+D in common 7 %. CALYPSO_BSP_SB_DOUBLE=0
+ * disables. */
 static struct { int actif; uint32_t fn_sch; uint32_t tick; uint16_t a0[2]; unsigned n, ok, ko; } g_sc;
 static int sb_double_on(void)
 {
     static int on = -1;
-    /* [2026-09-30 12:00] DESACTIVEE PAR DEFAUT. Run de 11:37 : plus aucun LOS pendant
-     * le RACH (le but), mais les deux appels de plus de 30 s tombent en « LOS
-     * during dedicated mode » avec un TCH descendant qui se degrade
-     * progressivement (a_dd err 19 -> 91, FIRE), alors que tous les appels des
-     * runs sans seconde chance tenaient 40 s et plus. Chaque decode en tentative
-     * 1 avance d'UNE trame l'index que le DSP reclame a la BTS (35 fois sur ce
-     * run, offset -673 -> -638) ; la marge DL du pont ne peut pas se refaire (la
-     * BTS ne va pas plus vite que le temps reel), min mesure 11 trames. Piste a
-     * confirmer par A/B (CALYPSO_BSP_SB_DOUBLE=1) avant de la remettre. */
+    /* DISABLED BY DEFAULT. Every decode in attempt 1 advances by ONE frame the
+     * index the DSP requests from the BTS; the bridge's DL margin cannot
+     * rebuild itself (the BTS does not go faster than real time), and long
+     * calls then end in "LOS during dedicated mode" with a downlink TCH that
+     * degrades progressively (a_dd err, FIRE). CALYPSO_BSP_SB_DOUBLE=1 enables. */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_DOUBLE"); on = (e && *e == '1') ? 1 : 0;
                   if (on) BSP_LOG("SB_DOUBLE on : le SCH suivant est aussi livre (forme D) dans la fenetre de la tentative 1"); }
     return on;
 }
-/* a_sch[0..4] de la page R pg : mots (0x50|0x78 + 0x1E)/2 de l'API RAM (calypso_api.h) */
+/* a_sch[0..4] of R page pg: words (0x50|0x78 + 0x1E)/2 of the API RAM (calypso_api.h) */
 static const uint16_t *sc_a_sch(int pg)
 {
     if (!bsp.dsp || !bsp.dsp->api_ram) return NULL;
@@ -2685,8 +2609,8 @@ static int sc_rom_a_decode(void)
 }
 static void bsp_ts0_service(uint32_t tick_fn)
 {
-    /* [2026-10-20] telephone 2 du TRX (TS1) : il n'emet pas de SB, l'offset fn/tick est donne
-     * (CALYPSO_BSP_TRX_OFFSET = fn du firmware - tick, -1 mesure sur le telephone 1) + delta */
+    /* phone 2 of the TRX (TS1): it emits no SB, the fn/tick offset is given
+     * (CALYPSO_BSP_TRX_OFFSET = firmware fn - tick, -1 measured on phone 1) + delta */
     static int fixe = -1;
     if (fixe < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TRX_OFFSET");
@@ -2700,7 +2624,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
     }
     if (!g_ts0 || !g_ts0_any) return;
     g_tick_courant = tick_fn;
-    /* seconde chance : au tick suivant, le verdict de la ROM decide de l'horloge */
+    /* second chance: at the next tick, the ROM's verdict decides the clock */
     if (g_sc.actif) {
         if (tick_fn == g_sc.tick + 1) {
             if (sc_rom_a_decode()) {
@@ -2719,23 +2643,23 @@ static void bsp_ts0_service(uint32_t tick_fn)
         }
         g_sc.actif = 0;
     }
-    /* [2026-09-29] Un SCH garde au tick precedent est livre dans la fenetre SB
-     * qui vient de s'armer ; il recale l'offset ARM-tick, donc la trame que ce
-     * tick aurait jouee le sera au tick suivant : le flux reste contigu. */
+    /* An SCH kept at the previous tick is delivered in the SB window that has
+     * just armed; it realigns the ARM-tick offset, so the frame this tick would
+     * have played will be played at the next tick: the stream stays contiguous. */
     if (calypso_bsp_sb_retenter()) return;
     static unsigned manques, manques_log;
     if (g_ts0_offset != INT64_MIN) {
         int64_t w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
-        /* [2026-10-21 19:10] RATTRAPAGE DU DIRECT (CALYPSO_BSP_RATTRAPE=1, Magnetite). Au boot l'instance
-         * prend du retard sur le BTS (relances DSP du firmware, verrou ARM qui attend jusqu'a 5 s par trame)
-         * et ne le rattrape jamais : mesure 18:55, le TRX attendait le montant fn 36209 et recevait 33528,
-         * 2700 trames (12 s) de retard, les RACH datees du passe n'etaient jamais jouees. Au-dela de 200
-         * trames de retard sur la derniere trame recue, l'offset saute au direct (marge 2, voir plus bas) et le verrou
-         * BCCH tombe : la L1 voit une discontinuite et se resynchronise sur le flux en direct. */
+        /* CATCHING UP WITH THE LIVE STREAM (CALYPSO_BSP_RATTRAPE=1, Magnetite). At boot the instance
+         * falls behind the BTS (DSP restarts by the firmware, ARM lock waiting up to 5 s per frame)
+         * and never catches up on its own: uplink RACHs dated in the past are never played. Beyond
+         * the threshold of lateness relative to the last received frame, the offset jumps to the live
+         * stream (margin, see below) and the BCCH lock drops: the L1 sees a discontinuity and
+         * resynchronises on the live stream. */
         {
-            /* [2026-10-21 20:10] marge 2 (au lieu de 20) et seuil 30 (au lieu de 200) : le montant n'a que ~2
-             * trames de jeu chez le TRX (BTS_RX_LAG) ; avec 20 a 200 trames de retard les RACH arrivaient
-             * apres leur trame (mesure : fn 14556 recu quand le TRX etait a 14583), jamais joues. */
+            /* margin 2 and threshold 30: the uplink only has ~2 frames of play at the TRX
+             * (BTS_RX_LAG); with 20 to 200 frames of lateness the RACHs arrive after their frame
+             * and are never played. */
             static int rattrape = -1, marge_r = 2, seuil_r = 30;
             if (rattrape < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RATTRAPE"); rattrape = (e && *e == '1');
                                 e = calypso_getenv("CALYPSO_BSP_RATTRAPE_MARGE"); if (e && *e) marge_r = atoi(e);
@@ -2751,46 +2675,46 @@ static void bsp_ts0_service(uint32_t tick_fn)
                        retard, g_ts0_fn_max, (long long)saut, (long long)w);
             }
         }
-        /* [2026-10-21 22:05] DECALAGE EN DEDIE (CALYPSO_BSP_DEDIE_DECAL=<n>, Magnetite). L'offset est verrouille
-         * sur la lecture BCCH (491 au run de 21:59 alors que les SB donnaient 489-490) ; en dedie la L1 TI ne
-         * decode ni SACCH (SA_I en erreur) ni SDCCH (l'UA jamais lu, « >N200 of SABM »). Applique seulement
-         * pendant les taches dediees signalees par montant.c (calypso_bsp_set_dedie_ti). */
+        /* SHIFT IN DEDICATED MODE (CALYPSO_BSP_DEDIE_DECAL=<n>, Magnetite). The offset is locked on
+         * the BCCH reading (which can differ by 1-2 frames from the SBs); the shift lets the TI L1
+         * decode the SACCH (SA_I) and the SDCCH (UA) in dedicated mode. Applied only during the
+         * dedicated tasks signalled by montant.c (calypso_bsp_set_dedie_ti). */
         {
             static int decal = -999;
             if (decal == -999) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_DECAL"); decal = (e && *e) ? atoi(e) : 0;
                                  if (decal) printf("  [ts0] decalage en dedie TI : %+d trame(s)\n", decal); }
             if (decal && g_dedie_ti) { w = (w + decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX; }
         }
-        /* [2026-10-22 12:50] TCH SEUL : CALYPSO_BSP_TCH_DECAL=<n> trames sur le calage BCCH. En SDCCH le A5 du DSP
-         * tombe sur le burst livre (+1 structurel, [a5] « ecart +1 ») ; en TCH « ecart +2 » : une trame de trop,
-         * FACCH descendant (UA) en Fire KO, RR Assignment Failure. */
+        /* TCH ONLY: CALYPSO_BSP_TCH_DECAL=<n> frames on the BCCH alignment. On SDCCH the DSP's A5 falls
+         * on the delivered burst (+1 structural, [a5] "gap +1"); on TCH "gap +2": one frame too many,
+         * downlink FACCH (UA) in Fire KO, RR Assignment Failure. */
         {
             int tch_decal = calypso_reglage("CALYPSO_BSP_TCH_DECAL", 0);   /* [2026-10-22] a chaud */
             if (tch_decal && g_dedie_tn > 0 && g_dedie_genre == BSP_DEDIE_TCH) {
                 w = (w + tch_decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
             }
         }
-        /* [2026-10-22] EN DEDIE TI, LA TRAME DU MOBILE. La L1 TI ecrit a_a5fn = le fn qu'elle traite (pont.c ->
-         * g_off_mobile) ; l'offset du BSP, cale sur le BCCH, avait 1 a 2 trames de retard sur lui en TCH
-         * ([a5] fn=25548, dernier depot BSP fn=25547) : desentrelacement FACCH/TCH decale, A5 au mauvais fn ->
-         * tous les a_fd en Fire KO, chiffre ou non, et Assignment Failure (appel au 600, 22/10 11:27).
-         * Tant que a_a5fn a parle depuis moins de 200 trames, on joue tick + g_off_mobile.
-         * CALYPSO_BSP_DEDIE_A5FN=0 pour revenir a l'offset BCCH. */
+        /* IN TI DEDICATED MODE, THE MOBILE'S FRAME. The TI L1 writes a_a5fn = the fn it processes
+         * (pont.c -> g_off_mobile); the BSP offset, aligned on the BCCH, can be 1 to 2 frames behind it
+         * on TCH (shifted FACCH/TCH deinterleaving, A5 at the wrong fn -> every a_fd in Fire KO,
+         * ciphered or not, and Assignment Failure). While a_a5fn has spoken less than 200 frames ago,
+         * tick + g_off_mobile is played. CALYPSO_BSP_DEDIE_A5FN=0 falls back to the BCCH offset. */
         {
             static int a5fn_on = -1;
-            /* [2026-10-22 13:05] COUPE PAR DEFAUT : le calage BCCH donne deja la trame du mobile en dedie (SDCCH 100 %,
-             * d_fn du TCH aligne) ; cet alignement sautait de +7 trames (offset RA_C bruite) et laissait la veille
-             * dereglee apres le dedie (NP_I tous en erreur, appel entrant jamais pagine). CALYPSO_BSP_DEDIE_A5FN=1. */
+            /* OFF BY DEFAULT: the BCCH alignment already gives the mobile's frame in dedicated mode
+             * (SDCCH 100 %, TCH d_fn aligned); this alignment can jump by +7 frames (noisy RA_C offset)
+             * and leave idle mode misaligned after the dedicated phase (every NP_I in error, incoming
+             * call never paged). CALYPSO_BSP_DEDIE_A5FN=1 enables. */
             if (a5fn_on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_A5FN"); a5fn_on = (e && *e == '1'); }
             if (a5fn_on && g_dedie_ti && g_a5fn_vu && g_off_mobile != INT64_MIN &&
                 (uint32_t)(tick_fn - g_a5fn_tick) < 3000) {
-                /* [2026-10-22 12:25] RA_C rapporte la trame SUIVANT l'emission : en dedie le mobile ouvre ses
-                 * fenetres SDCCH/8 SS3 a (tick + offset RA_C) % 51 = 13..16 / 45..48 au lieu de 12..15 / 44..47 ->
-                 * une trame de moins pour la reception (CALYPSO_BSP_DEDIE_DL_DECAL, defaut -1). */
+                /* RA_C reports the frame FOLLOWING the transmission: in dedicated mode the mobile opens
+                 * its SDCCH/8 SS3 windows at (tick + RA_C offset) % 51 = 13..16 / 45..48 instead of
+                 * 12..15 / 44..47 -> one frame less for reception (CALYPSO_BSP_DEDIE_DL_DECAL, default -1). */
                 static int dl_decal = 99;
                 if (dl_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_DL_DECAL"); dl_decal = (e && *e) ? atoi(e) : -1; }
-                /* [2026-10-22 12:30] le TCH a son propre reglage (CALYPSO_BSP_TCH_DL_DECAL, defaut = celui du SDCCH) :
-                 * [a5] du TCH : fn dechiffre = dernier depot + 2 avec -1 */
+                /* the TCH has its own setting (CALYPSO_BSP_TCH_DL_DECAL, default = the SDCCH one):
+                 * TCH [a5]: deciphered fn = last deposit + 2 with -1 */
                 static int tch_decal = 99;
                 if (tch_decal == 99) { const char *e = calypso_getenv("CALYPSO_BSP_TCH_DL_DECAL"); tch_decal = (e && *e) ? atoi(e) : dl_decal; }
                 int dec = g_dedie_genre == BSP_DEDIE_TCH ? tch_decal : dl_decal;
@@ -2804,11 +2728,12 @@ static void bsp_ts0_service(uint32_t tick_fn)
         }
         unsigned i = (unsigned)w % BSP_TS0_RING;
         bsp_horloge_publier((uint32_t)w, tick_fn, 1);
-        /* [2026-10-21 18:55] SB_FIN_TRAME, offset VERROUILLE par la lecture BCCH : la L1 TI ouvre sa
-         * fenetre SB a la fin de la trame qui precede le SB ; flux cale sur les NB, le SCH arrivait au tick
-         * suivant, fenetre fermee (relectures SB du campement toutes ratees : SB_I flag 0, NET_I 0 ->
-         * la cellule etait abandonnee). Une fenetre SB armee pendant la trame w recoit donc le SCH w+1,
-         * sans recalage (verrou). Hors verrou (resynchro), la lecture en avance faussait le calage. */
+        /* SB_FIN_TRAME, offset LOCKED by the BCCH reading: the TI L1 opens its SB window at the
+         * end of the frame preceding the SB; with the stream aligned on the NBs, the SCH would
+         * arrive at the next tick, window closed (every camping SB re-read missed: SB_I flag 0,
+         * NET_I 0 -> cell abandoned). An SB window armed during frame w therefore receives SCH
+         * w+1, without realignment (lock). Outside the lock (resync), reading ahead would skew
+         * the alignment. */
         if (sb_fin_trame() && g_bcch_verrou && g_dedie_tn <= 0 && calypso_rhea_dma_rx_armed() &&
             calypso_rhea_dma_one_shot() && calypso_rhea_dma_get_len_words() / 2 >= 190) {
             uint32_t fn1 = (uint32_t)((w + 1) % BSP_FN_MAX);
@@ -2830,18 +2755,18 @@ static void bsp_ts0_service(uint32_t tick_fn)
             unsigned j = (unsigned)((w + 1) % BSP_FN_MAX) % BSP_TS0_RING;
             if (g_ts0[j].valid && g_ts0[j].fn == (uint32_t)((w + 1) % BSP_FN_MAX) && bsp_ts0_est_sb(g_ts0[j].bits)) {
                 for (int pg = 0; pg < 2; pg++) { const uint16_t *a = sc_a_sch(pg); g_sc.a0[pg] = a ? a[0] : 0; }
-                /* [2026-09-30 11:40] bsp_ts0_livrer() recale l'offset des qu'un SCH part
-                 * dans une fenetre SB ; ici il ne faut PAS : si la ROM rate, la tentative 2
-                 * doit voir le SCH natif au tick suivant (mesure du run de 11:34 : sans
-                 * cela, la trame suivante partait a sa place et D remplacait A au lieu
-                 * de s'y ajouter, 31 SB / 55 FBSB comme avant). Le recalage n'a lieu
-                 * qu'au tick suivant, sur CRC OK lu dans l'API RAM. */
+                /* bsp_ts0_livrer() realigns the offset as soon as an SCH goes out in
+                 * an SB window; here it must NOT: if the ROM misses, attempt 2 must see
+                 * the native SCH at the next tick (otherwise the next frame would go out
+                 * in its place and D would replace A instead of adding to it). The
+                 * realignment only happens at the next tick, on CRC OK read in the API
+                 * RAM. */
                 int64_t off_avant = g_ts0_offset;
                 g_sb_variante = 1;
-                bsp_ts0_livrer(tick_fn, j);           /* le SCH suivant, forme D, dans la fenetre de la tentative 1 */
+                bsp_ts0_livrer(tick_fn, j);           /* the next SCH, waveform D, in the window of attempt 1 */
                 g_sb_variante = 0;
                 if (!g_trx_cale) g_ts0_offset = off_avant;
-                g_ts0[i].joue = 1;                    /* la trame FCCH n'est pas jouee : la fenetre etait pour le SB */
+                g_ts0[i].joue = 1;                    /* the FCCH frame is not played: the window was for the SB */
                 g_sc.actif = 1; g_sc.fn_sch = g_ts0[j].fn; g_sc.tick = tick_fn; g_sc.n++;
                 if (g_sc.n <= 300 || g_sc.n % 50 == 0)
                     printf("  [sbwin] SECONDE CHANCE : trame FCCH fn=%u au tick %u, fenetre SB armee -> SCH fn=%u livre (forme D)\n",
@@ -2850,62 +2775,31 @@ static void bsp_ts0_service(uint32_t tick_fn)
             }
         }
         if (g_ts0[i].valid && g_ts0[i].fn == (uint32_t)w) { bsp_ts0_livrer(tick_fn, i); return; }
-        /* [2026-09-22] LE DSP COURT DEVANT LE BTS : RECULER, NE PAS TROUER.
+        /* THE DSP RUNS AHEAD OF THE BTS: STEP BACK (optional).
          *
-         * L'offset tick->trame BTS etait pose UNE SEULE FOIS, au premier calage,
-         * et jamais revu. Or le BTS s'arrete par a-coups : osmo-bts-trx bat ses
-         * trames sur un timerfd cale en dur a 4615 us et ne sait pas suivre une
-         * horloge plus lente -- son filtre de derive est un TODO vide
-         * (scheduler_trx.c:571). Notre DSP tourne a 195,7 trames/s au lieu de
-         * 216,7 (deficit 9,7 %, reproduit sur ~15 demarrages), donc le BTS se
-         * croit en permanence « plus rapide que le TRX », compense, puis
-         * resynchronise -- et pendant ce temps il ne produit RIEN. Le DSP, lui,
-         * continue de ticker : il reclame alors des trames qui n'existent pas
-         * encore. Mesure : ecart TOUJOURS positif, +1 a +40, 0 occurrence de
-         * signe negatif sur 27200 manques ; par fenetres de ~200 trames a 100 %
-         * de perte, ~43 fois par run.
+         * osmo-bts-trx beats its frames on a timerfd hard-set to 4615 us and
+         * cannot follow a slower clock -- its drift filter is an empty TODO
+         * (scheduler_trx.c:571). When the DSP runs slower than real time the
+         * BTS believes it is "faster than the TRX", compensates, then
+         * resynchronises -- and produces NOTHING meanwhile. The DSP keeps
+         * ticking and requests frames that do not exist yet.
          *
-         * Trouer le flux est le pire choix possible : un bloc LAPDm, ce sont
-         * QUATRE bursts consecutifs. Avec 42 % de trames dediees manquantes
-         * (mesure du 2026-09-22) presque aucun bloc ne se forme, le
-         * desentrelaceur sort du bruit, et le mobile lit 69 a 99 bits faux sur
-         * 184 : ni SABM/UA, ni LU ACCEPT, ni CP-DATA du SMS.
+         * This path steps the offset back to restart from the most recent
+         * received frame: the DSP falls behind wall time but its stream stays
+         * CONTIGUOUS (STREAM mode: only the ORDER matters, the SCH carries the
+         * real FN for synchronisation). Holes become latency.
          *
-         * On recule donc l'offset pour repartir de la trame la plus recente
-         * recue. Le DSP prend du retard sur le temps mural, mais son flux reste
-         * CONTIGU -- et c'est tout ce que le montage demande : le commentaire du
-         * mode STREAM le dit, « Decouples the absolute FN (BTS) from the tick FN
-         * (QEMU): only the ORDER matters, and the SCH carries the real FN for
-         * synchronisation. » Les trous deviennent de la latence.
-         *
-         * MESURE A/B DU 2026-09-22 (2 x 6 min, meme banc, meme protocole) :
-         *
-         *   |                      | temoin | recalage |
-         *   | perdues / joues      | 20/132 |   0/161  |  <- fait ce qu'il annonce
-         *   | MDL-ERROR            |   18   |     4    |  <- mieux
-         *   | LU ACCEPT / REQUEST  |  1/3   |    1/2   |  <- egal
-         *   | TRAMES JETEES        |  686   |  *1409*  |  <- DEUX FOIS PIRE
-         *   | bits faux (mediane)  |   95   |    96    |  <- inchange
-         *
-         * CONCLUSION : ca ne marche pas. En remplacant une trame absente par la
-         * plus recente disponible, on ne livre pas un trou mais LE MAUVAIS BURST
-         * A LA BONNE PLACE. Pour le desentrelaceur une donnee fausse mais
-         * plausible est pire qu'une absence : il ne peut plus la traiter comme
-         * un effacement. On a converti des effacements en erreurs.
-         * Corollaire : « perdues » n'est PAS un predicteur du succes. La
-         * correlation vue sur trois runs (7 %, 0 %, 42 %) ne survit pas au test
-         * controle.
-         *
-         * DESACTIVE PAR DEFAUT. CALYPSO_BSP_RECALE=1 pour le reessayer -- par
-         * exemple en ne recalant que hors du canal dedie, ou en marquant le
-         * burst rejoue comme peu fiable pour que le desentrelaceur l'efface.
-         * Attention aussi : ce chemin sort avant `manques++`, donc il aveugle
-         * le compteur « manques » -- les deux bras n'etaient pas comparables
-         * sur cette metrique-la. */
+         * DISABLED BY DEFAULT: replacing a missing frame with the most recent
+         * available one does not deliver a hole but THE WRONG BURST AT THE
+         * RIGHT PLACE. For the deinterleaver a wrong but plausible input is
+         * worse than an absence: it can no longer treat it as an erasure
+         * (A/B: twice as many frames dropped by the mobile). CALYPSO_BSP_RECALE=1
+         * enables it. This path exits before `manques++`, so it blinds the
+         * "manques" counter. */
         if ((int32_t)((uint32_t)w - g_ts0_fn_max) > 0) {
             static int recale = -1;
             if (recale < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RECALE");
-                              recale = (e && *e == '1') ? 1 : 0;   /* OFF par defaut : voir la mesure ci-dessus */
+                              recale = (e && *e == '1') ? 1 : 0;   /* OFF by default: see above */
                               if (recale) BSP_LOG("recalage actif : le flux TS0 reste contigu quand le BTS prend du retard"); }
             if (recale) {
                 unsigned j = g_ts0_fn_max % BSP_TS0_RING;
@@ -2926,8 +2820,8 @@ static void bsp_ts0_service(uint32_t tick_fn)
         }
         manques++;
         if (g_dedie_tn > 0 && bsp_dedie_trame((uint32_t)w)) {
-            /* Trame du canal dedie sautee en entier : hors de portee de
-             * g_dedie_manques, qui n'est touche que dans bsp_ts0_livrer(). */
+            /* Dedicated channel frame skipped entirely: out of reach of
+             * g_dedie_manques, which is only touched in bsp_ts0_livrer(). */
             g_dedie_perdues++;
             if (g_dedie_perdues <= 40 || g_dedie_perdues % 200 == 0) {
                 BSP_LOG("canal dedie (TS%d) : trame fn=%u perdue, aucun burst du BTS (perdues=%lu, joues=%lu)",
@@ -2942,39 +2836,28 @@ static void bsp_ts0_service(uint32_t tick_fn)
                    devant > 0 ? "le DSP COURT DEVANT le BTS (avance insuffisante)"
                               : "le burst a existe puis a disparu (autre cause)");
         }
-        /* [2026-09-22] UNE TRAME MANQUANTE DOIT ETRE UN EFFACEMENT, PAS LA
-         * TRAME PRECEDENTE REJOUEE.
+        /* A MISSING FRAME MUST BE AN ERASURE, NOT THE PREVIOUS FRAME REPLAYED.
          *
-         * Sortir ici sans rien deposer ne « troue » pas le flux : la page API
-         * GARDE le burst du tick precedent, et la tache de decodage du DSP
-         * tourne quand meme dessus. Chaine verifiee :
-         *   - calypso_bsp_rx_burst() est le seul ecrivain de la DARAM des
-         *     bursts, et n'est appelee que depuis bsp_ts0_livrer() -- que ce
-         *     chemin-ci saute ;
-         *   - calypso_rif_drain() rend 0 sur FIFO vide (calypso_rif.c) ;
-         *   - le transfert sort alors par `if (got <= 0) break`
-         *     (calypso_rhea_dma.c) SANS rien ecrire dans la page ;
-         *   - sur le chemin DRR c'est pire encore, le dernier mot est repete :
-         *     « On an empty FIFO, DRR keeps its last value [...] returning 0
-         *     would fabricate a sample » (calypso_rif.c).
+         * Returning here without depositing anything does not "hole" the
+         * stream: the API page KEEPS the burst of the previous tick, and the
+         * DSP decoding task runs on it anyway. Verified chain:
+         *   - calypso_bsp_rx_burst() is the only writer of the burst DARAM, and
+         *     is only called from bsp_ts0_livrer() -- which this path skips;
+         *   - calypso_rif_drain() returns 0 on an empty FIFO (calypso_rif.c);
+         *   - the transfer then exits through `if (got <= 0) break`
+         *     (calypso_rhea_dma.c) WITHOUT writing anything into the page;
+         *   - on the DRR path it is worse, the last word is repeated: "On an
+         *     empty FIFO, DRR keeps its last value [...] returning 0 would
+         *     fabricate a sample" (calypso_rif.c).
+         * A decoder re-reading the same page twice yields blocks with an
+         * IDENTICAL error count; null samples instead give soft bits close to
+         * zero, the only input the deinterleaver can treat as uncertainty
+         * rather than data.
          *
-         * SIGNATURE MESUREE, 2026-09-22 : les blocs rejetes par le mobile ont
-         * un nombre d'erreurs IDENTIQUE -- 17 rejets = 96 neuf fois, 105 cinq
-         * fois, puis 95, 73, 62. Un canal bruite ne rend pas neuf fois le meme
-         * compte ; un decodeur qui relit deux fois la meme page, si.
-         *
-         * C'est aussi ce que l'A/B du recalage (voir plus haut) ne pouvait pas
-         * voir : ses deux bras substituaient un burst FAUX -- le plus recent
-         * d'un cote, le precedent de l'autre -- jamais un effacement. Des
-         * echantillons nuls donnent des bits souples proches de zero, la seule
-         * entree que le desentrelaceur puisse traiter comme une incertitude
-         * plutot que comme une donnee.
-         *
-         * Ne touche a aucune trame livree : ce bloc ne s'execute QUE sur les
-         * ticks ou, aujourd'hui, le DSP relit des echantillons perimes. Et il
-         * ne fait pas baisser `perdues` -- c'est voulu, `perdues` sert ici de
-         * temoin de non-effet.
-         * CALYPSO_BSP_SILENCE=0 retablit exactement le comportement d'avant. */
+         * Touches no delivered frame: this block ONLY runs on the ticks where
+         * the DSP would otherwise re-read stale samples. It does not lower
+         * `perdues`, which serves as a no-effect witness.
+         * CALYPSO_BSP_SILENCE=0 disables the erasure. */
         {
             static int silence = -1;
             if (silence < 0) {
@@ -2991,12 +2874,12 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 if (total > 256) total = 256;
                 memset(vide, 0, (size_t)(2 * total) * sizeof *vide);
                 if (bsp_remplissage() != (const int16_t *)g_remplissage_ts0)
-                    faux_air_bruit(vide, total);              /* bruit de fond, pas des zeros (PM = 0) */
+                    faux_air_bruit(vide, total);              /* background noise, not zeros (PM = 0) */
                 calypso_bsp_rx_burst(0, (uint32_t)w, vide, 2 * total);
                 bsp.bursts_written++;
-                /* En mode continu la trame doit faire 1250 echantillons, sinon
-                 * le compteur de symboles de la ROM derive : memes remplissages
-                 * que bsp_ts0_livrer(). */
+                /* In continuous mode the frame must be 1250 samples, otherwise
+                 * the ROM's symbol counter drifts: same fillers as
+                 * bsp_ts0_livrer(). */
                 if (!one_shot) {
                     for (int tn = 1; tn < 8; tn++) {
                         calypso_bsp_rx_burst((uint8_t)tn, (uint32_t)w, bsp_remplissage(), 2 * 148);
@@ -3127,11 +3010,11 @@ static void bsp_trxd_readable(void *opaque)
     uint8_t  tn  = buf[0] & 0x07;
     uint32_t fn  = ((uint32_t)buf[1]<<24)|((uint32_t)buf[2]<<16)|
                    ((uint32_t)buf[3]<<8)|buf[4];
-    /* [2026-10-23] montant copie par le pont (octet 6 = 0xA5) : range a part pour l'air realiste, jamais
-     * joue comme un burst descendant (il casserait la synchro), que CALYPSO_AIR_NIVEAUX soit pose ou non. */
+    /* uplink copied by the bridge (byte 6 = 0xA5): stored apart for the realistic air, never played
+     * as a downlink burst (it would break the sync), whether CALYPSO_AIR_NIVEAUX is set or not. */
     if (n >= 8 + 148 && buf[6] == 0xA5) {
         air_ul_stocker(fn, tn, buf + 8);
-        bsp.bursts_seen++;   /* la boucle de vidage de calypso_bsp_service() s'arrete quand ceci ne bouge plus */
+        bsp.bursts_seen++;   /* the drain loop of calypso_bsp_service() stops when this no longer moves */
         return;
     }
     bsp.last_att = (n > 5) ? buf[5] : 0;
@@ -3148,14 +3031,14 @@ static void bsp_trxd_readable(void *opaque)
         if (stream) {
             if (tn == 0 && nbits == 148) { bsp_ts0_stocker(fn, bits); return; }
             if (tn == g_dedie_tn && nbits == 148) {
-                /* Le canal dedie : garde, sans rien changer au cadencement -
-                 * bsp_ts0_livrer() le jouera a la place de TS0 quand la
-                 * fenetre est en tir unique. */
+                /* The dedicated channel: kept, without changing the pacing -
+                 * bsp_ts0_livrer() will play it instead of TS0 when the window
+                 * is one-shot. */
                 bsp_dedie_stocker(fn, bits);
             }
             if (tn >= 1 && tn <= 7 && nbits == 148) {
-                /* Les autres intervalles de la MEME trame : ils prendront la
-                 * place du bourrage a zero dans la trame continue. */
+                /* The other timeslots of the SAME frame: they take the place of
+                 * the zero filler in the continuous frame. */
                 bsp_autres_stocker(fn, tn, bits);
                 bsp.bursts_seen++;
                 return;
@@ -3364,15 +3247,15 @@ static void bsp_trxd_readable(void *opaque)
          * c54x_exe bench with that modulation, 1 CRC OK on 81 SB attempts
          * against 27 on 76 with GMSK, and the FB frequency estimate wandered to
          * +1050 Hz. Amplitude 30000 as the synthetic cell. */
-        /* [2026-09-30] le SCH passe par sb_moduler() (instant, elargissement,
-         * bruit mesures en rejeu) ; FCCH tel quel ; NB elargi (CALYPSO_BSP_NB_SYM). */
+        /* the SCH goes through sb_moduler() (instant, widening, noise tuned in
+         * replay); FCCH as is; NB widened (CALYPSO_BSP_NB_SYM). */
         int est_sb = 0;
         if (nbits == 148) {
             static const uint8_t train_sb[64] = { 1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,1,1, 0,0,1,0,1,1,0,1,0,1,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0,0,1,1,0,1,1, };
             est_sb = 1;
             for (int k = 0; k < 64 && est_sb; k++) if ((bits[42 + k] & 1) != train_sb[k]) est_sb = 0;
         }
-        /* [2026-10-23] air realiste aussi sur ce chemin direct (sans CALYPSO_BSP_STREAM : banc-rssi) */
+        /* realistic air also on this direct path (without CALYPSO_BSP_STREAM: banc-rssi) */
         int amp_dir = 30000, bruit_dir = 0;
         if (air_niveaux_on() && nbits == 148) {
             const uint8_t *b2 = air_choisir(g_tick_courant, 5000, fn, tn, bits, &amp_dir);
@@ -3381,8 +3264,8 @@ static void bsp_trxd_readable(void *opaque)
         }
         if (bruit_dir) air_bruit(iq + iq_count, nbits);
         else if (est_sb) {
-            /* [2026-10-23] le SCH au meme niveau que le reste de la cellule : a 30000 au milieu de bursts a 3000,
-             * il saturait apres le reglage de gain sur le FB (FB1 -71 dBm puis « Sync error ») */
+            /* the SCH at the same level as the rest of the cell: at 30000 among bursts at 3000, it
+             * would saturate after the gain setting on the FB (FB1 -71 dBm then "Sync error") */
             sb_moduler(bits, iq + iq_count, fn);
             air_echelle(iq + iq_count, nbits, amp_dir);
         }
@@ -3460,20 +3343,12 @@ static void bsp_trxd_readable(void *opaque)
      * block failed the Fire code; the SB read TOA 3 instead of 23. */
     if (tn == 0 && calypso_rhea_dma_one_shot()) {
         int nwin = calypso_rhea_dma_get_len_words() / 2;
-        /* [2026-09-22] LE BIAIS DE LA BOUCLE TOA EST APPLIQUE ICI.
-         * calypso_bsp_toa_feedback() (plus bas) mesure l'ecart entre le TOA vu
-         * par la ROM et la cible 23, et l'integre dans g_toa_bias. Mais
-         * g_toa_bias n'etait LU nulle part : la boucle calculait sa correction
-         * et la jetait, malgre le commentaire « applied to the DARAM
-         * placement » de sa declaration. CALYPSO_BSP_TOA_LOCK=1 n'avait donc
-         * aucun effet observable.
-         * Mesure du 2026-09-22 : la SB atterrit a TOA 7 (71 fois) ou 11 (17),
-         * jamais 23 -- 16 echantillons trop tot -- et son CRC ne passe que
-         * 31 fois sur 118 (26 %). En aval : la resynchro FB+SB echoue une fois
-         * sur deux, d'ou « LOS during RACH request » et l'echec du SMS.
-         * On ne corrige QUE la fenetre SB (nwin >= 190). Le burst normal garde
-         * sa marge de 3, qui lui donne le TOA 5 attendu et mesure -- 7353
-         * bursts sur 8046 -- et auquel il ne faut pas toucher. */
+        /* THE BIAS OF THE TOA LOOP IS APPLIED HERE.
+         * calypso_bsp_toa_feedback() (below) measures the gap between the TOA
+         * seen by the ROM and the target 23, and integrates it into
+         * g_toa_bias. ONLY the SB window (nwin >= 190) is corrected. The
+         * normal burst keeps its margin of 3, which gives it the expected and
+         * measured TOA 5, and must not be touched. */
         int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
         { static unsigned n; if (n++ < 40 || (n % 500) == 0)
             printf("  [cadre] nwin=%d marge=%d biais=%d iq=%d %s\n",
@@ -3522,7 +3397,7 @@ void calypso_bsp_set_tpu_offset(int qbits)
 {
     g_bsp_tpu_offset = qbits;
     if (g_dedie_tn <= 0) {
-        g_tpu_ref = qbits;          /* pas de canal dedie : l'ARM est sur TS0 */
+        g_tpu_ref = qbits;          /* no dedicated channel: the ARM is on TS0 */
     }
 }
 
@@ -3530,7 +3405,7 @@ void calypso_bsp_set_tpu_offset(int qbits)
  * placement bias so the ToA the DSP measures reaches 23 ("on time") WITHOUT
  * canning the output. The firmware then sees the alignment and stops
  * correcting. One-sample-per-frame integrator, for stability. */
-/* defini plus haut, avant le cadrage qui l'applique */
+/* defined above, before the framing that applies it */
 void calypso_bsp_toa_feedback(int toa)
 {
     static int en = -1;
@@ -3639,24 +3514,22 @@ static void bsp_livrer_trame(uint32_t fn)
     { static unsigned nl; if (nl++ < 3) BSP_LOG("STREAM trame fn=%u livree (%s)", fn, one_shot ? "fenetre SB, TS0 + marges" : "8 TS, 1250 symboles"); }
 }
 
-/* [2026-09-23] ATTENDRE LA TRAME EN RETARD PLUTOT QUE LA TROUER.
+/* WAIT FOR THE LATE FRAME RATHER THAN HOLE IT.
  *
- * osmo-bts-trx bat ses trames sur son propre timer et se recale sur chaque
- * IND CLOCK du pont (toutes les 51 trames) : il cale, puis rattrape d'un bloc.
- * Les trames d'une meme phase de la multitrame arrivent donc APRES que le DSP
- * les reclame, et bsp_ts0_service() les remplace par un effacement. Releve du
- * 2026-09-23 14:50, SDCCH/8 SS=4 : « canal dedie (TS1) : trame fn=99109..99112
- * perdue, aucun burst du BTS », puis 99211..99214, 99313..99316 -- le bloc
- * descendant du mobile (fn%51 = 16..19) un sur deux ; l'UA ne passait jamais
- * (« I frame ignored in state SABM_SENT », T200).
+ * osmo-bts-trx beats its frames on its own timer and realigns on every
+ * IND CLOCK of the bridge (every 51 frames): it stalls, then catches up by a
+ * block. The frames of a given multiframe phase can thus arrive AFTER the DSP
+ * requests them, and bsp_ts0_service() would replace them by an erasure (the
+ * mobile's downlink block, fn%51 = 16..19, lost one time in two; the UA never
+ * gets through).
  *
- * La BTS est asservie au DSP (pont/dsp/clock.py) : attendre quelques
- * millisecondes qu'elle livre ne cree pas de derive, ca cale le DSP sur elle.
- * On n'attend que si la trame reclamee est DEVANT la derniere recue (la BTS est
- * en retard, la trame va arriver) et de moins de 200 trames ; sinon (burst
- * disparu, ou calage perdu) on garde le comportement d'avant.
- * CALYPSO_BSP_ATTENTE_MS : 0 (defaut, QEMU inchange) = pas d'attente ;
- * c54x_exe/run.sh pose 40 en MODE=dsp. */
+ * The BTS is slaved to the DSP (pont/dsp/clock.py): waiting a few
+ * milliseconds for it to deliver creates no drift, it aligns the DSP on it.
+ * The wait only happens if the requested frame is AHEAD of the last received
+ * one (the BTS is late, the frame is about to arrive) and by less than 200
+ * frames; otherwise (burst gone, or alignment lost) no wait.
+ * CALYPSO_BSP_ATTENTE_MS: 0 (default, QEMU unchanged) = no wait;
+ * c54x_exe/run.sh sets 40 in MODE=dsp. */
 static void bsp_attendre_trame(uint32_t tick_fn)
 {
     static int max_ms = -1;
@@ -3669,10 +3542,10 @@ static void bsp_attendre_trame(uint32_t tick_fn)
             printf("  [ts0] attente des trames en retard de la BTS : jusqu'a %d ms\n", max_ms);
         }
     }
-    /* [2026-10-20] mode TRX (g_trx_cale) : les bursts montants sont RARES (RACH, puis 4 bursts par bloc
-     * SDCCH) ; attendre 40 ms a chaque trame sans burst etouffait la cadence DSP/ARM en lockstep des le
-     * premier burst recu (le firmware trx ne programmait plus rien : 121 insn/trame, horloge perdue,
-     * osmo-bts-trx sortait 2 s apres le premier RACH du mobile). Une trame sans burst est un silence. */
+    /* TRX mode (g_trx_cale): the uplink bursts are RARE (RACH, then 4 bursts per SDCCH block);
+     * waiting 40 ms on every frame without burst would choke the lock-step DSP/ARM pace from the
+     * first received burst (the trx firmware would program nothing more: 121 insn/frame, clock lost).
+     * A frame without burst is a silence. */
     if (max_ms <= 0 || !g_ts0 || !g_ts0_any || g_ts0_offset == INT64_MIN || bsp.trxd_fd < 0 || g_trx_cale) {
         return;
     }
@@ -4063,28 +3936,27 @@ void calypso_bsp_set_remplissage(const int16_t *iq, int n_int16)
     for (int i = 0; i < n_int16; i++) g_remplissage[i] = (uint16_t)iq[i];
 }
 
-/* [2026-09-23] ENREGISTREUR DU TCH, pour rejouer hors banc EXACTEMENT ce que
- * le DSP a recu (tools/rejeu_banc.c de c54x_exe). Chaque livraison d I/Q
- * pendant un TCH : 'B', tick BE32, tn, fn BE32, one_shot, nwin BE16,
- * n_int16 BE16, puis n_int16 echantillons int16 natifs. Les ecritures de
- * l ARM dans l API RAM sont enregistrees a cote par pont.c ('A').
- * 60000 livraisons au plus, des l'armement du canal dedie (SDCCH compris) ;
- * CALYPSO_REJEU_ENREG=0 coupe. */
+/* TCH RECORDER, to replay off the bench EXACTLY what the DSP received
+ * (tools/rejeu_banc.c of c54x_exe). Every I/Q delivery during a TCH: 'B',
+ * tick BE32, tn, fn BE32, one_shot, nwin BE16, n_int16 BE16, then n_int16
+ * native int16 samples. The ARM writes into the API RAM are recorded next to
+ * it by pont.c ('A'). 60000 deliveries at most, from the arming of the
+ * dedicated channel (SDCCH included); CALYPSO_REJEU_ENREG=0 disables. */
 uint32_t calypso_trx_get_fn(void);
 static FILE *g_enreg_f;
 static unsigned long g_enreg_n;
 FILE *calypso_bsp_enreg_fichier(void)
 {
     static int on = -1;
-    /* [2026-09-30] CALYPSO_REJEU_ENREG=tch : n'enregistrer que le TCH (le
-     * plafond etait atteint par les SDCCH du debut de run, l'appel n'y etait
-     * jamais) ; CALYPSO_REJEU_ENREG_MAX=<n> : plafond de livraisons (60000). */
+    /* CALYPSO_REJEU_ENREG=tch: record only the TCH (otherwise the cap can be
+     * reached by the SDCCHs at the start of the run, before the call);
+     * CALYPSO_REJEU_ENREG_MAX=<n>: delivery cap (60000). */
     static int tch_seul = 0; static unsigned long plafond = 60000;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_REJEU_ENREG"); on = !(e && *e == '0');
                   tch_seul = (e && !strcmp(e, "tch")) ? 1 : 0;
                   const char *m = calypso_getenv("CALYPSO_REJEU_ENREG_MAX"); if (m && *m) plafond = strtoul(m, NULL, 0); }
     if (tch_seul && g_dedie_genre != BSP_DEDIE_TCH) return NULL;
-    /* tout canal dedie (SDCCH compris) : ce qui corrompt l'etat du DSP peut preceder le TCH */
+    /* any dedicated channel (SDCCH included): what corrupts the DSP state may precede the TCH */
     if (!on || g_dedie_tn <= 0 || g_enreg_n >= plafond)
         return NULL;
     if (!g_enreg_f)
@@ -4145,7 +4017,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                (int)calypso_rhea_dma_one_shot(), calypso_rhea_dma_get_len_words() / 2);
     if (calypso_rhea_dma_one_shot() && calypso_rhea_dma_get_len_words() / 2 > 0 &&
         calypso_rhea_dma_get_len_words() / 2 < 150)
-        bsp_pm_mav_noter(iq, n_int16, g_air_k_der);   /* fenetre de mesure : voir calypso_bsp_rssi_apm_k() */
+        bsp_pm_mav_noter(iq, n_int16, g_air_k_der);   /* measurement window: see calypso_bsp_rssi_apm_k() */
 
     /* [2026-09-20] FULL TIMESLOT. A bare 148-symbol burst (296 words) is padded
      * with the 8.25 guard symbols of its timeslot (156 symbols, 157 on
