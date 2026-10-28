@@ -29,6 +29,8 @@ FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) or md
 SORTIE = os.environ.get("SORTIE") or "/root/tout-en-un-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
 AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", "node_modules"}
+DSP_DUMP = re.compile(r"(^calypso_dsp.*\.txt|^dsp-rom-.*\.txt|\.dis)$")   # DSP ROM dumps (not ours, megabytes of hex)
+HTML_SANS_COULEUR = 2_500_000                      # bytes: larger bundles get no syntax highlighting in html
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # telnet negotiation (IAC) of the VTY captures
 CONTROLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]")  # control characters, undecodable bytes
@@ -53,11 +55,20 @@ def dossiers_par_defaut():
     return [overlay] + ([runs[-1]] if runs else [])
 
 
+
+
+def rendu_quarto(racine, d):
+    """d is the resource directory of a page rendered by Quarto (<name>_files next to <name>.html)."""
+    return d.endswith("_files") and os.path.exists(os.path.join(racine, d[:-len("_files")] + ".html"))
+
+
 def fichiers(dossier):
     for racine, dirs, noms in os.walk(dossier):
-        dirs[:] = sorted(d for d in dirs if d not in IGNORES)
+        dirs[:] = sorted(d for d in dirs if d not in IGNORES and not rendu_quarto(racine, d))
         for n in sorted(noms):
             if n.startswith("tout-en-un-"):      # our own outputs
+                continue
+            if DSP_DUMP.search(n):
                 continue
             if n.rsplit(".", 1)[-1].lower() in EXT and "." in n:
                 yield os.path.join(racine, n)
@@ -231,7 +242,20 @@ def lien_md(m, md):
     return m.group(1) + cible + m.group(3)
 
 
+IMAGE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)((?:\s+\"[^\"]*\")?\))")
+
+
+def image_locale(cible, md):
+    """Relative image of the .md file md: path relative to the output file, so the page
+    embeds it offline (Quarto reads absolute paths as project-relative)."""
+    if re.match(r"^([a-zA-Z][\w+.-]*:|/|#)", cible):
+        return cible
+    chemin = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(md)), cible))
+    return os.path.relpath(chemin, os.path.dirname(os.path.abspath(SORTIE))) if os.path.exists(chemin) else cible
+
+
 def liens_github(l, md):
+    l = IMAGE.sub(lambda m: m.group(1) + image_locale(m.group(2), md) + m.group(3), l)
     l = LIEN.sub(lambda m: lien_md(m, md), l)
     return LIEN_REF.sub(lambda m: m.group(1) + lien_github(m.group(2), md) + m.group(3), l)
 
@@ -355,6 +379,11 @@ def main():
                     "    link-external-newwindow: true\n"
                     "    number-sections: true\n    embed-resources: true\n    theme: cosmo\n"
                     "    code-overflow: wrap\n    fontsize: 0.9em\n")
+            # Highlighting wraps every token in a <span>; past ~2.5 MB the DOM is
+            # too large for Quarto's HTML post-processing (RangeError: Maximum call
+            # stack size exceeded), so large bundles are rendered without it
+            if total_out > HTML_SANS_COULEUR:
+                o.write("    highlight-style: none\n")
         o.write("---\n\n")
         o.write("## Synthèse\n\n")
         o.write("| run | élément | valeur |\n|---|---|---|\n")
