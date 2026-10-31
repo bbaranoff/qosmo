@@ -1531,7 +1531,7 @@ static unsigned long g_dedie_stockes, g_dedie_joues, g_dedie_manques;
 /* LAST TCH BURSTS DELIVERED TO THE DSP, for the downlink FACCH prosthesis of montant.c: under the
  * TI L1 (Magnetite) the ROM decodes the FACCH/F with its last two bursts missing ("01 8b 01 2b"
  * instead of the UA "01 73 01 2b"), while the delivered bursts carry the UA intact. */
-#define TCH_ANNEAU 64u
+#define TCH_ANNEAU 128u   /* >= 79: the SACCH/TH block spans 78 frames (montant.c prothese_sacchth_dl) */
 static struct { uint32_t fn; uint8_t bits[148]; int ok; } g_tch_anneau[TCH_ANNEAU];
 static uint32_t g_tch_dernier_fn; static int g_tch_dernier_ok;
 int calypso_bsp_tch_dernier_fn(uint32_t *fn)

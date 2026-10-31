@@ -49,7 +49,7 @@ void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d);   /*
  * changes), else the environment variable NAME, else the default. */
 int calypso_reglage(const char *nom, int defaut);
 int calypso_bsp_tch_dernier_fn(uint32_t *fn);              /* last TCH burst delivered (0 outside TCH) */
-int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148]); /* its bits, 64 frames of history */
+int calypso_bsp_tch_burst(uint32_t fn, uint8_t bits[148]); /* its bits, 128 frames of history */
 void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432);   /* RA_C from the L1 trace */   /* count of TI dedicated-mode entries */   /* exact fn of the dedicated channel */
 int  calypso_bsp_fn_mobile_du_tick(uint32_t tick, uint32_t *fn);   /* fn learnt at the last SB */   /* NB kept in TI dedicated mode */
 void calypso_bsp_sb_trace(unsigned ticks);   /* trace every SCH for n ticks ([sbwin]) */     /* redeliver an SCH held back for lack of armed DMA; 1 if delivered (pont.c, pump loop) */  /* drains UDP 6702 and delivers the current frame (standalone host) */
