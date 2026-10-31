@@ -250,8 +250,17 @@ def image_locale(cible, md):
     return os.path.relpath(chemin, os.path.dirname(os.path.abspath(SORTIE))) if os.path.exists(chemin) else cible
 
 
+def image_md(m, md):
+    img = m.group(1) + image_locale(m.group(2), md) + m.group(3)
+    # LaTeX cannot read SVG without rsvg-convert or inkscape (badges, icons):
+    # in Quarto, SVG images are kept for html only
+    if FORMAT == "qmd" and re.search(r"\.svg($|[?#])", m.group(2), re.I):
+        return '[%s]{.content-visible when-format="html"}' % img
+    return img
+
+
 def liens_github(l, md):
-    l = IMAGE.sub(lambda m: m.group(1) + image_locale(m.group(2), md) + m.group(3), l)
+    l = IMAGE.sub(lambda m: image_md(m, md), l)
     l = LIEN.sub(lambda m: lien_md(m, md), l)
     return LIEN_REF.sub(lambda m: m.group(1) + lien_github(m.group(2), md) + m.group(3), l)
 

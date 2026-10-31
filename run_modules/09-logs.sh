@@ -5,7 +5,19 @@ MOD_TIMEOUT[logs]=10
 
 : "${LOG_ARCHIVES_KEEP:=10}"
 : "${OSMO_LOG_DIR:=/var/log/osmocom}"
-: "${OSMO_LOG_USER:=osmocom}"
+
+# Le compte qui écrit vraiment dans $OSMO_LOG_DIR : celui des unités osmo-*
+# (User= après les drop-ins 00-session-user.conf d'addition.sh/update.sh, en
+# général le compte de session), pas "osmocom" en dur. Sinon chaque démarrage
+# rend le répertoire à osmocom et tous les services meurent sur
+# "Unable to create file /var/log/osmocom/<svc>.log" (parse .cfg -> exit 1).
+_logs_user_services() {
+    local u
+    u="$(systemctl show -p User --value osmo-stp osmo-hlr osmo-msc osmo-bsc osmo-mgw 2>/dev/null \
+         | awk 'NF' | sort | uniq -c | sort -rn | awk 'NR==1{print $2}')"
+    printf '%s' "${u:-osmocom}"
+}
+: "${OSMO_LOG_USER:=$(_logs_user_services)}"
 
 mod_logs_check() {
     local d="${LOG_DIR:-}" p
@@ -37,7 +49,8 @@ mod_logs_start() {
     fi
     [ -d "$OSMO_LOG_DIR" ] || mkdir -p "$OSMO_LOG_DIR" 2>/dev/null || true
     if id "$OSMO_LOG_USER" >/dev/null 2>&1; then
-        chown "$OSMO_LOG_USER":"$OSMO_LOG_USER" "$OSMO_LOG_DIR" 2>/dev/null || true
+        # -R : un <svc>.log laissé par un autre compte bloquerait l'ajout aussi
+        chown -R "$OSMO_LOG_USER":"$(id -gn "$OSMO_LOG_USER")" "$OSMO_LOG_DIR" 2>/dev/null || true
     fi
     if [ -d "$OSMO_LOG_DIR" ]; then
         mod_say "journaux des services : $OSMO_LOG_DIR (propriétaire $OSMO_LOG_USER)"
