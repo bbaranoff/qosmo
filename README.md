@@ -1,5 +1,7 @@
 # qosmo - QEMU model of the TI Calypso baseband
 
+> **40C3:** this repository is part of the talk *Emulating the Baseband* (40th Chaos Communication Congress, Hamburg). Fahrplan link to come.
+
 QEMU machine for the **TI Calypso GSM baseband** (Compal E88 / Motorola C1xx).
 The unmodified [osmocom-bb](https://osmocom.org/projects/baseband) firmware
 boots and runs on it. One platform, with the layer 1 selected at configure time:
