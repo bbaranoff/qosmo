@@ -9,6 +9,7 @@
 #   demo go         the ARM resumes (continue &)
 #
 # Between two steps: 4 s to read (set $demo_pause = N to change, 0 = no pause).
+# After "go", the ARM runs once the command returns (harvard.sh demo arm measures it, outside gdb).
 # If the ARM is running, "demo" stops it first (interrupt) and goes on at the next
 # stop event (gdb.events.stop): nothing is read until the target is stopped.
 # Reads go through the cmd.gdb panel commands (fn, l1, tasks), loaded beforehand.
@@ -109,12 +110,12 @@ def hello():
 
 def fin():
     out(ex("continue &"))
-    out("[demo] ===== FIN : l'ARM est RELANCE et tourne a nouveau, rien de casse (Ctrl-C ou stop pour l'arreter, help_osmo pour le reste).")
-    try:
-        time.sleep(1.0)
-        out("[demo]        1 s plus tard, l'ARM a bien repris : %s" % ("il tourne (continue &)" if en_marche() else "il est ARRETE ?!"))
-    except Exception:
-        pass
+    # Measured (harvard.sh demo arm, API RAM write pages): while this Python command runs, the ARM
+    # does not move yet; it runs as soon as the command gives gdb back. No check from in here: it
+    # would read a state that is not the one after the command (the old is_running() test said
+    # "il est ARRETE ?!" while the call went on).
+    out("[demo] ===== FIN : continue & -- l'ARM repart des que cette commande rend la main a gdb"
+        " (harvard.sh demo arm le mesure ensuite ; Ctrl-C ou stop pour l'arreter, help_osmo pour le reste).")
 
 
 def corps(arg):
