@@ -6,6 +6,7 @@
 #   demo etat       state only (pc, stack, fn, cell, DSP mailbox); stays stopped
 #   demo trame      runs until the next TDMA frame (tdma_sched_execute); stays stopped
 #   demo hello      call printf(...) in the firmware -> sercomm console (osmocon.log); stays stopped
+#   demo dit <text> same, with your own text (ex: demo dit hello 40c3); stays stopped
 #   demo go         the ARM resumes (continue &)
 #
 # Between two steps: 4 s to read (set $demo_pause = N to change, 0 = no pause).
@@ -84,7 +85,7 @@ def trame():
     pause_etape()
 
 
-def hello():
+def hello(libre=None):
     # No malloc in the firmware: gdb cannot place a string literal there. It is written
     # by hand just above the bss (_end + 0x100): free area (no heap, the stacks are at
     # the very top of RAM, TOP_OF_RAM 0x83fff0 in board/compal/macros.S), then puts() on it.
@@ -97,8 +98,11 @@ def hello():
     # ANSI colours in the string itself: osmocon copies the sercomm console byte for byte
     # (hdlc_console_cb -> write(1, ...)), so "tail -f osmocon.log" in a terminal shows it in colour.
     # hello (green) a (white) 40c3 (purple): "hello a 40c3", written to RAM then output by puts().
-    texte = ("\033[1;32mhello\033[0m \033[1;37ma\033[0m \033[1;35m40c3\033[0m "
-             "\033[36m(0x%x, fn=%s)\033[0m\n" % (adr, fn))
+    if libre:   # "demo dit <text>": the text as typed, in bold purple
+        texte = "\033[1;35m%s\033[0m \033[36m(0x%x, fn=%s)\033[0m\n" % (libre, adr, fn)
+    else:
+        texte = ("\033[1;32mhello\033[0m \033[1;37ma\033[0m \033[1;35m40c3\033[0m "
+                 "\033[36m(0x%x, fn=%s)\033[0m\n" % (adr, fn))
     msg = texte.encode() + b"\0"
     gdb.selected_inferior().write_memory(adr, msg)
     out("[demo]        %d octets ecrits a 0x%08x : %s" % (len(msg), adr, ex("x/s 0x%x" % adr).strip()))
@@ -120,6 +124,11 @@ def fin():
 
 def corps(arg):
     try:
+        if arg.split()[0] == "dit":
+            libre = arg[3:].strip()
+            if not libre:
+                out("usage : demo dit <texte>   (ex : demo dit hello 40c3)"); return
+            hello(libre[:200]); return
         if arg in ("etat", "tout"):
             etat()
         if arg in ("trame", "tout"):
@@ -129,13 +138,13 @@ def corps(arg):
         if arg in ("go", "tout"):
             fin()
         if arg not in ("etat", "trame", "hello", "go", "tout"):
-            out("usage : demo [tout|etat|trame|hello|go]")
+            out("usage : demo [tout|etat|trame|hello|go|dit <texte>]")
     except Exception as e:
         out("[demo] erreur : %s" % e)
 
 
 class Demo(gdb.Command):
-    """demo [tout|etat|trame|hello|go] — control of the layer1 firmware: stop, state, one frame, printf, resume."""
+    """demo [tout|etat|trame|hello|go|dit <text>] — control of the layer1 firmware: stop, state, one frame, printf, resume."""
 
     def __init__(self):
         super().__init__("demo", gdb.COMMAND_USER)
@@ -155,4 +164,4 @@ class Demo(gdb.Command):
 
 
 Demo()
-gdb.write("[demo-layer1] tape  demo  (ou demo etat | trame | hello | go)\n")
+gdb.write("[demo-layer1] tape  demo  (ou demo etat | trame | hello | go | dit <texte>)\n")
