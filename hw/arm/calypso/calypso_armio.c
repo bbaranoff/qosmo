@@ -125,8 +125,8 @@ static void armio_set_key(CalypsoArmioState *s, int bit, bool down)
         s->tap_mask &= ~m;
     }
     if (s->debug) {
-        fprintf(stderr, "[armio] touche %s (k%d) %s -> keys=0x%07x kbc=0x%02x\n",
-                armio_key_name(bit), bit, down ? "enfoncee" : "relachee",
+        fprintf(stderr, "[armio] key %s (k%d) %s -> keys=0x%07x kbc=0x%02x\n",
+                armio_key_name(bit), bit, down ? "pressed" : "released",
                 s->keys, s->kbc);
     }
     armio_update_irq(s);
@@ -157,12 +157,12 @@ static void armio_command(CalypsoArmioState *s, char *line)
     name = strtok_r(NULL, " \t\r\n", &save);
     arg = strtok_r(NULL, " \t\r\n", &save);
     if (!name) {
-        fprintf(stderr, "[armio] commande sans touche : « %s »\n", cmd);
+        fprintf(stderr, "[armio] command without a key: '%s'\n", cmd);
         return;
     }
     bit = armio_key_bit(name);
     if (bit < 0) {
-        fprintf(stderr, "[armio] touche inconnue : « %s »\n", name);
+        fprintf(stderr, "[armio] unknown key: '%s'\n", name);
         return;
     }
     if (!strcmp(cmd, "press") || !strcmp(cmd, "down")) {
@@ -178,7 +178,7 @@ static void armio_command(CalypsoArmioState *s, char *line)
         s->tap_mask |= 1u << bit;
         timer_mod(s->tap_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + ms);
     } else {
-        fprintf(stderr, "[armio] commande inconnue : « %s » (press|release|tap)\n", cmd);
+        fprintf(stderr, "[armio] unknown command: '%s' (press|release|tap)\n", cmd);
     }
 }
 
@@ -215,7 +215,7 @@ static void armio_sock_open(CalypsoArmioState *s)
         return;
     }
     if (strlen(s->sock_path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "[armio] chemin de socket trop long : %s\n", s->sock_path);
+        fprintf(stderr, "[armio] socket path too long: %s\n", s->sock_path);
         return;
     }
     fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -236,7 +236,7 @@ static void armio_sock_open(CalypsoArmioState *s)
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     s->sock = fd;
     qemu_set_fd_handler(fd, armio_sock_read, NULL, s);
-    fprintf(stderr, "[armio] clavier C123 : socket %s (press|release|tap <touche> [ms])\n",
+    fprintf(stderr, "[armio] C123 keypad: socket %s (press|release|tap <key> [ms])\n",
             s->sock_path);
 }
 
@@ -315,7 +315,7 @@ static uint64_t armio_read(void *opaque, hwaddr offset, unsigned size)
         if (s->debug) {
             static int nlec;
             if (nlec++ < 40 || nlec % 2000 == 0) {
-                fprintf(stderr, "[armio] lecture KBR=0x%02x keys=0x%07x kbc=0x%02x (x%d) pc=0x%08x\n",
+                fprintf(stderr, "[armio] read KBR=0x%02x keys=0x%07x kbc=0x%02x (x%d) pc=0x%08x\n",
                         (~rows) & 0x1f, s->keys, s->kbc, nlec, armio_guest_pc());
             }
         }
@@ -347,7 +347,7 @@ static void armio_write(void *opaque, hwaddr offset, uint64_t value, unsigned si
         if (s->debug) {
             static int necr;
             if (necr++ < 40 || necr % 2000 == 0) {
-                fprintf(stderr, "[armio] ecriture KBC=0x%02x (x%d) pc=0x%08x\n", s->kbc, necr, armio_guest_pc());
+                fprintf(stderr, "[armio] write KBC=0x%02x (x%d) pc=0x%08x\n", s->kbc, necr, armio_guest_pc());
             }
         }
         armio_update_irq(s);
@@ -391,7 +391,7 @@ static void armio_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = armio_realize;
-    dc->desc = "Calypso ARMIO (GPIO + clavier matriciel C123)";
+    dc->desc = "Calypso ARMIO (GPIO + C123 matrix keypad)";
 }
 
 static const TypeInfo armio_info = {

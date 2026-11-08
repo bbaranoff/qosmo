@@ -85,8 +85,8 @@ static bool xio_on(void)
     if (on < 0) {
         on = calypso_gate("CALYPSO_XIO_MISC", 1);
         if (!on)
-            fprintf(stderr, "[xio] CALYPSO_XIO_MISC=0 : F900/FA00 redeviennent "
-                    "des no-op (comportement d'avant le 03/08)\n");
+            fprintf(stderr, "[xio] CALYPSO_XIO_MISC=0: F900/FA00 are "
+                    "no-ops again (behaviour before 03/08)\n");
     }
     return on != 0;
 }
@@ -96,9 +96,9 @@ static void xio_init(void)
     if (g_init)
         return;
     g_init = true;
-    fprintf(stderr, "[xio] fenetres XIO ouvertes : API Control @0xF900 (bit2 = "
-            "BRIDGE_CLK_EN, note du §11.3.5) et INTH du DSP @0xFA00 (§3.7.6). "
-            "ENREGISTREMENT SEUL : aucune semantique n'est inventee.\n");
+    fprintf(stderr, "[xio] XIO windows open: API Control @0xF900 (bit2 = "
+            "BRIDGE_CLK_EN, note of §11.3.5) and DSP INTH @0xFA00 (§3.7.6). "
+            "RECORDING ONLY: no semantics are invented.\n");
 }
 
 static void bits16(uint16_t v, char out[24])
@@ -169,24 +169,24 @@ bool calypso_xio_misc(bool write, uint16_t pa, uint16_t *val, uint16_t pc)
             fprintf(stderr, "[xio] API_CONF PORTW PA=0x%04x <- 0x%04x [%s] "
                     "API_HOM=%d(%s) BRIDGE_CLK_EN=%d PC=0x%04x\n",
                     pa, *val, b, !!(*val & APIC_HOM),
-                    (*val & APIC_HOM) ? "HOM: API reservee ARM/DMA"
-                                      : "SAM: acces partage",
+                    (*val & APIC_HOM) ? "HOM: API reserved ARM/DMA"
+                                      : "SAM: shared access",
                     !!(*val & APIC_BRIDGE_CLK_EN), pc);
         } else {
             if (off == INTH_CNTRL_REG) {
-                fprintf(stderr, "[xio] *** INTH CNTRL_REG <- 0x%04x [%s] : canaux en "
+                fprintf(stderr, "[xio] *** INTH CNTRL_REG <- 0x%04x [%s]: channels on "
                         "FRONT =", *val, b);
                 for (int ch = 0; ch <= 11; ch++)
                     if (*val & (1u << ch))
                         fprintf(stderr, " INT%dn", ch);
                 fprintf(stderr, " ; INT4_switch=%d (%s) PC=0x%04x\n",
                         !!(*val & INTH_INT4_SWITCH),
-                        (*val & INTH_INT4_SWITCH) ? "canal 4 -> nNMI"
-                                                  : "canal 4 -> INT4N",
+                        (*val & INTH_INT4_SWITCH) ? "channel 4 -> nNMI"
+                                                  : "channel 4 -> INT4N",
                         pc);
             } else {
-                fprintf(stderr, "[xio] *** INTH CLEAR_REG <- 0x%04x [%s] : efface les "
-                        "canaux", *val, b);
+                fprintf(stderr, "[xio] *** INTH CLEAR_REG <- 0x%04x [%s]: clears the "
+                        "channels", *val, b);
                 for (int ch = 0; ch <= 11; ch++)
                     if (*val & (1u << ch))
                         fprintf(stderr, " INT%dn", ch);

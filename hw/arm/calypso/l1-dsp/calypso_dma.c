@@ -62,11 +62,11 @@ void calypso_dma_init(void)
     }
 
     calypso_dma_actif = 1;
-    fprintf(stderr, "[dma] contrôleur DMA c54x ACTIF — mapping SPRU131 "
+    fprintf(stderr, "[dma] c54x DMA controller ACTIVE — SPRU131 mapping "
             "(DMPREC=0x54 DMSA=0x55 DMSDI=0x56 DMSDN=0x57), DMAC0=vec%d, "
-            "plafond %u mots/transfert.\n"
-            "[dma] ⚠️ transfert EN BLOC au tick de trame : la synchronisation "
-            "par événement (DMSFC) n'est PAS modélisée.\n",
+            "cap %u words/transfer.\n"
+            "[dma] ⚠️ BLOCK transfer at the frame tick: event "
+            "synchronisation (DMSFC) is NOT modelled.\n",
             g_vec_base, g_max_mots);
 }
 
@@ -99,7 +99,7 @@ bool calypso_dma_mmr_write(C54xState *s, uint16_t addr, uint16_t val)
                 g_arme[c] = 1;
                 if (g_log < 40) {
                     g_log++;
-                    fprintf(stderr, "[dma] canal %u ARMÉ par DMPREC=0x%04x "
+                    fprintf(stderr, "[dma] channel %u ARMED by DMPREC=0x%04x "
                             "(SRC=0x%04x DST=0x%04x CTR=%u) PC=0x%04x\n",
                             c, val, g_sub[c * 5 + 0], g_sub[c * 5 + 1],
                             g_sub[c * 5 + 2], s->pc);
@@ -121,7 +121,7 @@ bool calypso_dma_mmr_write(C54xState *s, uint16_t addr, uint16_t val)
             g_sub[g_subaddr] = val;
             if (g_log < 40) {
                 g_log++;
-                fprintf(stderr, "[dma] canal %u %s = 0x%04x (sous-adr 0x%02x) "
+                fprintf(stderr, "[dma] channel %u %s = 0x%04x (sub-addr 0x%02x) "
                         "PC=0x%04x\n", g_subaddr / 5,
                         dma_nom_sub(g_subaddr % 5), val, g_subaddr, s->pc);
             }
@@ -160,8 +160,8 @@ void calypso_dma_tick(C54xState *s)
         if (n == 0 || n > g_max_mots) {
             if (g_log < 40) {
                 g_log++;
-                fprintf(stderr, "[dma] canal %u : CTR=%u hors plage [1..%u] — "
-                        "transfert IGNORÉ (sous-registres incomplets ?)\n",
+                fprintf(stderr, "[dma] channel %u: CTR=%u out of range [1..%u] — "
+                        "transfer IGNORED (sub-registers incomplete?)\n",
                         c, n, g_max_mots);
             }
             g_arme[c] = 0;
@@ -182,7 +182,7 @@ void calypso_dma_tick(C54xState *s)
                 static unsigned na;
                 if (na < 40) {
                     unsigned off = (d0 <= 0x0837) ? (0x0837 - d0) : 0;
-                    fprintf(stderr, "[dma] A_SCH canal %u : %u mots 0x%04x -> 0x%04x ; "
+                    fprintf(stderr, "[dma] A_SCH channel %u: %u words 0x%04x -> 0x%04x; "
                             "source a_sch[0] = data[0x%04x] = 0x%04x\n",
                             c, n, src, dst, (uint16_t)(src + off),
                             s->data[(uint16_t)(src + off)]);
@@ -204,8 +204,8 @@ void calypso_dma_tick(C54xState *s)
 
         if (g_log < 40) {
             g_log++;
-            fprintf(stderr, "[dma] canal %u TRANSFÉRÉ %u mots 0x%04x -> 0x%04x, "
-                    "interruption DMA INT10n (canal %u, vec %d, IMR bit %d)\n",
+            fprintf(stderr, "[dma] channel %u TRANSFERRED %u words 0x%04x -> 0x%04x, "
+                    "DMA interrupt INT10n (channel %u, vec %d, IMR bit %d)\n",
                     c, n, src, dst, c, g_vec_base, g_vec_base - 16);
         }
 

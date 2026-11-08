@@ -238,7 +238,7 @@ static void bsp_pm_mav_noter(const int16_t *iq, int n, double k_air)
     if (m16 >= 5000) g_pm_mav_cellule = m16;   /* last real burst seen in a measurement window */
     g_pm_der_mav = m16; g_pm_der_gain = faux_air_gain(g_tick_courant, lim); g_pm_der_ok = 1;
     if (calypso_apm_trace_on())
-        printf("  [apmL] tick=%u fenetre=%d rang=%d mav=%u arfcn=%d gain=%d file=%u\n", g_tick_courant,
+        printf("  [apmL] tick=%u window=%d rank=%d mav=%u arfcn=%d gain=%d queue=%u\n", g_tick_courant,
                calypso_rhea_dma_get_len_words() / 2, g_pm_mav_n - 1, m16, faux_air_arfcn(g_tick_courant, lim),
                faux_air_gain(g_tick_courant, lim), g_pm_fifo_w - g_pm_fifo_r);
     if (g_pm_mav_n < BSP_PM_MAV_N) g_pm_mav[g_pm_mav_n++] = m16;
@@ -288,9 +288,9 @@ int calypso_bsp_pm_mav_texte(char *buf, size_t n)
 {
     int o = snprintf(buf, n, "tick %u:", g_pm_mav_tick);
     for (int k = 0; k < g_pm_mav_n && o < (int)n; k++) o += snprintf(buf + o, n - o, " %u", g_pm_mav[k]);
-    if (o < (int)n) o += snprintf(buf + o, n - o, " | avant:");
+    if (o < (int)n) o += snprintf(buf + o, n - o, " | before:");
     for (int k = 0; k < g_pm_mav_der_n && o < (int)n; k++) o += snprintf(buf + o, n - o, " %u", g_pm_mav_der[k]);
-    if (o < (int)n) o += snprintf(buf + o, n - o, " | dernier=%u courant=%u", bsp_last_mav, g_tick_courant);
+    if (o < (int)n) o += snprintf(buf + o, n - o, " | last=%u current=%u", bsp_last_mav, g_tick_courant);
     return o;
 }
 /* did the current frame deliver a real burst (MAV >= 5000) in a measurement window? ([apm] probe) */
@@ -310,7 +310,7 @@ uint16_t calypso_bsp_rssi_apm_suivante(int *depile_mav)
         uint16_t m = g_pm_fifo[g_pm_fifo_r++ % BSP_PM_FIFO_N];
         if (depile_mav) *depile_mav = m;
         if (calypso_apm_trace_on())
-            printf("  [apmS] tick=%u PM servie : mav=%u gain=%d (livree au tick %u), reste %u en file\n", g_tick_courant,
+            printf("  [apmS] tick=%u PM served: mav=%u gain=%d (delivered at tick %u), %u left in queue\n", g_tick_courant,
                    m, g, g_pm_fifo_tick[(g_pm_fifo_r - 1) % BSP_PM_FIFO_N], g_pm_fifo_w - g_pm_fifo_r);
         return bsp_apm_de_mav(m, g);
     }
@@ -593,7 +593,7 @@ static void bsp_enqueue(uint8_t tn, uint32_t fn, const int16_t *iq, int n)
         idx = oldest_idx;
         bsp.bursts_dropped_queue_full++;
         if (bsp.bursts_dropped_queue_full == 1 || (bsp.bursts_dropped_queue_full % 10000) == 0)
-            BSP_LOG("FILE PLEINE tn=%u : %llu bursts jetes (le DSP consomme moins vite que le BTS n'emet)",
+            BSP_LOG("QUEUE FULL tn=%u: %llu bursts dropped (the DSP consumes slower than the BTS sends)",
                     tn, (unsigned long long)bsp.bursts_dropped_queue_full);
     }
     BspBurstSlot *s = &qq->slot[idx];
@@ -796,7 +796,7 @@ int calypso_reglage(const char *nom, int defaut)
                 if (f) {
                     size_t n = fread(texte, 1, sizeof texte - 1, f); texte[n] = 0; fclose(f);
                     mtime = st.st_mtim;
-                    printf("  [reglages] /dev/shm/calypso_reglages relu : %s\n", texte);
+                    printf("  [reglages] /dev/shm/calypso_reglages reread: %s\n", texte);
                     fflush(stdout);
                 }
             }
@@ -844,7 +844,7 @@ void calypso_bsp_off_mobile_a5fn(uint32_t tick, uint32_t fn)
     if (off != g_off_mobile) {
         static unsigned n;
         if (n++ < 30)
-            printf("  [off-mobile] a_a5fn fn=%u tick=%u : offset %lld -> %lld\n", fn, tick,
+            printf("  [off-mobile] a_a5fn fn=%u tick=%u: offset %lld -> %lld\n", fn, tick,
                    g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
         g_off_mobile = off;
     }
@@ -874,7 +874,7 @@ void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d)
     if (d >= 52) d -= 104;
     if (n_log < 60 || (d && n_log % 50 == 0)) {
         n_log++;
-        printf("  [dfn] tick=%u tache=%u d_fn%%104=%u livre%%104=%u ecart %+d (offset %lld)\n",
+        printf("  [dfn] tick=%u task=%u d_fn%%104=%u delivered%%104=%u diff %+d (offset %lld)\n",
                tick, task_d & 0x7fff, f104, (unsigned)(w % 104), d, (long long)g_ts0_offset);
     } else n_log++;
     if (d == 0 || d < -6 || d > 6) { d_prec = 99; n_meme = 0; return; }
@@ -882,7 +882,7 @@ void calypso_bsp_dfn_observe(uint32_t tick, uint16_t dfn, uint16_t task_d)
     if (n_meme < 3) return;
     g_ts0_offset = (g_ts0_offset + d + BSP_FN_MAX) % BSP_FN_MAX;
     if (g_off_mobile != INT64_MIN) g_off_mobile += d;
-    printf("  [dfn] tick=%u : fn du mobile %+d trame(s) -> offset %lld\n", tick, d, (long long)g_ts0_offset);
+    printf("  [dfn] tick=%u: mobile fn %+d frame(s) -> offset %lld\n", tick, d, (long long)g_ts0_offset);
     d_prec = 99; n_meme = 0;
 }
 void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
@@ -893,7 +893,7 @@ void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
     int64_t off = ref + d;
     g_a5fn_tick = tick; g_a5fn_vu = 1; g_off_rac_vu = 1;
     if (off != g_off_mobile) {
-        printf("  [off-mobile] RA_C fn%%42432=%u tick=%u : offset du mobile %lld -> %lld\n", fn42432, tick,
+        printf("  [off-mobile] RA_C fn%%42432=%u tick=%u: mobile offset %lld -> %lld\n", fn42432, tick,
                g_off_mobile == INT64_MIN ? 0LL : (long long)g_off_mobile, (long long)off);
         g_off_mobile = off;
     }
@@ -906,7 +906,7 @@ void calypso_bsp_off_mobile_rac(uint32_t tick, uint32_t fn42432)
     if (rac_liv && g_ts0_offset != INT64_MIN && off != g_ts0_offset) {
         int64_t e = off - g_ts0_offset;
         if (e >= -6 && e <= 6) {
-            printf("  [off-mobile] offset de livraison %lld -> %lld (RA_C)\n", (long long)g_ts0_offset, (long long)off);
+            printf("  [off-mobile] delivery offset %lld -> %lld (RA_C)\n", (long long)g_ts0_offset, (long long)off);
             g_ts0_offset = (off + BSP_FN_MAX) % BSP_FN_MAX;
         }
     }
@@ -922,7 +922,7 @@ void calypso_bsp_set_dedie_ti(int actif)
     char b[160] = "";
     if (actif != g_dedie_ti) {
         if (!actif) calypso_bsp_routeur_bilan(b, sizeof b);
-        printf("  [ts0] firmware TI %s le mode dedie%s\n", actif ? "entre dans" : "quitte", b);
+        printf("  [ts0] TI firmware %s dedicated mode%s\n", actif ? "enters" : "leaves", b);
     }
     g_dedie_ti = actif;
 }
@@ -956,7 +956,7 @@ static int faux_air_cellule(void)
 {
     static int a = -2;
     if (a == -2) { const char *e = calypso_getenv("CALYPSO_FAUX_AIR"); a = (e && *e) ? atoi(e) : -1;
-                   if (a >= 0) printf("  [faux-air] cellule sur l'ARFCN %d : bruit sur les autres frequences\n", a); }
+                   if (a >= 0) printf("  [faux-air] cell on ARFCN %d: noise on the other frequencies\n", a); }
     return a;
 }
 /* ARFCN of the window of the tick: last programming done before `limite` qbits in frame tick. */
@@ -1048,7 +1048,7 @@ static int air_niveaux_on(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_AIR_NIVEAUX"); on = (e && *e == '1');
-                  if (on) printf("  [air] niveaux realistes : DL/UL separes, amplitude selon le niveau\n"); }
+                  if (on) printf("  [air] realistic levels: DL/UL separated, amplitude by level\n"); }
     return on;
 }
 static double air_env_dbm(const char *nom, double defaut)
@@ -1180,8 +1180,8 @@ static const uint8_t *air_choisir(uint32_t tick, int limite, uint32_t fn, unsign
     } else n_bruit++;
     unsigned long t = n_dl + n_ul + n_bruit;
     if (t <= 30 || t % 5000 == 0)
-        printf("  [air] tick=%u fn=%u pos=%u accord %s %d (cellule %d) -> %s amp=%d k_pm=%.3f [%lu DL, %lu UL, %lu bruit ; %lu UL recus]\n",
-               tick, fn, pos, ul ? "UL" : "DL", a, cell, b ? (ul ? "burst montant" : "burst descendant") : "bruit",
+        printf("  [air] tick=%u fn=%u pos=%u tuned %s %d (cell %d) -> %s amp=%d k_pm=%.3f [%lu DL, %lu UL, %lu noise; %lu UL received]\n",
+               tick, fn, pos, ul ? "UL" : "DL", a, cell, b ? (ul ? "uplink burst" : "downlink burst") : "noise",
                b ? *amp : 0, (double)pm->k, n_dl, n_ul, n_bruit, g_air_ul_recus);
     return b;
 }
@@ -1283,10 +1283,10 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
     if (mode_pages < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TRX_PARITE");
         if (e && (*e == '0' || *e == '1')) { parite = *e - '0'; parite_flip = 1; mode_pages = 1;
-            printf("  [ts0] prothese : parite de page FORCEE = %d (CALYPSO_BSP_TRX_PARITE)\n", parite); }
-        else if (e && !strcmp(e, "auto")) { mode_pages = 0; printf("  [ts0] prothese : parite de page VOTEE (CALYPSO_BSP_TRX_PARITE=auto)\n"); }
+            printf("  [ts0] prosthesis: page parity FORCED = %d (CALYPSO_BSP_TRX_PARITE)\n", parite); }
+        else if (e && !strcmp(e, "auto")) { mode_pages = 0; printf("  [ts0] prosthesis: page parity VOTED (CALYPSO_BSP_TRX_PARITE=auto)\n"); }
         else { mode_pages = 2; parite_flip = 1;
-            printf("  [ts0] prothese : burst exact ecrit dans LES DEUX pages (defaut depuis le 21/10 ; CALYPSO_BSP_TRX_PARITE=auto|0|1 pour une seule)\n"); }
+            printf("  [ts0] prosthesis: exact burst written to BOTH pages (default since 21/10; CALYPSO_BSP_TRX_PARITE=auto|0|1 for a single one)\n"); }
     }
     int fait = 0;
     static unsigned n_pas_valide, n_diff, n_appels;
@@ -1294,7 +1294,7 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
     if (!g_trx_ul.valide) n_pas_valide++;
     else if ((int32_t)(tick - g_trx_ul.tick) != 1) n_diff++;
     if (n_appels % 20000 == 0)
-        printf("  [ts0] prothese TS0 : %u appels, %u sans burst, %u mauvais tick, parite %d (votes %u/%u)\n", n_appels, n_pas_valide, n_diff, parite, votes[0], votes[1]);
+        printf("  [ts0] prosthesis TS0: %u calls, %u without burst, %u wrong tick, parity %d (votes %u/%u)\n", n_appels, n_pas_valide, n_diff, parite, votes[0], votes[1]);
     /* TS0: the burst played by bsp_ts0_livrer at tick T = tick - 1 */
     if (g_trx_ul.valide && (int32_t)(tick - g_trx_ul.tick) == 1) {
         if (parite < 0) {
@@ -1311,15 +1311,15 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
             if (mode_pages != 0) { /* both pages: no decision, only the measurement is kept */ }
             else if (votes[0] + votes[1] >= 4 && votes[0] != votes[1] && 3 * (votes[0] > votes[1] ? votes[1] : votes[0]) <= votes[0] + votes[1]) {
                 parite = votes[1] > votes[0];
-                printf("  [ts0] prothese : parite de page calibree = %d (votes bits %u/%u, energie %u/%u) : la trame fn ecrit dans la page (fn + %d) & 1\n",
+                printf("  [ts0] prosthesis: page parity calibrated = %d (bit votes %u/%u, energy %u/%u): frame fn writes to page (fn + %d) & 1\n",
                        parite, votes[0], votes[1], votes_nrj[0], votes_nrj[1], parite);
             } else if (n_ok >= 40 && votes_nrj[0] + votes_nrj[1] >= 6 && votes_nrj[0] != votes_nrj[1]) {
                 parite = votes_nrj[1] > votes_nrj[0];
-                printf("  [ts0] prothese : parite de page calibree EN SECOURS par l'energie = %d (votes bits %u/%u, energie %u/%u) : les bits ne tranchent pas (demod au hasard dans les deux pages ?)\n",
+                printf("  [ts0] prosthesis: page parity calibrated as FALLBACK by energy = %d (bit votes %u/%u, energy %u/%u): the bits do not decide (random demod in both pages?)\n",
                        parite, votes[0], votes[1], votes_nrj[0], votes_nrj[1]);
             }
             if (n_ok < 5 || (n_ok % 10 == 0 && n_ok < 100) || n_ok % 500 == 0)
-                printf("  [ts0] prothese : bits justes page0=%d page1=%d (fn=%u, energie dans la page %d) votes bits %u/%u energie %u/%u\n",
+                printf("  [ts0] prosthesis: correct bits page0=%d page1=%d (fn=%u, energy in page %d) bit votes %u/%u energy %u/%u\n",
                        j[0], j[1], g_trx_ul.fn, det, votes[0], votes[1], votes_nrj[0], votes_nrj[1]);
         }
         for (int pg = 0; pg < 2; pg++) {
@@ -1335,15 +1335,15 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
         if (parite >= 0 && !parite_flip && n_post >= 64) {
             if (j_post < 70u * n_post) {
                 parite ^= 1; parite_flip = 1;
-                printf("  [ts0] prothese : la page ecrite restait au hasard (%.1f/116 sur %u bursts) -> parite basculee a %d\n", (double)j_post / n_post, n_post, parite);
+                printf("  [ts0] prosthesis: the written page stayed random (%.1f/116 over %u bursts) -> parity switched to %d\n", (double)j_post / n_post, n_post, parite);
             } else if (n_post == 64)
-                printf("  [ts0] prothese : parite %d confirmee (%.1f/116 justes sur %u bursts)\n", parite, (double)j_post / n_post, n_post);
+                printf("  [ts0] prosthesis: parity %d confirmed (%.1f/116 correct over %u bursts)\n", parite, (double)j_post / n_post, n_post);
             if (n_post >= 64 && j_post >= 70u * n_post) parite_flip = 1;   /* confirmed: no more flipping */
         }
         if (fait) {
             n_ok++;
             if (n_ok <= 5 || n_ok % 500 == 0)
-                printf("  [ts0] prothese montante : burst fn=%u (tick %u) ecrit a la phase A du tick %u ; bits deja justes avant ecriture : %.1f/116 en moyenne (%u bursts, parite %d)\n",
+                printf("  [ts0] uplink prosthesis: burst fn=%u (tick %u) written at phase A of tick %u; bits already correct before writing: %.1f/116 on average (%u bursts, parity %d)\n",
                        g_trx_ul.fn, g_trx_ul.tick, tick, n_pages ? (double)n_justes / n_pages : 0.0, n_ok, parite);
         }
         g_trx_ul.valide = 0;
@@ -1370,10 +1370,10 @@ int calypso_bsp_trx_ul_prothese(uint16_t *dspdata, uint32_t tick, int w_page)
             g_autres[i].presents &= (uint8_t)~1u;
             n_ts1++;
             if (n_ts1 <= 5 || n_ts1 % 500 == 0)
-                printf("  [ts0] prothese montante TS1 : burst fn=%u ecrit (rx[2], data[72]) a la phase A du tick %u (%u bursts TS1, parite %d)\n", (uint32_t)w, tick, n_ts1, parite);
+                printf("  [ts0] uplink prosthesis TS1: burst fn=%u written (rx[2], data[72]) at phase A of tick %u (%u bursts TS1, parity %d)\n", (uint32_t)w, tick, n_ts1, parite);
         }
         if (n_look % 20000 == 0)
-            printf("  [ts0] prothese TS1 : %u recherches, %u trouvees, %lu bursts TS1..7 stockes au total\n", n_look, n_trouve, g_autres_stockes);
+            printf("  [ts0] prosthesis TS1: %u lookups, %u found, %lu bursts TS1..7 stored in total\n", n_look, n_trouve, g_autres_stockes);
     }
     return fait;
 }
@@ -1383,15 +1383,15 @@ int calypso_bsp_trx_calage(uint32_t fn_sb, uint32_t tick)
     if (actif < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TRX"); actif = (e && *e == '1') ? 1 : 0;
         e = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); if (e && *e) delta = atoi(e);
-        if (actif) BSP_LOG("mode TRX : offset fn/tick pose par le SB emis (delta %d), bursts montants joues a la trame du firmware", delta);
+        if (actif) BSP_LOG("TRX mode: fn/tick offset set by the sent SB (delta %d), uplink bursts played at the firmware's frame", delta);
     }
     if (!actif) return 0;
     int64_t off = ((int64_t)fn_sb + delta - (int64_t)tick) % (int64_t)BSP_FN_MAX; if (off < 0) off += BSP_FN_MAX;
     if (g_trx_cale && off == g_ts0_offset) return 1;
     static unsigned n;
     if (n++ < 10 || n % 500 == 0)
-        printf("  [ts0] mode TRX : offset fn-tick %s %lld (SB fn=%u au tick %u, delta %d)\n",
-               g_trx_cale ? "recale a" : "pose a", (long long)off, fn_sb, tick, delta);
+        printf("  [ts0] TRX mode: fn-tick offset %s %lld (SB fn=%u at tick %u, delta %d)\n",
+               g_trx_cale ? "realigned to" : "set to", (long long)off, fn_sb, tick, delta);
     g_ts0_offset = off; g_trx_cale = 1;
     return 1;
 }
@@ -1418,7 +1418,7 @@ static void bsp_ts0_stocker(uint32_t fn, const uint8_t *bits)
         int m = (int)dm;
         n++; somme += m; if (m < mini) mini = m; if (m <= 0) n_tard++;
         if (n == 50 || n == 500 || n % 2000 == 0)
-            printf("  [ts0] mode TRX : marge d'arrivee des bursts montants : min %d, moyenne %.1f trame(s), %ld/%ld en retard\n", mini, (double)somme / n, n_tard, n);
+            printf("  [ts0] TRX mode: arrival margin of uplink bursts: min %d, mean %.1f frame(s), %ld/%ld late\n", mini, (double)somme / n, n_tard, n);
     }
     g_ts0[i].fn = fn; memcpy(g_ts0[i].bits, bits, 148); g_ts0[i].valid = 1; g_ts0[i].joue = 0;
     /* The most recent frame received from the BTS. On a miss it tells ON WHICH
@@ -1637,7 +1637,7 @@ void calypso_bsp_set_dedie(int tn, int genre, int ss)
 {
     if (tn <= 0 || tn > 7 || genre == 0xFF) {
         if (g_dedie_tn > 0) {
-            BSP_LOG("canal dedie libere (TS%d) : %lu bursts stockes, %lu joues",
+            BSP_LOG("dedicated channel released (TS%d): %lu bursts stored, %lu played",
                     g_dedie_tn, g_dedie_stockes, g_dedie_joues);
         }
         g_dedie_tn = -1;
@@ -1658,17 +1658,17 @@ void calypso_bsp_set_dedie(int tn, int genre, int ss)
     g_dedie_genre = genre;
     bsp_dedie_etat("arme");
     if (genre == BSP_DEDIE_PDCH) {
-        BSP_LOG("canal dedie arme : PDCH TS%d (GPRS) - TOUTES ses trames remplacent TS0", tn);
-        printf("  [ts0] canal dedie arme : PDCH TS%d (GPRS, toutes les trames)\n", tn);
+        BSP_LOG("dedicated channel armed: PDCH TS%d (GPRS) - ALL its frames replace TS0", tn);
+        printf("  [ts0] dedicated channel armed: PDCH TS%d (GPRS, all frames)\n", tn);
         return;
     }
     if (genre == BSP_DEDIE_TCH) {
-        BSP_LOG("canal dedie arme : TCH TS%d - TOUTES ses trames remplacent TS0", tn);
-        printf("  [ts0] canal dedie arme : TCH TS%d (toutes les trames)\n", tn);
+        BSP_LOG("dedicated channel armed: TCH TS%d - ALL its frames replace TS0", tn);
+        printf("  [ts0] dedicated channel armed: TCH TS%d (all frames)\n", tn);
         return;
     }
-    BSP_LOG("canal dedie arme : SDCCH/%d SS=%d TS%d - ses bursts remplacent TS0 sur les "
-            "trames du canal (fn%%51 = %u-%u et SACCH %u-%u), TS0 ailleurs",
+    BSP_LOG("dedicated channel armed: SDCCH/%d SS=%d TS%d - its bursts replace TS0 on the "
+            "channel's frames (fn%%51 = %u-%u and SACCH %u-%u), TS0 elsewhere",
             genre ? 8 : 4, ss, tn, 4u * ((unsigned)ss & 7u), 4u * ((unsigned)ss & 7u) + 3u,
             32u + 4u * ((unsigned)ss & 3u), 32u + 4u * ((unsigned)ss & 3u) + 3u);
 }
@@ -1768,7 +1768,7 @@ static int sb_fenetre_on(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_FENETRE"); on = (e && *e == '0') ? 0 : 1;
-                  if (on) BSP_LOG("SB_FENETRE on : un SCH depose alors que la DMA n'est pas armee est garde un tick et livre dans la fenetre SB one-shot qui suit"); }
+                  if (on) BSP_LOG("SB_FENETRE on: an SCH deposited while the DMA is not armed is kept one tick and delivered in the next one-shot SB window"); }
     return on;
 }
 /* Frames the SB burst in `iq` for the one-shot window as programmed at this
@@ -1800,7 +1800,7 @@ static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn)
         e = calypso_getenv("CALYPSO_BSP_SB_DEC");   dec   = (e && *e) ? atof(e) : 0.35;
         e = calypso_getenv("CALYPSO_BSP_SB_NOISE"); sigma = (e && *e) ? atof(e) : 3000.0;
         if (dec < 0 || dec >= 1.0) dec = 0.5;
-        BSP_LOG("SCH : elargissement %.2f, instant %.2f symbole, bruit sigma %.0f (mesure rejeu du 2026-09-30 : 82 %% de SCH decodes)", sym, dec, sigma);
+        BSP_LOG("SCH: widening %.2f, instant %.2f symbol, noise sigma %.0f (replay measurement of 2026-09-30: 82 %% of SCH decoded)", sym, dec, sigma);
     }
     gmsk_moduler(bits, 148, 30000, 0.0, dec, dst);
     if (sym != 0.0) gmsk_elargir(dst, 148, sym);
@@ -1875,9 +1875,9 @@ int calypso_bsp_sb_retenter(void)
     int recale = (off != g_ts0_offset);
     if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
     if (g_sb_relivres <= 100 || g_sb_relivres % 100 == 0)
-        printf("  [sbwin] SB fn=%u RELIVRE au tick %u (depose au tick %u, fenetre SB armee apres) : page=%d marge=%d%s [%lu relivres, %lu expires]\n",
+        printf("  [sbwin] SB fn=%u REDELIVERED at tick %u (deposited at tick %u, SB window armed after): page=%d margin=%d%s [%lu redelivered, %lu expired]\n",
                g_dernier_sch.fn, g_tick_courant, g_dernier_sch.tick, total, marge,
-               recale ? ", offset ARM-tick recale" : "", g_sb_relivres, g_sb_expires);
+               recale ? ", ARM-tick offset realigned" : "", g_sb_relivres, g_sb_expires);
     return 1;
 }
 /* WINDOW ROUTING IN DEDICATED MODE (TI firmware). The bench deposits ONE burst (148 samples, TS0)
@@ -1906,8 +1906,8 @@ static int nb_retenter_on(void)
     if (on < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_NB_RETENTER");
         on = (e && *e) ? atoi(e) : (calypso_getenv("MS_MAGNETITE") ? 1 : 2);
-        BSP_LOG("NB_RETENTER=%d (%s) : garde NB %s", on, (e && *e) ? "force" : "defaut du firmware",
-                on == 1 ? "en veille et en dedie" : on == 2 ? "en dedie seulement" : "coupee");
+        BSP_LOG("NB_RETENTER=%d (%s): NB keep %s", on, (e && *e) ? "forced" : "firmware default",
+                on == 1 ? "in idle and in dedicated" : on == 2 ? "in dedicated only" : "off");
     }
     return on == 1 || (on == 2 && g_dedie_ti);
 }
@@ -1943,7 +1943,7 @@ static int nb_amp(uint32_t tick)
     if (a < 30.0) a = 30.0;
     n++; if (g < g_min) g_min = g; if (g > g_max) g_max = g;
     if (n <= 10 || n % 2000 == 0)
-        printf("  [nb-agc] tick=%u gain=%d ref=%.0f -> amplitude %d [%lu NB, gain %d..%d, %lu ecretees]\n",
+        printf("  [nb-agc] tick=%u gain=%d ref=%.0f -> amplitude %d [%lu NB, gain %d..%d, %lu clipped]\n",
                tick, g, ref, (int)a, n, g_min, g_max, n_ecrete);
     return (int)a;
 }
@@ -1987,13 +1987,13 @@ static int pm_servir(int nwin)
         static unsigned long n, n_sans_garde, n_hors;
         n++; if (k_rec < 0) n_sans_garde++; if (!sur_cell) n_hors++;
         if (n <= 40 || n % 500 == 0)
-            printf("  [pm] tick=%u nwin=%d garde=%s (fn %u, %d ticks) faux-air=%d cellule=%d -> %s "
-                   "[%lu servies, %lu sans garde, %lu hors cellule]\n",
-                   g_tick_courant, nwin, k_rec >= 0 ? "oui" : "non",
+            printf("  [pm] tick=%u nwin=%d kept=%s (fn %u, %d ticks) fake-air=%d cell=%d -> %s "
+                   "[%lu served, %lu not kept, %lu off cell]\n",
+                   g_tick_courant, nwin, k_rec >= 0 ? "yes" : "no",
                    k_rec >= 0 ? g_nb_garde[k_rec].fn : 0u,
                    k_rec >= 0 ? (int)(g_tick_courant - g_nb_garde[k_rec].tick) : -1,
                    faux_air_arfcn(g_tick_courant, 5000), faux_air_cellule(),
-                   src == iq ? "burst" : "remplissage", n, n_sans_garde, n_hors);
+                   src == iq ? "burst" : "filler", n, n_sans_garde, n_hors);
     }
     calypso_rif_flush();
     calypso_bsp_rx_burst(0, g_depot_fn, src, 2 * (nwin > 148 ? 148 : nwin));
@@ -2018,7 +2018,7 @@ static void dma_trace(const char *ou)
     int armee = calypso_rhea_dma_rx_armed(), os = calypso_rhea_dma_one_shot(), len = calypso_rhea_dma_get_len_words() / 2;
     if (armee == armee_p && os == os_p && len == len_p) return;
     armee_p = armee; os_p = os; len_p = len; n++;
-    printf("  [dma] tick=%u %s : armee=%d one_shot=%d fenetre=%d rif=%d\n", g_tick_courant, ou, armee, os, len, calypso_rif_level());
+    printf("  [dma] tick=%u %s: armed=%d one_shot=%d window=%d rif=%d\n", g_tick_courant, ou, armee, os, len, calypso_rif_level());
 }
 void calypso_bsp_dma_trace(const char *ou) { dma_trace(ou); }
 /* trace of the armings and deposits in TI dedicated mode (calypso_rhea_dma.c [dma-arm], rx_burst [dma-dep]) */
@@ -2030,7 +2030,7 @@ int calypso_bsp_dma_trace_on(void)
 }
 unsigned long calypso_bsp_routeur_bilan(char *buf, size_t n)
 {
-    snprintf(buf, n, " (routeur : %lu NB relivres, %lu expires, %lu mesures servies)", g_nb_relivres, g_nb_expires, g_pm_servies);
+    snprintf(buf, n, " (router: %lu NB redelivered, %lu expired, %lu measurements served)", g_nb_relivres, g_nb_expires, g_pm_servies);
     return g_nb_relivres;
 }
 int calypso_bsp_nb_retenter(void)
@@ -2068,7 +2068,7 @@ int calypso_bsp_nb_retenter(void)
         int ng = 0; for (int k = 0; k < NB_GARDE_N; k++) ng += g_nb_garde[k].valide;
         if (ng && (n_et < 300 || g_tick_courant - t_et > 500)) {
             n_et++; t_et = g_tick_courant;
-            printf("  [nb-etat] tick=%u armee=%d one_shot=%d nwin=%d garde=%d genre=%d tn=%d\n", g_tick_courant,
+            printf("  [nb-etat] tick=%u armed=%d one_shot=%d nwin=%d kept=%d kind=%d tn=%d\n", g_tick_courant,
                    (int)calypso_rhea_dma_rx_armed(), (int)calypso_rhea_dma_one_shot(),
                    calypso_rhea_dma_get_len_words() / 2, ng, (int)g_dedie_genre, g_dedie_tn);
         }
@@ -2108,7 +2108,7 @@ int calypso_bsp_nb_retenter(void)
     g_nb_garde[k_min].valide = 0;
     g_nb_relivres++;
     if (g_nb_relivres <= 40 || g_nb_relivres % 500 == 0)
-        printf("  [nbwin] NB fn=%u p51=%u RELIVRE au tick %u (depose au tick %u) : fenetre=%d [%lu relivres, %lu expires, %lu mesures servies]\n",
+        printf("  [nbwin] NB fn=%u p51=%u REDELIVERED at tick %u (deposited at tick %u): window=%d [%lu redelivered, %lu expired, %lu measurements served]\n",
                g_nb_garde[k_min].fn, g_nb_garde[k_min].fn % 51u, g_tick_courant, g_nb_garde[k_min].tick, nwin,
                g_nb_relivres, g_nb_expires, g_pm_servies);
     return 1;
@@ -2140,7 +2140,7 @@ static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
         else if (avance) { tot++; tard = 0; }
         else if (bon) {
             tard = tot = 0;
-            if (!g_bcch_verrou) printf("  [bcch] tick=%u bloc BCCH dans ses fenetres (2..5) : offset %lld verrouille\n",
+            if (!g_bcch_verrou) printf("  [bcch] tick=%u BCCH block in its windows (2..5): offset %lld locked\n",
                                        tick, (long long)g_ts0_offset);
             g_bcch_verrou = 1;
         }
@@ -2148,15 +2148,15 @@ static void bsp_bcch_calage(uint32_t tick, unsigned p, bool nb)
             int d = tard >= 2 ? -1 : +1;
             g_ts0_offset = (g_ts0_offset + d + BSP_FN_MAX) % BSP_FN_MAX;
             if (g_off_mobile != INT64_MIN) g_off_mobile += d;   /* [2026-10-22 14:20] le datage des RACH suit */
-            printf("  [bcch] tick=%u fenetres NB sur p51 %s : offset %+d -> %lld\n",
-                   tick, d < 0 ? "3..6 (flux en avance)" : "1..4 (flux en retard)", d, (long long)g_ts0_offset);
+            printf("  [bcch] tick=%u NB windows on p51 %s: offset %+d -> %lld\n",
+                   tick, d < 0 ? "3..6 (stream early)" : "1..4 (stream late)", d, (long long)g_ts0_offset);
             tard = tot = 0;
         }
         memset(arme, 0, sizeof arme);
     }
     if (g_bcch_verrou && (uint32_t)(tick - g_bcch_vu_tick) > 160u) {
         g_bcch_verrou = 0;
-        printf("  [bcch] tick=%u plus de lecture BCCH depuis %u trames : offset deverrouille\n", tick, tick - g_bcch_vu_tick);
+        printf("  [bcch] tick=%u no BCCH read for %u frames: offset unlocked\n", tick, tick - g_bcch_vu_tick);
     }
 }
 /* THE SAME ALIGNMENT ON THE CCCH BLOCKS (paging). In idle mode the L1 hardly re-reads the BCCH:
@@ -2184,7 +2184,7 @@ static void bsp_ccch_calage(uint32_t tick, unsigned p, bool nb)
             if (d_n >= 2) {
                 g_ts0_offset = (g_ts0_offset - d + BSP_FN_MAX) % BSP_FN_MAX;
                 if (g_off_mobile != INT64_MIN) g_off_mobile -= d;   /* le datage des RACH suit */
-                printf("  [ccch] tick=%u fenetres NB sur p51 %d.. au lieu de %d.. : offset %+d -> %lld\n",
+                printf("  [ccch] tick=%u NB windows on p51 %d.. instead of %d..: offset %+d -> %lld\n",
                        tick, debut, debut - d, -d, (long long)g_ts0_offset);
                 d_n = 0; d_prec = 99;
             }
@@ -2225,8 +2225,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                      * the BSP traces and makes the bench lose real time; this
                      * one is already capped (40, then 1 in 200) and serves to
                      * judge the SACCH of the SDCCH/8. */
-                    printf("  [BSP] dedie : DESACCORD fn=%u p51=%u p102=%u : table=%d "
-                            "tpu=%d (offset=%d ref=%d, tn_fenetre=%d) [%lu fois]\n",
+                    printf("  [BSP] dedicated: MISMATCH fn=%u p51=%u p102=%u: table=%d "
+                            "tpu=%d (offset=%d ref=%d, tn_window=%d) [%lu times]\n",
                             g_ts0[i].fn, g_ts0[i].fn % 51u, g_ts0[i].fn % 102u,
                             (int)a_nous, (int)selon_tpu, g_bsp_tpu_offset,
                             g_tpu_ref, bsp_fenetre_tn(), n);
@@ -2248,7 +2248,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                 if (d) { uns = 0; for (int k = 0; k < 148; k++) uns += (d[k] & 1); }
                 printf("  [sacch_tf] tick=%u fn=%u fn%%104=%u TS%d burst=%s uns=%d one_shot=%d nwin=%d\n",
                        tick_fn, g_ts0[i].fn, g_ts0[i].fn % 104u, g_dedie_tn,
-                       d ? "oui" : "NON", uns, (int)calypso_rhea_dma_one_shot(),
+                       d ? "yes" : "NO", uns, (int)calypso_rhea_dma_one_shot(),
                        calypso_rhea_dma_one_shot() ? calypso_rhea_dma_get_len_words() / 2 : 0);
             }
             /* The bits themselves, to decode the SACCH outside the DSP (A5 +
@@ -2308,7 +2308,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
                  * whether the BTS really emits the SDCCH. */
                 int uns = 0;
                 for (int k = 0; k < 148; k++) uns += (d[k] & 1);
-                BSP_LOG("dedie : TS%d joue (fn=%u p51=%u uns=%d, %lu fois)",
+                BSP_LOG("dedicated: TS%d played (fn=%u p51=%u uns=%d, %lu times)",
                         g_dedie_tn, g_ts0[i].fn, g_ts0[i].fn % 51u, uns, g_dedie_joues);
             }
         } else if (a_nous) {
@@ -2316,8 +2316,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
              * arrived: the block will be incomplete and fail the Fire code. */
             g_dedie_manques++;
             if (g_dedie_manques <= 40 || g_dedie_manques % 1000 == 0) {
-                BSP_LOG("dedie : TS%d MANQUANT pour fn=%u p51=%u (%lu fois) - "
-                        "le bloc partira incomplet",
+                BSP_LOG("dedicated: TS%d MISSING for fn=%u p51=%u (%lu times) - "
+                        "the block will go out incomplete",
                         g_dedie_tn, g_ts0[i].fn, g_ts0[i].fn % 51u, g_dedie_manques);
             }
         }
@@ -2348,7 +2348,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         static unsigned n_hors, n_dans;
         if (hors_freq) n_hors++; else if (a >= 0) n_dans++;
         if (hors_freq && (n_hors <= 20 || n_hors % 5000 == 0))
-            printf("  [faux-air] tick=%u fn=%u fenetre=%d accorde sur %d : bruit [%u hors, %u sur la cellule]\n",
+            printf("  [faux-air] tick=%u fn=%u window=%d tuned to %d: noise [%u off, %u on the cell]\n",
                    tick_fn, g_ts0[i].fn, nwin, a, n_hors, n_dans);
         if (hors_freq) sb = fcch = 0;
     }
@@ -2365,14 +2365,14 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     /* An SCH is memorised here (g_dernier_sch); if the SB window only arms
      * after this deposit, calypso_bsp_sb_retenter() will deliver it there. */
-    const char *sb_action = "cadree comme un burst normal";
+    const char *sb_action = "framed like a normal burst";
     if (sb && sb_fenetre_on()) {
         g_dernier_sch.fn = g_ts0[i].fn; g_dernier_sch.tick = tick_fn;
         memcpy(g_dernier_sch.bits, bits, 148);
         g_dernier_sch.livre_sb = (one_shot && nwin >= 190);
         g_dernier_sch.valide = 1;
-        if (!armee) sb_action = "DMA NON ARMEE (le RIF jette) : SCH memorise pour la fenetre SB";
-        else if (!(one_shot && nwin >= 190)) sb_action = "autre fenetre (PM/NB/continue) : SCH memorise pour la fenetre SB";
+        if (!armee) sb_action = "DMA NOT ARMED (the RIF drops): SCH stored for the SB window";
+        else if (!(one_shot && nwin >= 190)) sb_action = "other window (PM/NB/continuous): SCH stored for the SB window";
     }
     /* TRX mode: the uplink NB burst played here is memorised; at phase A of the next frame,
      * calypso_bsp_trx_ul_prothese() writes its exact bits into the result page of the extcode
@@ -2382,7 +2382,7 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     }
     /* TI dedicated mode (routing, see calypso_bsp_nb_retenter): the NB is not armed at the deposit ->
      * the burst goes into the keep ring, and an armed measurement window receives filler instead */
-    dma_trace("depot");
+    dma_trace("deposit");
     bool devie = false;
     /* NEVER IN CONTINUOUS DMA (FB search). An NB of the FB search sent to the ring without delivering
      * anything (neither TS0 nor the seven filler timeslots) would make the ROM count only the FCCH/SCH
@@ -2416,11 +2416,11 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
         static unsigned n_sb, n_sb_fenetre;
         n_sb++;
         if (one_shot && nwin >= 190) n_sb_fenetre++;
-        if (one_shot && nwin >= 190) sb_action = "FENETRE SB (one-shot)";
+        if (one_shot && nwin >= 190) sb_action = "SB WINDOW (one-shot)";
         /* All the SCHs of the first 200, then 1 in 10: it must be visible on
          * every resync. */
         if (n_sb <= 200 || n_sb % 10 == 0 || (int32_t)(g_sb_trace_jusqua - tick_fn) > 0) {
-            printf("  [sbwin] SB #%u fn=%u p51=%u tick=%u : armee=%d one_shot=%d page_prog=%d rif_avant=%d nwin=%d marge=%d -> %s (dans une vraie fenetre SB : %u/%u)\n",
+            printf("  [sbwin] SB #%u fn=%u p51=%u tick=%u: armed=%d one_shot=%d page_prog=%d rif_before=%d nwin=%d margin=%d -> %s (in a real SB window: %u/%u)\n",
                    n_sb, g_ts0[i].fn, g_ts0[i].fn % 51u, tick_fn, (int)armee, (int)one_shot, page_prog, rif_avant, nwin, marge,
                    sb_action, n_sb_fenetre, n_sb);
         }
@@ -2428,8 +2428,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
     if (sb && one_shot && nwin >= 190) {
         int64_t off = (int64_t)g_ts0[i].fn - (int64_t)tick_fn - sb_fin_trame();
         if (!g_off_rac_vu) g_off_mobile = (int64_t)g_ts0[i].fn - (int64_t)tick_fn;   /* [2026-10-22] voir sb_retenter */
-        if (off != g_ts0_offset) printf("  [ts0] SB fn=%u livree au tick %u dans une fenetre SB : offset ARM-tick = %lld%s\n",
-                                        g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (premier calage)" : " (recalage)");
+        if (off != g_ts0_offset) printf("  [ts0] SB fn=%u delivered at tick %u in an SB window: ARM-tick offset = %lld%s\n",
+                                        g_ts0[i].fn, tick_fn, (long long)off, g_ts0_offset == INT64_MIN ? " (first alignment)" : " (realignment)");
         if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
     }
     /* One line per delivered frame: the window alignment probe (nwin > 0 is
@@ -2458,10 +2458,10 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
       { static unsigned nbcch;
         const unsigned p = g_ts0[i].fn % 51u;
         if (p >= 2 && p <= 5 && nbcch < 400) { trace = true; nbcch++; } }
-      if (trace) printf("  [ts0] tick=%u fn=%u p51=%u %s fenetre=%d marge=%d rif_avant=%d%s\n",
+      if (trace) printf("  [ts0] tick=%u fn=%u p51=%u %s window=%d margin=%d rif_before=%d%s\n",
                         tick_fn, g_ts0[i].fn, g_ts0[i].fn % 51u,
                         sb ? "SB" : fcch ? "FCCH" : "NB", nwin, marge, calypso_rif_level(),
-                        trame_dediee ? (burst_dedie ? "  <- canal dedie" : "  <- canal dedie, BURST MANQUANT") : ""); }
+                        trame_dediee ? (burst_dedie ? "  <- dedicated channel" : "  <- dedicated channel, BURST MISSING") : ""); }
     g_ts0[i].joue = 1;
     if (devie) return;                       /* garde / remplissage faits ci-dessus */
     calypso_bsp_rx_burst(0, g_ts0[i].fn, iq, 2 * total);
@@ -2502,8 +2502,8 @@ static void bsp_ts0_livrer(uint32_t tick_fn, unsigned i)
             g_autres_joues++;
         }
         if ((g_autres_joues % 5000) == 1) {
-            BSP_LOG("trame complete : %lu bursts hors TS0 stockes, %lu joues "
-                    "(le bourrage a zero ne sert plus que pour les manquants)",
+            BSP_LOG("full frame: %lu non-TS0 bursts stored, %lu played "
+                    "(zero padding is now only used for the missing ones)",
                     g_autres_stockes, g_autres_joues);
         }
     }
@@ -2586,7 +2586,7 @@ static int sb_double_on(void)
      * calls then end in "LOS during dedicated mode" with a downlink TCH that
      * degrades progressively (a_dd err, FIRE). CALYPSO_BSP_SB_DOUBLE=1 enables. */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_SB_DOUBLE"); on = (e && *e == '1') ? 1 : 0;
-                  if (on) BSP_LOG("SB_DOUBLE on : le SCH suivant est aussi livre (forme D) dans la fenetre de la tentative 1"); }
+                  if (on) BSP_LOG("SB_DOUBLE on: the next SCH is also delivered (form D) in the window of attempt 1"); }
     return on;
 }
 /* a_sch[0..4] of R page pg: words (0x50|0x78 + 0x1E)/2 of the API RAM (calypso_api.h) */
@@ -2619,7 +2619,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
             const char *dd = calypso_getenv("CALYPSO_BSP_TRX_DELTA"); int delta = (dd && *dd) ? atoi(dd) : -3;
             int64_t off = ((int64_t)atoi(e) + delta) % (int64_t)BSP_FN_MAX; if (off < 0) off += BSP_FN_MAX;
             g_ts0_offset = off; g_trx_cale = 1;
-            printf("  [ts0] mode TRX : offset fn-tick FIXE %lld (CALYPSO_BSP_TRX_OFFSET=%s, delta %d)\n", (long long)off, e, delta);
+            printf("  [ts0] TRX mode: FIXED fn-tick offset %lld (CALYPSO_BSP_TRX_OFFSET=%s, delta %d)\n", (long long)off, e, delta);
         }
     }
     if (!g_ts0 || !g_ts0_any) return;
@@ -2632,12 +2632,12 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 if (off < 0) off += BSP_FN_MAX;
                 g_sc.ok++; if (!g_trx_cale && !g_bcch_verrou) g_ts0_offset = off;
                 if (g_sc.ok <= 300 || g_sc.ok % 50 == 0)
-                    printf("  [sbwin] SECONDE CHANCE : SB fn=%u DECODE a la tentative 1 (tick %u), offset ARM-tick recale [%u/%u]\n",
+                    printf("  [sbwin] SECOND CHANCE: SB fn=%u DECODED at attempt 1 (tick %u), ARM-tick offset realigned [%u/%u]\n",
                            g_sc.fn_sch, g_sc.tick, g_sc.ok, g_sc.n);
             } else {
                 g_sc.ko++;
                 if (g_sc.ko <= 300 || g_sc.ko % 50 == 0)
-                    printf("  [sbwin] SECONDE CHANCE : SB fn=%u rate a la tentative 1, SCH natif en tentative 2 [%u/%u]\n",
+                    printf("  [sbwin] SECOND CHANCE: SB fn=%u missed at attempt 1, native SCH at attempt 2 [%u/%u]\n",
                            g_sc.fn_sch, g_sc.ok, g_sc.n);
             }
         }
@@ -2671,7 +2671,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 g_ts0_offset = (g_ts0_offset + saut) % (int64_t)BSP_FN_MAX;
                 g_bcch_verrou = 0;
                 w = ((int64_t)tick_fn + g_ts0_offset) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX;
-                printf("  [ts0] RATTRAPAGE : %d trames de retard sur le BTS (derniere recue fn=%u) -> offset %+lld, livre fn=%lld\n",
+                printf("  [ts0] CATCH-UP: %d frames behind the BTS (last received fn=%u) -> offset %+lld, delivers fn=%lld\n",
                        retard, g_ts0_fn_max, (long long)saut, (long long)w);
             }
         }
@@ -2682,7 +2682,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
         {
             static int decal = -999;
             if (decal == -999) { const char *e = calypso_getenv("CALYPSO_BSP_DEDIE_DECAL"); decal = (e && *e) ? atoi(e) : 0;
-                                 if (decal) printf("  [ts0] decalage en dedie TI : %+d trame(s)\n", decal); }
+                                 if (decal) printf("  [ts0] TI dedicated shift: %+d frame(s)\n", decal); }
             if (decal && g_dedie_ti) { w = (w + decal) % (int64_t)BSP_FN_MAX; if (w < 0) w += BSP_FN_MAX; }
         }
         /* TCH ONLY: CALYPSO_BSP_TCH_DECAL=<n> frames on the BCCH alignment. On SDCCH the DSP's A5 falls
@@ -2721,7 +2721,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 int64_t wm = ((int64_t)tick_fn + g_off_mobile + (g_off_rac_vu ? dec : 0)) % (int64_t)BSP_FN_MAX; if (wm < 0) wm += BSP_FN_MAX;
                 static unsigned n_dm;
                 if (wm != w && (n_dm++ < 20 || n_dm % 2000 == 0))
-                    printf("  [dedie-a5fn] tick=%u trame BCCH %lld -> trame du mobile %lld (%+lld) [%u]\n", tick_fn,
+                    printf("  [dedie-a5fn] tick=%u BCCH frame %lld -> mobile frame %lld (%+lld) [%u]\n", tick_fn,
                            (long long)w, (long long)wm, (long long)(wm - w), n_dm);
                 w = wm;
             }
@@ -2741,7 +2741,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
             if (g_ts0[j].valid && g_ts0[j].fn == fn1 && bsp_ts0_est_sb(g_ts0[j].bits)) {
                 static unsigned n_avance;
                 if (++n_avance <= 20 || n_avance % 500 == 0)
-                    printf("  [sbwin] SB_FIN_TRAME (verrou) : fenetre SB au tick %u (trame %u) -> SCH fn=%u [%u]\n",
+                    printf("  [sbwin] SB_FIN_TRAME (lock): SB window at tick %u (frame %u) -> SCH fn=%u [%u]\n",
                            tick_fn, (uint32_t)w, fn1, n_avance);
                 bsp_ts0_livrer(tick_fn, j);
                 g_dernier_sch.valide = 0;
@@ -2769,7 +2769,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 g_ts0[i].joue = 1;                    /* the FCCH frame is not played: the window was for the SB */
                 g_sc.actif = 1; g_sc.fn_sch = g_ts0[j].fn; g_sc.tick = tick_fn; g_sc.n++;
                 if (g_sc.n <= 300 || g_sc.n % 50 == 0)
-                    printf("  [sbwin] SECONDE CHANCE : trame FCCH fn=%u au tick %u, fenetre SB armee -> SCH fn=%u livre (forme D)\n",
+                    printf("  [sbwin] SECOND CHANCE: FCCH frame fn=%u at tick %u, SB window armed -> SCH fn=%u delivered (form D)\n",
                            (uint32_t)w, tick_fn, g_ts0[j].fn);
                 return;
             }
@@ -2800,7 +2800,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
             static int recale = -1;
             if (recale < 0) { const char *e = calypso_getenv("CALYPSO_BSP_RECALE");
                               recale = (e && *e == '1') ? 1 : 0;   /* OFF by default: see above */
-                              if (recale) BSP_LOG("recalage actif : le flux TS0 reste contigu quand le BTS prend du retard"); }
+                              if (recale) BSP_LOG("realignment active: the TS0 stream stays contiguous when the BTS falls behind"); }
             if (recale) {
                 unsigned j = g_ts0_fn_max % BSP_TS0_RING;
                 if (g_ts0[j].valid && g_ts0[j].fn == g_ts0_fn_max) {
@@ -2810,7 +2810,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
                     g_ts0_recales++;
                     g_ts0_recul_total += recul;
                     if (g_ts0_recales <= 20 || g_ts0_recales % 200 == 0) {
-                        printf("  [ts0] recalage %lu : le BTS avait %lld trames de retard (fn=%u -> %u), flux garde contigu\n",
+                        printf("  [ts0] realignment %lu: the BTS was %lld frames behind (fn=%u -> %u), stream kept contiguous\n",
                                g_ts0_recales, (long long)recul, (uint32_t)w, g_ts0_fn_max);
                     }
                     bsp_ts0_livrer(tick_fn, j);
@@ -2824,17 +2824,17 @@ static void bsp_ts0_service(uint32_t tick_fn)
              * g_dedie_manques, which is only touched in bsp_ts0_livrer(). */
             g_dedie_perdues++;
             if (g_dedie_perdues <= 40 || g_dedie_perdues % 200 == 0) {
-                BSP_LOG("canal dedie (TS%d) : trame fn=%u perdue, aucun burst du BTS (perdues=%lu, joues=%lu)",
+                BSP_LOG("dedicated channel (TS%d): frame fn=%u lost, no burst from the BTS (lost=%lu, played=%lu)",
                         g_dedie_tn, (uint32_t)w, g_dedie_perdues, g_dedie_joues);
             }
             bsp_dedie_etat(NULL);
         }
         if (manques_log++ < 10 || manques % 200 == 0) {
             int32_t devant = (int32_t)((uint32_t)w - g_ts0_fn_max);
-            printf("  [ts0] tick=%u : pas de burst BTS pour fn=%u (manques=%u/%u) ; derniere trame recue fn=%u, soit %+d : %s\n",
+            printf("  [ts0] tick=%u: no BTS burst for fn=%u (misses=%u/%u); last frame received fn=%u, i.e. %+d: %s\n",
                    tick_fn, (uint32_t)w, manques, tick_fn, g_ts0_fn_max, devant,
-                   devant > 0 ? "le DSP COURT DEVANT le BTS (avance insuffisante)"
-                              : "le burst a existe puis a disparu (autre cause)");
+                   devant > 0 ? "the DSP RUNS AHEAD of the BTS (lead too small)"
+                              : "the burst existed then vanished (other cause)");
         }
         /* A MISSING FRAME MUST BE AN ERASURE, NOT THE PREVIOUS FRAME REPLAYED.
          *
@@ -2863,7 +2863,7 @@ static void bsp_ts0_service(uint32_t tick_fn)
             if (silence < 0) {
                 const char *e = calypso_getenv("CALYPSO_BSP_SILENCE");
                 silence = (e && *e == '0') ? 0 : 1;
-                if (silence) BSP_LOG("effacement actif : une trame sans burst depose des echantillons nuls");
+                if (silence) BSP_LOG("erasure active: a frame without a burst deposits zero samples");
             }
             if (silence) {
                 static int16_t vide[2 * 256];
@@ -2887,8 +2887,8 @@ static void bsp_ts0_service(uint32_t tick_fn)
                 }
                 g_ts0_silences++;
                 if (g_ts0_silences <= 20 || g_ts0_silences % 500 == 0) {
-                    printf("  [ts0] silence %lu : fn=%u sans burst, effacement depose "
-                           "(au lieu de relire la page du tick precedent)\n",
+                    printf("  [ts0] silence %lu: fn=%u without burst, erasure deposited "
+                           "(instead of rereading the previous tick's page)\n",
                            g_ts0_silences, (uint32_t)w);
                 }
             }
@@ -2944,7 +2944,7 @@ static void bsp_trxd_readable(void *opaque)
             prev_h = h;
             if (n_tot <= 20 || (n_tot % 500) == 0)
                 fprintf(stderr, "[bsp] FEED-FP IN  #%llu fp=%08x nz=%u/%lld "
-                        "identiques=%llu/%llu\n",
+                        "identical=%llu/%llu\n",
                         n_tot, h, nz, (long long)(n - 8), n_same, n_tot);
         }
     }
@@ -3060,7 +3060,7 @@ static void bsp_trxd_readable(void *opaque)
              * calypso_bsp_service() stops as soon as it does not. */
             bsp.bursts_seen++;
             { static unsigned long n_hors; if (n_hors++ == 0 || n_hors % 20000 == 0)
-                  BSP_LOG("STREAM : %lu bursts hors TS0 ignores (la trame est assemblee par bsp_ts0_livrer)", n_hors); }
+                  BSP_LOG("STREAM: %lu non-TS0 bursts ignored (the frame is assembled by bsp_ts0_livrer)", n_hors); }
             return;
         }
     }
@@ -3144,7 +3144,7 @@ static void bsp_trxd_readable(void *opaque)
         /* Passthrough is the DEFAULT: cos/sin synthesis yields an incoherent
          * tone. Opt out explicitly with CALYPSO_BSP_IQ_PASSTHROUGH=0. */
         iq_pt_mode = (e && *e == '0') ? 0 : 1;
-        BSP_LOG("IQ_PASSTHROUGH=%d (defaut ON ; synthese=opt-out =0)", iq_pt_mode);
+        BSP_LOG("IQ_PASSTHROUGH=%d (default ON; synthesis=opt-out =0)", iq_pt_mode);
     }
     int iq_bytes = (int)n - 8;  /* payload bytes after 8-byte hdr */
     /* The bridge sends 2 int16 per bit (I,Q interleaved) = 4 bytes/bit, so
@@ -3195,8 +3195,8 @@ static void bsp_trxd_readable(void *opaque)
                 win = (e && *e) ? atoi(e) : 148;
                 if (win > BSP_IQ_MAX_I16 / 2) win = BSP_IQ_MAX_I16 / 2;
                 if (win != 148)
-                    BSP_LOG("RX_WINDOW=%d echantillons (passthrough) — "
-                            "prolongement par extrapolation de phase, SYNTHETIQUE",
+                    BSP_LOG("RX_WINDOW=%d samples (passthrough) — "
+                            "extended by phase extrapolation, SYNTHETIC",
                             win);
             }
             if (win > nbits && iq_count >= 4) {
@@ -3318,9 +3318,9 @@ static void bsp_trxd_readable(void *opaque)
                 if (win < nbits) win = nbits;               /* never truncate */
                 if (win > BSP_IQ_MAX_I16 / 2) win = BSP_IQ_MAX_I16 / 2;
                 if (win != 148)
-                    fprintf(stderr, "[bsp] RX_WINDOW = %d echantillons "
-                            "(burst=%d + %d de garde SYNTHETIQUE) — "
-                            "NB en demande 150, SB 190\n",
+                    fprintf(stderr, "[bsp] RX_WINDOW = %d samples "
+                            "(burst=%d + %d SYNTHETIC guard) — "
+                            "NB asks for 150, SB 190\n",
                             win, nbits, win - nbits);
             }
             for (int g = nbits; g < win && iq_count + 1 < BSP_IQ_MAX_I16; g++) {
@@ -3351,8 +3351,8 @@ static void bsp_trxd_readable(void *opaque)
          * measured TOA 5, and must not be touched. */
         int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
         { static unsigned n; if (n++ < 40 || (n % 500) == 0)
-            printf("  [cadre] nwin=%d marge=%d biais=%d iq=%d %s\n",
-                   nwin, marge, g_toa_bias, iq_count, nwin >= 190 ? "(fenetre SB)" : "(NB)"); }
+            printf("  [cadre] nwin=%d margin=%d bias=%d iq=%d %s\n",
+                   nwin, marge, g_toa_bias, iq_count, nwin >= 190 ? "(SB window)" : "(NB)"); }
         if (nwin >= 190) {
             marge += g_toa_bias;
             if (marge < 0)  marge = 0;
@@ -3365,7 +3365,7 @@ static void bsp_trxd_readable(void *opaque)
             int n = iq_count < 2 * 148 ? iq_count : 2 * 148;   /* the burst alone, guard dropped */
             memset(cadre, 0, sizeof cadre);
             memcpy(cadre + 2 * marge, iq, (size_t)n * sizeof(int16_t));
-            { static unsigned nl; if (nl++ < 24 || nl % 5000 == 0) printf("  [livre] fn=%u p51=%u fenetre=%d marge=%d\n", fn, fn % 51u, nwin, marge); }
+            { static unsigned nl; if (nl++ < 24 || nl % 5000 == 0) printf("  [livre] fn=%u p51=%u window=%d margin=%d\n", fn, fn % 51u, nwin, marge); }
             calypso_bsp_rx_burst(tn, fn, cadre, 2 * total);
             return;
         }
@@ -3411,10 +3411,10 @@ void calypso_bsp_toa_feedback(int toa)
     static int en = -1;
     if (en < 0) {
         const char *e = calypso_getenv("CALYPSO_BSP_TOA_LOCK"); en = (e && *e=='1') ? 1 : 0;
-        if (en) BSP_LOG("TOA_LOCK on : verrouillage natif du TOA sur 23 (biais placement)");
+        if (en) BSP_LOG("TOA_LOCK on: native TOA lock on 23 (placement bias)");
     }
     { static unsigned n; if (n++ < 40 || (n % 500) == 0)
-        printf("  [toaloop] appel n=%u en=%d toa=%d biais=%d\n", n, en, toa, g_toa_bias); }
+        printf("  [toaloop] call n=%u en=%d toa=%d bias=%d\n", n, en, toa, g_toa_bias); }
     if (!en || toa <= 0) return;
     int within = toa % 156;              /* intra-frame position (ntdma removed) */
     int err = within - 23;               /* target: 23 */
@@ -3477,7 +3477,7 @@ static void bsp_livrer_trame(uint32_t fn)
                 memcpy(iq + 2 * marge, sl->iq, (size_t)n * sizeof(int16_t));
                 calypso_bsp_rx_burst(0, fn, iq, 2 * total);
                 bsp.bursts_written++;
-                { static unsigned nl; if (nl++ < 40 || nl % 2000 == 0) printf("  [livre] fn=%u p51=%u one_shot=1 nwin=%d marge=%d n=%d total=%d\n", fn, fn % 51u, nwin, marge, n / 2, total); }
+                { static unsigned nl; if (nl++ < 40 || nl % 2000 == 0) printf("  [livre] fn=%u p51=%u one_shot=1 nwin=%d margin=%d n=%d total=%d\n", fn, fn % 51u, nwin, marge, n / 2, total); }
             }
         } else if (sl) {
             int n = sl->n < 296 ? sl->n : 296;
@@ -3499,7 +3499,7 @@ static void bsp_livrer_trame(uint32_t fn)
             } else
                 calypso_bsp_rx_burst((uint8_t)tn, fn, sl->iq, n);
             bsp.bursts_written++;
-            { static unsigned nl; if (tn == 0 && (nl++ < 40 || nl % 2000 == 0)) printf("  [livre] fn=%u p51=%u one_shot=0 nwin=%d marge=%d n=%d\n", fn, fn % 51u, nwin, marge, n / 2); }
+            { static unsigned nl; if (tn == 0 && (nl++ < 40 || nl % 2000 == 0)) printf("  [livre] fn=%u p51=%u one_shot=0 nwin=%d margin=%d n=%d\n", fn, fn % 51u, nwin, marge, n / 2); }
         } else {
             calypso_bsp_rx_burst((uint8_t)tn, fn, (const int16_t *)g_remplissage, 2 * 148);
         }
@@ -3511,7 +3511,7 @@ static void bsp_livrer_trame(uint32_t fn)
             BspBurstSlot *s2 = &bsp.q[tn].slot[i];
             if (s2->valid && bsp_fn_delta(s2->fn, fn) < 0) { s2->valid = false; bsp.bursts_dropped_stale++; }
         }
-    { static unsigned nl; if (nl++ < 3) BSP_LOG("STREAM trame fn=%u livree (%s)", fn, one_shot ? "fenetre SB, TS0 + marges" : "8 TS, 1250 symboles"); }
+    { static unsigned nl; if (nl++ < 3) BSP_LOG("STREAM frame fn=%u delivered (%s)", fn, one_shot ? "SB window, TS0 + margins" : "8 TS, 1250 symbols"); }
 }
 
 /* WAIT FOR THE LATE FRAME RATHER THAN HOLE IT.
@@ -3539,7 +3539,7 @@ static void bsp_attendre_trame(uint32_t tick_fn)
         const char *e = calypso_getenv("CALYPSO_BSP_ATTENTE_MS");
         max_ms = e ? atoi(e) : 0;
         if (max_ms > 0) {
-            printf("  [ts0] attente des trames en retard de la BTS : jusqu'a %d ms\n", max_ms);
+            printf("  [ts0] waiting for late BTS frames: up to %d ms\n", max_ms);
         }
     }
     /* TRX mode (g_trx_cale): the uplink bursts are RARE (RACH, then 4 bursts per SDCCH block);
@@ -3586,9 +3586,9 @@ static void bsp_attendre_trame(uint32_t tick_fn)
     total_ms += ms;
     if (servie) servies++; else echues++;
     if (attentes <= 10 || attentes % 1000 == 0) {
-        printf("  [ts0] attente %lu : fn=%u (%+d devant la BTS) %s en %.1f ms "
-               "(servies=%lu echues=%lu, %.0f ms au total)\n",
-               attentes, (uint32_t)w, devant, servie ? "arrivee" : "ECHUE", ms,
+        printf("  [ts0] wait %lu: fn=%u (%+d ahead of the BTS) %s in %.1f ms "
+               "(served=%lu expired=%lu, %.0f ms in total)\n",
+               attentes, (uint32_t)w, devant, servie ? "arrived" : "EXPIRED", ms,
                servies, echues, total_ms);
     }
 }
@@ -3612,7 +3612,7 @@ int calypso_bsp_service(uint32_t current_fn)
      * synchronisation. */
     static int stream = -1;
     if (stream < 0) { const char *e = calypso_getenv("CALYPSO_BSP_STREAM"); stream = (e && *e=='1') ? 1 : 0;
-                      if (stream) BSP_LOG("STREAM on : 1 burst TS0/trame en ordre FN (cohérence horloge)"); }
+                      if (stream) BSP_LOG("STREAM on: 1 TS0 burst/frame in FN order (clock coherence)"); }
     if (stream) {
         /* [2026-09-21] FN-keyed TS0 store (bsp_ts0_service): arrival order
          * until an SB fixes the ARM/tick offset, then the burst of the ARM's
@@ -4012,7 +4012,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         g_air_dpm = bsp_apm_de_mav((double)acc / n_int16 * g_air_k_der, faux_air_gain(g_tick_courant, 5000));
     }
     if (calypso_bsp_dma_trace_on())
-        printf("  [dma-dep] tick=%u insn=%u fn=%u tn=%u n=%d armee=%d one_shot=%d fenetre=%d\n", g_tick_courant,
+        printf("  [dma-dep] tick=%u insn=%u fn=%u tn=%u n=%d armed=%d one_shot=%d window=%d\n", g_tick_courant,
                bsp.dsp->insn_count, (unsigned)fn, (unsigned)tn, n_int16 / 2, (int)calypso_rhea_dma_rx_armed(),
                (int)calypso_rhea_dma_one_shot(), calypso_rhea_dma_get_len_words() / 2);
     if (calypso_rhea_dma_one_shot() && calypso_rhea_dma_get_len_words() / 2 > 0 &&
@@ -4052,7 +4052,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
             uint16_t aad = calypso_rhea_dma_get_daram();
             if (aad && aad != bsp.daram_addr) {
                 static uint16_t prev; static unsigned nl;
-                if (aad != prev && nl < 8) { BSP_LOG("AAD_FOLLOW : depot du burst en 0x%04x (etait 0x%04x)", aad, bsp.daram_addr); prev = aad; nl++; }
+                if (aad != prev && nl < 8) { BSP_LOG("AAD_FOLLOW: burst deposited at 0x%04x (was 0x%04x)", aad, bsp.daram_addr); prev = aad; nl++; }
                 bsp.daram_addr = aad;
             }
             /* AND THE LENGTH. bsp.daram_len was hardcoded to 296, which
@@ -4069,8 +4069,8 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                 if (lw && lw != bsp.daram_len && lw <= 2048) {
                     static uint16_t prevl; static unsigned nll;
                     if (lw != prevl && nll < 8) {
-                        BSP_LOG("LEN_FOLLOW : fenetre de %u mots (etait %u) — "
-                                "296 tronquait la SB qui en demande 380", lw, bsp.daram_len);
+                        BSP_LOG("LEN_FOLLOW: window of %u words (was %u) — "
+                                "296 truncated the SB, which needs 380", lw, bsp.daram_len);
                         prevl = lw; nll++;
                     }
                     bsp.daram_len = lw;
@@ -4117,8 +4117,8 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
                 if (cible != bsp.daram_addr) {
                     static unsigned nl;
                     if (nl < 8) {
-                        BSP_LOG("PAGE_FOLLOW : w_page=%d -> depot en 0x%04x "
-                                "(AAD disait 0x%04x, base 0x%04x, pas %+ld)",
+                        BSP_LOG("PAGE_FOLLOW: w_page=%d -> deposit at 0x%04x "
+                                "(AAD said 0x%04x, base 0x%04x, step %+ld)",
                                 (int)(pg & 1), cible, bsp.daram_addr, base0, stride);
                         nl++;
                     }
@@ -4160,7 +4160,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
         if (coh > 0.85) {
             static int fcp = 0;
             if (fcp++ < 30)
-                fprintf(stderr, "[BSP] FCCH-PROBE fn=%u ns=%d coh=%.3f dphi=%.3f (vise +1.571 @1SPS)\n",
+                fprintf(stderr, "[BSP] FCCH-PROBE fn=%u ns=%d coh=%.3f dphi=%.3f (target +1.571 @1SPS)\n",
                         (unsigned)fn, ns, coh, dphi);
         }
     }
@@ -4231,7 +4231,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
       uint16_t _mdf = c54x_task_md(bsp.dsp);
       int _fbsbf = (_mdf == 5 || _mdf == 6 || _mdf == 8 || _mdf == 9);
       if (_fbf && _fbsbf && bsp.dsp) {
-          { static unsigned _n; if (_n++ == 0) fprintf(stderr, "[bequille] RX_FBFLAGS ACTIF\n"); }
+          { static unsigned _n; if (_n++ == 0) fprintf(stderr, "[bequille] RX_FBFLAGS ACTIVE\n"); }
           bsp.dsp->data[0x3fad] |= 0x8000;   /* master kernel gate  @0x8754 */
           calypso_rxfb_fired = 1;   /* arms the 0x8753 probe on the c54x side */
           bsp.dsp->data[0x3faa] |= 0x0104;   /* bit2+bit8           @0x886b/85/98 */
@@ -4253,7 +4253,7 @@ void calypso_bsp_rx_burst(uint8_t tn, uint32_t fn,
            */
           { static int _pt = -1; if (_pt < 0) { const char *_pe = calypso_getenv("CALYPSO_POKE_TASK_MD"); _pt = _pe ? (atoi(_pe) > 0) : 1; }  /* default ON, =0 to disable */
             if (_pt) { static unsigned _n;
-                       if (_n++ == 0) fprintf(stderr, "[bequille] POKE_TASK_MD ACTIF (ecrit d_task_md=%u pages 0/1)\n", _mdf);
+                       if (_n++ == 0) fprintf(stderr, "[bequille] POKE_TASK_MD ACTIVE (writes d_task_md=%u pages 0/1)\n", _mdf);
                        bsp.dsp->data[0x0804] = _mdf;   /* task_md page0 = mission (5=FB 6=SB) */
                        bsp.dsp->data[0x0818] = _mdf; } /* task_md page1 */ }
           /* POKE_DISPATCH replicates osmocom dsp_end_scenario (dsp.c:480):
@@ -4709,8 +4709,8 @@ void calypso_bsp_deliver_buffered(uint32_t current_fn)
                 bsp.dsp->data[0x3fae] |= 0x0100;   /* bit8 (confirmed gate) */
                 static unsigned _fbfn = 0;
                 if (_fbfn++ < 8)
-                    BSP_LOG("RX-FBFLAGS: pose 0x3faa|=0x104 0x3fab|=0x100 0x3fae|=0x100 "
-                            "(handshake FB-det depuis livraison burst)");
+                    BSP_LOG("RX-FBFLAGS: sets 0x3faa|=0x104 0x3fab|=0x100 0x3fae|=0x100 "
+                            "(FB-det handshake from burst delivery)");
             }
         }
 

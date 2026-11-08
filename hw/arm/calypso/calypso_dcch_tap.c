@@ -57,7 +57,7 @@ static struct {
 
 static void pdtch_journal(const char *pourquoi)
 {
-    fprintf(stderr, "[pdtch] %s : dl donnees=%u autre_tfi=%u crc_ko=%u ptcch=%u | ul_cnf=%u | ber moyen crc_ko=%.1f%%\n",
+    fprintf(stderr, "[pdtch] %s: dl data=%u other_tfi=%u crc_ko=%u ptcch=%u | ul_cnf=%u | mean ber crc_ko=%.1f%%\n",
             pourquoi, pdtch.donnees, pdtch.autre_tfi, pdtch.crc_ko, pdtch.ptcch, pdtch.ul_cnf,
             pdtch.crc_ko ? (double)pdtch.ber_ko / pdtch.crc_ko / 100.0 : 0.0);
 }
@@ -122,16 +122,16 @@ static void dcch_cfg_publier(int kind, int ss, uint8_t chan_nr)
         calypso_trx_dcch(kind, ss, chan_nr & 0x07);
     }
     if (kind == DCCH_PDCH) {
-        fprintf(stderr, "[dcch] canal dedie arme : chan_nr=0x%02x PDCH TN=%d (GPRS)\n", chan_nr, chan_nr & 7);
+        fprintf(stderr, "[dcch] dedicated channel armed: chan_nr=0x%02x PDCH TN=%d (GPRS)\n", chan_nr, chan_nr & 7);
         return;
     }
     if (kind == DCCH_TCH_F || kind == DCCH_TCH_H) {
-        fprintf(stderr, "[dcch] canal dedie arme : chan_nr=0x%02x TCH/%c SS=%d TN=%d\n",
+        fprintf(stderr, "[dcch] dedicated channel armed: chan_nr=0x%02x TCH/%c SS=%d TN=%d\n",
                 chan_nr, kind == DCCH_TCH_F ? 'F' : 'H', ss, chan_nr & 7);
         return;
     }
-    fprintf(stderr, "[dcch] canal dedie %s : chan_nr=0x%02x SDCCH/%d SS=%d TN=%d\n",
-            kind == DCCH_RELEASED ? "libere" : "arme", chan_nr,
+    fprintf(stderr, "[dcch] dedicated channel %s: chan_nr=0x%02x SDCCH/%d SS=%d TN=%d\n",
+            kind == DCCH_RELEASED ? "released" : "armed", chan_nr,
             kind == 1 ? 8 : 4, ss, chan_nr & 7);
 }
 
@@ -166,20 +166,20 @@ static void trame_complete(void)
                 pdtch.crc_ko++;
                 pdtch.ber_ko += ((unsigned)charge[12] << 8) | charge[13];
                 if (pdtch.crc_ko <= 5)
-                    fprintf(stderr, "[pdtch] bloc DL fn=%u TN=%d perdu (CRC faux, ber %u.%02u%%)\n", bfn, tn,
+                    fprintf(stderr, "[pdtch] DL block fn=%u TN=%d lost (bad CRC, ber %u.%02u%%)\n", bfn, tn,
                             (((unsigned)charge[12] << 8) | charge[13]) / 100,
                             (((unsigned)charge[12] << 8) | charge[13]) % 100);
             }
             unsigned total = pdtch.donnees + pdtch.autre_tfi + pdtch.crc_ko + pdtch.ptcch;
             if (total % 100 == 0)
-                pdtch_journal("releve");
+                pdtch_journal("report");
         }
         tap.fn_dedie = ldl_be_p(charge + 4);
         tap.fn_dedie_vue = true;
         if (chan_nr != tap.dernier_chan_nr) {
             tap.dernier_chan_nr = chan_nr;
             dcch_cfg_publier(DCCH_PDCH, 0, chan_nr);
-            pdtch_journal("PDCH arme");
+            pdtch_journal("PDCH armed");
         }
         return;
     }

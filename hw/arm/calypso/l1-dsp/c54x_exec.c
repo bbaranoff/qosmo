@@ -96,7 +96,7 @@ static void norm_tc(C54xState *s, int bit39, int bit38)
     if (garder < 0) {
         const char *e = calypso_getenv("CALYPSO_NORM_TC");
         garder = !(e && *e == '0');
-        if (!garder) fprintf(stderr, "[c54x] NORM ne touche plus TC (CALYPSO_NORM_TC=0)\n");
+        if (!garder) fprintf(stderr, "[c54x] NORM no longer touches TC (CALYPSO_NORM_TC=0)\n");
     }
     if (!garder) return;
     if (bit39 != bit38) s->st0 |= ST0_TC;
@@ -502,8 +502,8 @@ bool calypso_fix_enabled(const char *name)
         snprintf(buf, sizeof(buf), "%s", e ? e : "");
         init = 1;
         if (buf[0])
-            fprintf(stderr, "[c54x] CALYPSO_FIXES=%s (sas temporaire — effacer le gate "
-                            "de chaque correctif confirme)\n", buf);
+            fprintf(stderr, "[c54x] CALYPSO_FIXES=%s (temporary airlock — remove the gate "
+                            "of each confirmed fix)\n", buf);
     }
     if (!buf[0]) return false;
     if (strcmp(buf, "all") == 0) return true;
@@ -550,7 +550,7 @@ int c54x_exec_one(C54xState *s)
         unsigned *n = (s->pc == 0xf0d0) ? &n_e : &n_m;
         if ((*n)++ < 3) {
             extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
-            printf("  [fft-dp] pc=0x%04x DP=0x%03x (attendu 0x070) ST1=%04x SP=%04x pile=%04x %04x %04x %04x %04x %04x "
+            printf("  [fft-dp] pc=0x%04x DP=0x%03x (expected 0x070) ST1=%04x SP=%04x stack=%04x %04x %04x %04x %04x %04x "
                    "IMR=%04x IFR=%04x insn=%u\n", s->pc, s->st0 & 0x1ff, s->st1, s->sp,
                    s->data[s->sp], s->data[(uint16_t)(s->sp + 1)], s->data[(uint16_t)(s->sp + 2)],
                    s->data[(uint16_t)(s->sp + 3)], s->data[(uint16_t)(s->sp + 4)], s->data[(uint16_t)(s->sp + 5)],
@@ -662,7 +662,7 @@ int c54x_exec_one(C54xState *s)
         !(s->last_exec_pc >= 0xee00 && s->last_exec_pc < 0xef00)) {
         static unsigned dr = 0;
         if (dr < 12) {
-            fprintf(stderr, "[c54x] DERAIL-EE00 #%u entré PC=0x%04x DEPUIS last_pc=0x%04x op_src=0x%04x XPC=%u op@pc=0x%04x SP=0x%04x insn=%u\n",
+            fprintf(stderr, "[c54x] DERAIL-EE00 #%u entered PC=0x%04x FROM last_pc=0x%04x op_src=0x%04x XPC=%u op@pc=0x%04x SP=0x%04x insn=%u\n",
                     dr, s->pc, s->last_exec_pc, prog_fetch(s, s->last_exec_pc),
                     s->xpc & 0xFF, op, s->sp, s->insn_count);
             dr++;
@@ -707,7 +707,7 @@ int c54x_exec_one(C54xState *s)
                 uint16_t was = pg ? a_prev1 : a_prev0, now = pg ? a_now1 : a_now0;
                 if (now != was && (now & 0x8000)) {   /* BLUD=1: a RESULT */
                     fprintf(stderr, "[c54x] A_SCH-RESULTAT page=%d %04x -> %04x "
-                            "par PC=0x%04x op=0x%04x A=%lld B=%lld T=%04x "
+                            "by PC=0x%04x op=0x%04x A=%lld B=%lld T=%04x "
                             "AR1=%04x AR2=%04x AR3=%04x AR4=%04x insn=%u\n",
                             pg, was, now, s->last_exec_pc,
                             prog_fetch(s, s->last_exec_pc),
@@ -794,7 +794,7 @@ int c54x_exec_one(C54xState *s)
                     prog_fetch(s,0xa4de), prog_fetch(s,0xa4df), prog_fetch(s,0xa4e0), prog_fetch(s,0xa4e1),
                     prog_fetch(s,0xa4e2), prog_fetch(s,0xa4e3), prog_fetch(s,0xa4e4), prog_fetch(s,0xa4e5),
                     s->data[0x3f6d]);
-            fprintf(stderr, "[c54x] SOFTVEC data[0x3f6a]=0x%04x (CALA cible) 0x3f6b=0x%04x 0x3f6c=0x%04x "
+            fprintf(stderr, "[c54x] SOFTVEC data[0x3f6a]=0x%04x (CALA target) 0x3f6b=0x%04x 0x3f6c=0x%04x "
                     "0x3f6d=0x%04x  (0xa671=OK, 0x71f4=RECURSE)\n",
                     s->data[0x3f6a], s->data[0x3f6b], s->data[0x3f6c], s->data[0x3f6d]);
             fprintf(stderr, "[c54x] PROM0-src[0x7138..]= %04x %04x %04x %04x %04x %04x %04x %04x\n",
@@ -1030,11 +1030,11 @@ int c54x_exec_one(C54xState *s)
                     en += (long)v * v;
                 }
                 unsigned fn = calypso_daram_last_fn;
-                fprintf(stderr, "[c54x] SBFN-PROBE #%u fn=%u p51=%u %s depots_depuis_SB=%u "
-                        "iq=[%d..%d] energie=%ld insn=%u\n",
+                fprintf(stderr, "[c54x] SBFN-PROBE #%u fn=%u p51=%u %s deposits_since_SB=%u "
+                        "iq=[%d..%d] energy=%ld insn=%u\n",
                         n, fn, fn % 51,
                         ((fn % 51) % 10 == 1 && (fn % 51) <= 41) ? "SCH" :
-                        ((fn % 51) % 10 == 0 && (fn % 51) <= 40) ? "FCCH" : "AUTRE",
+                        ((fn % 51) % 10 == 0 && (fn % 51) <= 40) ? "FCCH" : "OTHER",
                         calypso_daram_wr_count - prevwr, mn, mx, en, s->insn_count);
                 prevwr = calypso_daram_wr_count;
             }
@@ -1075,8 +1075,8 @@ int c54x_exec_one(C54xState *s)
                  * division. */
                 static unsigned n_s = 0;
                 if (n_s++ < 60)
-                    fprintf(stderr, "[c54x] SUBC-PROBE DIVIDENDE@0x%04x A=0x%010llx "
-                            "op=0x%04x ST1=0x%04x diviseur=0x%04x insn=%u\n",
+                    fprintf(stderr, "[c54x] SUBC-PROBE DIVIDEND@0x%04x A=0x%010llx "
+                            "op=0x%04x ST1=0x%04x divisor=0x%04x insn=%u\n",
                             s->pc, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
                             prog_fetch(s, s->pc), s->st1,
                             s->data[(uint16_t)(((s->st0 & 0x1FF) << 7) | 0x0B)],
@@ -1087,7 +1087,7 @@ int c54x_exec_one(C54xState *s)
                     uint16_t divis = s->data[(uint16_t)((dp << 7) | 0x0B)];
                     uint16_t prev  = s->data[(uint16_t)((dp << 7) | 0x0A)];
                     fprintf(stderr, "[c54x] SUBC-PROBE QUOTIENT #%u A=0x%010llx "
-                            "bas16=0x%04x diviseur[DP:0x0b]=0x%04x ancien[0x0a]=0x%04x "
+                            "low16=0x%04x divisor[DP:0x0b]=0x%04x old[0x0a]=0x%04x "
                             "T=0x%04x DP=0x%03x insn=%u\n",
                             n_q, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
                             (unsigned)(s->a & 0xFFFF), divis, prev, s->t, dp,
@@ -1127,8 +1127,8 @@ int c54x_exec_one(C54xState *s)
                 if (n_g++ < 20) {
                     long som = 0;
                     for (int k = 0; k < 14; k++) som += (int16_t)s->data[(uint16_t)(0x2cce + k)];
-                    fprintf(stderr, "[c54x] MVDD-PROBE GARDE@0x7ccd A=0x%010llx "
-                            "(saute-la-copie si A!=0) somme_blocs=%ld AR0=0x%04x insn=%u\n",
+                    fprintf(stderr, "[c54x] MVDD-PROBE GUARD@0x7ccd A=0x%010llx "
+                            "(skips-the-copy if A!=0) block_sum=%ld AR0=0x%04x insn=%u\n",
                             (unsigned long long)(s->a & 0xFFFFFFFFFFULL), som,
                             s->ar[0], s->insn_count);
                 }
@@ -1196,7 +1196,7 @@ int c54x_exec_one(C54xState *s)
                 g_last_intr_vec, (unsigned long long)d_intr,
                 g_last_intr_fg_pc, g_last_intr_fg_dp, s->insn_count);
             if (lut != 0xff72) {   /* bad dispatcher: dump the ST0 push/pop ring */
-                fprintf(stderr, "[c54x] ST0-RING@dispBAD DP=0x%03x SP=0x%04x (anciens→récents) :",
+                fprintf(stderr, "[c54x] ST0-RING@dispBAD DP=0x%03x SP=0x%04x (oldest→newest):",
                         (unsigned)(s->st0 & 0x1FF), s->sp);
                 unsigned rn = g_st0_ring_idx < ST0_RING_N ? g_st0_ring_idx : ST0_RING_N;
                 for (unsigned i = 0; i < rn; i++) {
@@ -1899,8 +1899,8 @@ int c54x_exec_one(C54xState *s)
                 bool hors_rom = tgt < 0x7000;
                 if (hors_rom || (s->insn_count > 3000000 && n_lt < 40)) {
                     n_lt++;
-                    printf("  [liste-tache] entree data[0x%04x]=0x%04x%s liste=0x%04x base=? 3fba=%u 4364=%u 4365=%u 3fab=%04x insn=%u\n",
-                           ent, tgt, hors_rom ? " HORS ROM" : "", s->data[0x4356], s->data[0x3fba],
+                    printf("  [liste-tache] entry data[0x%04x]=0x%04x%s list=0x%04x base=? 3fba=%u 4364=%u 4365=%u 3fab=%04x insn=%u\n",
+                           ent, tgt, hors_rom ? " OUTSIDE ROM" : "", s->data[0x4356], s->data[0x3fba],
                            s->data[0x4364], s->data[0x4365], s->data[0x3fab], s->insn_count);
                     /* first call outside the ROM: base 0xde57 + state 4 -> list = 0xbc5a; where the base comes from */
                     static unsigned n_hr;
@@ -1921,7 +1921,7 @@ int c54x_exec_one(C54xState *s)
                     static unsigned n_gl;
                     uint16_t sortie = s->prog[0xbc33];
                     if (n_gl++ < 40 || n_gl % 1000 == 0)
-                        printf("  [garde-liste] entree 0x%04x hors ROM (3fba=%u) : fin de liste -> 0x%04x insn=%u [%u]\n",
+                        printf("  [garde-liste] entry 0x%04x outside ROM (3fba=%u): end of list -> 0x%04x insn=%u [%u]\n",
                                tgt, s->data[0x3fba], sortie, s->insn_count, n_gl);
                     s->pc = sortie;
                     return 0;
@@ -1931,7 +1931,7 @@ int c54x_exec_one(C54xState *s)
                 static unsigned n_soi;
                 if (n_soi++ == 0) {
                     extern void c54x_anneau_vider_stdout(const char *etiquette, unsigned n_max);
-                    printf("  [bacc-soi] BACC sur soi-meme pc=0x%04x xpc=%u A=%010llx B=%010llx SP=0x%04x pile=%04x %04x %04x %04x insn=%u\n",
+                    printf("  [bacc-soi] BACC onto itself pc=0x%04x xpc=%u A=%010llx B=%010llx SP=0x%04x stack=%04x %04x %04x %04x insn=%u\n",
                            src_pc, s->xpc, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
                            (unsigned long long)(s->b & 0xFFFFFFFFFFULL), s->sp, s->data[s->sp],
                            s->data[(uint16_t)(s->sp + 1)], s->data[(uint16_t)(s->sp + 2)],
@@ -1953,7 +1953,7 @@ int c54x_exec_one(C54xState *s)
                   if (_cf < 0) _cf = calypso_gate("CALYPSO_CALA_FB", 0);
                   if (_cf && _cfn < 40) { _cfn++;
                       fprintf(stderr, "[c54x] CALA-FB tgt=0x%04x md0804=%u md0818=%u md058a=%u "
-                              "(0x7700=routine resultat FB, 0xab38=?, 0x8d00=corr symbole) "
+                              "(0x7700=FB result routine, 0xab38=?, 0x8d00=symbol corr) "
                               "A=0x%06llx insn=%u\n", tgt, (unsigned)s->data[0x0804],
                               (unsigned)s->data[0x0818], (unsigned)s->data[0x058a],
                               (unsigned long long)(s->a & 0xFFFFFFULL), s->insn_count); } }
@@ -2013,7 +2013,7 @@ int c54x_exec_one(C54xState *s)
                      * A push (delta<0) with no matching pop is the leak.
                      * The ring is only fed under C54X_SONDES. */
                     if (C54X_SONDES) {
-                    fprintf(stderr, "[c54x]     SP-EVENTS net_words=%lld pushes=%llu pops=%llu (récents, anciens→récents):\n[c54x]    ",
+                    fprintf(stderr, "[c54x]     SP-EVENTS net_words=%lld pushes=%llu pops=%llu (recent, oldest→newest):\n[c54x]    ",
                             (long long)g_sp_ledger.net_words,
                             (unsigned long long)g_sp_ledger.sp_pushes,
                             (unsigned long long)g_sp_ledger.sp_pops);
@@ -2154,8 +2154,8 @@ int c54x_exec_one(C54xState *s)
             if (_rp2 < 0) {
                 _rp2 = calypso_gate("CALYPSO_RETE_POP2", 0);
                 if (_rp2)
-                    fprintf(stderr, "[c54x] RETE_POP2=1 : depilement de 2 mots "
-                            "inconditionnel, symetrique du push d'entree\n");
+                    fprintf(stderr, "[c54x] RETE_POP2=1: pop of 2 words, "
+                            "unconditional, symmetric to the entry push\n");
             }
             uint16_t top = data_read(s, s->sp);
             if (_rp2) {
@@ -2208,15 +2208,15 @@ int c54x_exec_one(C54xState *s)
                         _ra_log++;
                         long long ecart = (long long)_ra_vec -
                                           (long long)g_sp_ledger.irq_entries;
-                        fprintf(stderr, "[c54x] RETE-AUDIT total=%llu dont_vecteurs=%llu "
-                                "irq_entries=%llu ecart_vect=%+lld net_words=%lld "
+                        fprintf(stderr, "[c54x] RETE-AUDIT total=%llu of_which_vectors=%llu "
+                                "irq_entries=%llu vect_diff=%+lld net_words=%lld "
                                 "insn=%u%s\n",
                                 (unsigned long long)_ra_n,
                                 (unsigned long long)_ra_vec,
                                 (unsigned long long)g_sp_ledger.irq_entries,
                                 ecart, (long long)g_sp_ledger.net_words,
                                 s->insn_count,
-                                ecart > 0 ? "  <== RETOURS D'IT SANS ENTREE" : "");
+                                ecart > 0 ? "  <== IRQ RETURNS WITHOUT ENTRY" : "");
                     }
                 }
             }
@@ -2468,8 +2468,8 @@ int c54x_exec_one(C54xState *s)
                         if (old_tc) tc_in++;
                         if (n <= 40 || (n % 5000) == 0)
                             fprintf(stderr, "[c54x] ROLTC-WATCH #%llu pc=0x%04x "
-                                    "%c avant=0x%010llx old_tc=%d -> apres=0x%010llx "
-                                    "new_tc=%d | cumul: acc_non_nul=%llu/%llu "
+                                    "%c before=0x%010llx old_tc=%d -> after=0x%010llx "
+                                    "new_tc=%d | total: acc_nonzero=%llu/%llu "
                                     "tc_entrant=%llu\n",
                                     n, s->pc, src ? 'B' : 'A',
                                     (unsigned long long)(v & 0xFFFFFFFFFFULL), old_tc,
@@ -2763,7 +2763,7 @@ int c54x_exec_one(C54xState *s)
                 data_write(s, s->sp, (uint16_t)(s->pc + 1));
                 uint16_t iptr = (s->pmst >> PMST_IPTR_SHIFT) & 0x1FF;
                 s->pc = (iptr * 0x80) + k * 4;
-                C54_LOG("TRAP-FIRED #%d → PC=0x%04x (from PC=0x%04x) [XPC non sauve : corruption vs RETE pop-2 si fire]", k, s->pc,
+                C54_LOG("TRAP-FIRED #%d → PC=0x%04x (from PC=0x%04x) [XPC not saved: corruption vs RETE pop-2 if fired]", k, s->pc,
                         (uint16_t)(s->pc - (iptr * 0x80 + k * 4) + 1 - 1));
                 return 0;
             }
@@ -3140,7 +3140,7 @@ int c54x_exec_one(C54xState *s)
                          * periodically. */
                         static unsigned long chg = 0;
                         if (++chg == 1 || (chg % 20000) == 0)
-                            fprintf(stderr, "[c54x] FIX_LK_SHFT ACTIF #%lu "
+                            fprintf(stderr, "[c54x] FIX_LK_SHFT ACTIVE #%lu "
                                     "pc=0x%04x op=0x%04x subop=%d shift %d -> %d insn=%u\n",
                                     chg, s->pc, op, subop,
                                     shift_raw - 16, shift_raw, s->insn_count);
@@ -4014,7 +4014,7 @@ int c54x_exec_one(C54xState *s)
                     static uint64_t reted_count;
                     reted_count++;
                     if (reted_count <= 20 || (reted_count % 100) == 0)
-                        C54_LOG("RETED-FIRED #%llu PC=0x%04x -> ra=0x%04x SP=0x%04x INTM=0 [XPC non poppe : si fire post-XPC-fix = reopener drain, fix en pending-XPC]",
+                        C54_LOG("RETED-FIRED #%llu PC=0x%04x -> ra=0x%04x SP=0x%04x INTM=0 [XPC not popped: if fired post-XPC-fix = reopener drain, fix in pending-XPC]",
                                 (unsigned long long)reted_count,
                                 s->pc, ra, s->sp);
                 }
@@ -4321,7 +4321,7 @@ int c54x_exec_one(C54xState *s)
                     if (bkw2_n < 40) {
                         fprintf(stderr, "[c54x] BK-WR (F7Cx LD#k) 0x%04x→0x%04x PC=0x%04x "
                                 "%s insn=%u\n", s->bk, k, s->pc,
-                                (k == 0) ? "<<< BK=0 (casse circular!)" : "", s->insn_count);
+                                (k == 0) ? "<<< BK=0 (breaks circular!)" : "", s->insn_count);
                         bkw2_n++;
                     }
                 }
@@ -4761,9 +4761,9 @@ int c54x_exec_one(C54xState *s)
                         if (_fc < 0) {
                             _fc = calypso_gate("CALYPSO_FIRS_COEF", 0);
                             fprintf(stderr, "[c54x] FIRS-COEF %s : dump prog[pmad..+5] "
-                                    "ET data[pmad..+5] a chaque FIRS (pmad attendu 0x0061, "
-                                    "sous la fenetre OVLY qui debute a 0x0080)\n",
-                                    _fc ? "ACTIVE" : "INACTIVE (defaut)");
+                                    "AND data[pmad..+5] at each FIRS (pmad expected 0x0061, "
+                                    "below the OVLY window starting at 0x0080)\n",
+                                    _fc ? "ACTIVE" : "INACTIVE (default)");
                         }
                         if (_fc) {
                             static unsigned _fcn = 0;
@@ -4831,9 +4831,9 @@ int c54x_exec_one(C54xState *s)
                                 }
                                 fprintf(stderr, "[c54x] FIRS-COEF #%u PC=0x%04x pmad=0x%04x "
                                         "OVLY=%d | AR2=0x%04x(*=0x%04x) AR3=0x%04x AR5=0x%04x"
-                                        " | prog[]=%s (utiles=%d) | data[]=%s (utiles=%d)"
-                                        " | SOURCE data[0x2CB9..]=%s (utiles=%d)"
-                                        " | BURST 0x2a00 : %d/304 non nuls, energie=%lu,"
+                                        " | prog[]=%s (useful=%d) | data[]=%s (useful=%d)"
+                                        " | SOURCE data[0x2CB9..]=%s (useful=%d)"
+                                        " | BURST 0x2a00: %d/304 nonzero, energy=%lu,"
                                         " *AR2=0x%04x *AR3=0x%04x"
                                         " | CORR A(0x2c56) distinct=%d/50 [%d..%d]"
                                         " B(0x2c88) distinct=%d/50 [%d..%d]"
@@ -4843,9 +4843,9 @@ int c54x_exec_one(C54xState *s)
                                         pb, nzp, db, nzd, sb2, nzs,
                                         nzb, eb, s->data[s->ar[2]], s->data[s->ar[3]],
                                         dstA, (int)mnA, (int)mxA, dstB, (int)mnB, (int)mxB,
-                                        nzd ? "SCRATCH-PAD (etendre OVLY a 0x60)"
-                                            : (nzp ? "PROGRAMME (MVDP a depose)"
-                                                   : "TABLE INTROUVABLE dans les deux espaces"),
+                                        nzd ? "SCRATCH-PAD (extend OVLY to 0x60)"
+                                            : (nzp ? "PROGRAM (MVDP deposited)"
+                                                   : "TABLE NOT FOUND in either space"),
                                         s->insn_count);
                             }
                         }
@@ -4959,7 +4959,7 @@ int c54x_exec_one(C54xState *s)
                 }
                 if (_e0_n < 40) {
                     _e0_n++;
-                    C54_LOG("E0-FAM non implemente op=0x%04x (%s) PC=0x%04x "
+                    C54_LOG("E0-FAM not implemented op=0x%04x (%s) PC=0x%04x "
                             "consumed=%d insn=%u", op,
                             hi8 == 0xE0 ? "FIRS" : hi8 == 0xE1 ? "LMS" :
                             hi8 == 0xE2 ? "SQDST" : "ABDST",

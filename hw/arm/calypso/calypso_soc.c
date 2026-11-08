@@ -131,12 +131,12 @@ static void wdt_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
         int64_t t = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         if (t - t0 > 2000) { t0 = t; n = 0; }
         if (++n > 3) {
-            fprintf(stderr, "[wdt] chien de garde : resets en boucle -> reset complet de la machine\n");
+            fprintf(stderr, "[wdt] watchdog: reset loop -> full machine reset\n");
             n = 0; t0 = t;
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return;
         }
-        fprintf(stderr, "[wdt] chien de garde : 0x80F5 -> reset de l'ARM\n");
+        fprintf(stderr, "[wdt] watchdog: 0x80F5 -> ARM reset\n");
         cpu_reset(first_cpu);   /* ARM CPU reset: back to the reset vector, boot restarts */
     }
 }

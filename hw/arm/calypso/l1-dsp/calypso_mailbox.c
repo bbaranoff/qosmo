@@ -211,7 +211,7 @@ void calypso_mbx_init(void)
     }
     g_f = fopen(e, "w");
     if (!g_f) {
-        fprintf(stderr, "[mbx] ouverture impossible : %s — moniteur INACTIF\n", e);
+        fprintf(stderr, "[mbx] cannot open: %s — monitor INACTIVE\n", e);
         calypso_mbx_actif = 0;
         return;
     }
@@ -227,40 +227,40 @@ void calypso_mbx_init(void)
     g_dvu  = calloc(0x10000, sizeof(*g_dvu));
     g_dsens = calloc(0x10000, sizeof(*g_dsens));
     if (!g_dval || !g_dctx || !g_drep || !g_dvu || !g_dsens) {
-        fprintf(stderr, "[mbx] allocation impossible — moniteur INACTIF\n");
+        fprintf(stderr, "[mbx] cannot allocate — monitor INACTIVE\n");
         calypso_mbx_actif = 0;
         return;
     }
 
     fprintf(g_f,
-        "# moniteur mailbox ARM<->DSP — un evenement par ligne, format stable\n"
-        "# sens : ARM>WR (commande)  ARM<RD (resultat)  DSP>WR (resultat)  DSP<RD (commande)\n"
+        "# ARM<->DSP mailbox monitor — one event per line, stable format\n"
+        "# dir: ARM>WR (command)  ARM<RD (result)  DSP>WR (result)  DSP<RD (command)\n"
         "# %-10s %-8s %-6s %-6s %-14s %s\n",
-        "insn", "fn", "sens", "mot", "nom", "valeur");
+        "insn", "fn", "dir", "word", "name", "value");
     fflush(g_f);
 
-    fprintf(stderr, "[mbx] moniteur mailbox ACTIF -> %s "
-            "(ecr=%d lec=%d cellules_sup=%d only=%d max=%lu)\n",
+    fprintf(stderr, "[mbx] mailbox monitor ACTIVE -> %s "
+            "(wr=%d rd=%d extra_cells=%d only=%d max=%lu)\n",
             e, g_ecr, g_lec, g_ncells, g_only, g_max);
 
     /* Announce what is ACTUALLY covered: without this there is no telling
      * "the cell never moved" from "the cell was never watched". */
     {
         int i;
-        fprintf(stderr, "[mailbox] couverture : %s",
-                g_only ? "SEULEMENT les cellules et plages listees"
-                       : "fenetre API 0x0800-0x0FFF");
+        fprintf(stderr, "[mailbox] coverage: %s",
+                g_only ? "ONLY the listed cells and ranges"
+                       : "API window 0x0800-0x0FFF");
         for (i = 0; i < g_ncells; i++) {
             fprintf(stderr, " + 0x%04x", g_cells[i]);
         }
         for (i = 0; i < g_nranges; i++) {
-            fprintf(stderr, " + [0x%04x-0x%04x, %u mots]",
+            fprintf(stderr, " + [0x%04x-0x%04x, %u words]",
                     g_ranges[i].lo, g_ranges[i].hi,
                     (unsigned)(g_ranges[i].hi - g_ranges[i].lo + 1));
         }
-        fprintf(stderr, " | sens : %s%s | garde-fou : %lu ligne(s)%s\n",
-                g_ecr ? "ecritures " : "", g_lec ? "lectures" : "",
-                g_max, g_max ? "" : " (illimite)");
+        fprintf(stderr, " | dir: %s%s | limit: %lu line(s)%s\n",
+                g_ecr ? "writes " : "", g_lec ? "reads" : "",
+                g_max, g_max ? "" : " (unlimited)");
     }
     calypso_mbx_actif = 1;
 }
@@ -309,8 +309,8 @@ void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val,
     if (g_max && g_n >= g_max) {
         if (g_n == g_max) {
             g_n++;
-            fprintf(g_f, "# PLAFOND %lu lignes atteint — trace interrompue. "
-                         "CALYPSO_MAILBOX_MAX=0 pour l'enlever.\n", g_max);
+            fprintf(g_f, "# CAP of %lu lines reached — trace stopped. "
+                         "CALYPSO_MAILBOX_MAX=0 to remove it.\n", g_max);
             fflush(g_f);
         }
         return;

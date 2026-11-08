@@ -56,7 +56,7 @@ void calypso_fbsb_on_dsp_task_change(CalypsoFbsb *s, uint16_t d_task_md,
         if (key != l_key) {
             if (rep)
                 fprintf(stderr, "[calypso-fbsb] on_dsp_task_change × %llu "
-                        "(identique, non repete)\n", rep);
+                        "(identical, not repeated)\n", rep);
             l_key = key; rep = 0;
             fprintf(stderr, "[calypso-fbsb] on_dsp_task_change task=%u fn=%lu state=%d\n",
                     d_task_md, (unsigned long)fn, s ? (int)s->state : -1);

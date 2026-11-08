@@ -73,9 +73,9 @@ static void __attribute__((noinline, cold))
 sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_courante)
 {
     fprintf(stderr, "[c54x] SP-CORRUPT-DUMP insn=%u exec_pc=0x%04x SP 0x%04x -> 0x%04x | "
-            "IT prise dans l'instruction courante : %s | IT prises au total=%u, "
-            "derniere vec=%d a insn=%llu (fg_pc=0x%04x)\n",
-            s->insn_count, exec_pc, sp_avant, s->sp, it_courante ? "OUI" : "non",
+            "IRQ taken in the current instruction: %s | IRQs taken in total=%u, "
+            "last vec=%d at insn=%llu (fg_pc=0x%04x)\n",
+            s->insn_count, exec_pc, sp_avant, s->sp, it_courante ? "YES" : "no",
             g_c54x_it_prises, g_last_intr_vec,
             (unsigned long long)g_last_intr_insn, g_last_intr_fg_pc);
     fprintf(stderr, "[c54x] SP-CORRUPT-DUMP AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x "
@@ -94,7 +94,7 @@ sp_corrupt_vidage(C54xState *s, uint16_t exec_pc, uint16_t sp_avant, int it_cour
                 "xpc=%u sp=%04x->%04x ar2=%04x ar5=%04x rpt=%u/%u intm=%u it=%u(n=%u)%s\n",
                 k, e->insn, e->pc, e->op, e->xpc, e->sp, e->sp_apres, e->ar2, e->ar5,
                 e->rpt, e->rpt_count, e->intm, e->it, e->it_n,
-                (e->sp_apres != e->sp) ? "  <== SP change ici" : "");
+                (e->sp_apres != e->sp) ? "  <== SP changes here" : "");
     }
 }
 
@@ -399,7 +399,7 @@ static void sp_ring_check_bootstub_entry(C54xState *s,
         "[c54x]   → %s\n",
         sp_in_valid_stack, sp_in_buffer_area, (popped == 0),
         sp_in_valid_stack && popped == 0
-            ? "RETURN SLOT OVERWRITTEN (sauvage write near SP), audit ailleurs"
+            ? "RETURN SLOT OVERWRITTEN (wild write near SP), audit elsewhere"
             : sp_in_buffer_area
             ? "SP IN NON-STACK BUFFER (likely 0xfd2a family), audit fd28-fd2a"
             : "INCONCLUSIVE — inspect ring + state above");
@@ -416,7 +416,7 @@ static void sp_hist_dump(const char *trig, unsigned insn_now, uint16_t sp_now)
         g_sp_dec_total_events, g_sp_dec_used);
 
     /* Top-K by dec_count (trickle leak). */
-    if (calypso_debug_enabled("SP-HIST")) fprintf(stderr, "[c54x] SP-HIST TOP BY COUNT (corrupteur trickle):\n");
+    if (calypso_debug_enabled("SP-HIST")) fprintf(stderr, "[c54x] SP-HIST TOP BY COUNT (trickle corrupter):\n");
     for (unsigned k = 0; k < 20 && k < g_sp_dec_used; k++) {
         unsigned best = k;
         for (unsigned i = k + 1; i < g_sp_dec_used; i++) {
@@ -436,7 +436,7 @@ static void sp_hist_dump(const char *trig, unsigned insn_now, uint16_t sp_now)
     }
 
     /* Top-K by |delta_sum| (single-event corrupter: one huge event). */
-    if (calypso_debug_enabled("SP-HIST")) fprintf(stderr, "[c54x] SP-HIST TOP BY |delta_sum| (corrupteur single-jump):\n");
+    if (calypso_debug_enabled("SP-HIST")) fprintf(stderr, "[c54x] SP-HIST TOP BY |delta_sum| (single-jump corrupter):\n");
     for (unsigned k = 0; k < 10 && k < g_sp_dec_used; k++) {
         unsigned best = k;
         int32_t best_abs = g_sp_dec_hist[k].delta_sum < 0
@@ -1120,7 +1120,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (redirect_log < 3) {
                 C54_LOG("SILICON-BOOT-REDIRECT PC=0xFF80 SP=0x1100 → 0x%04x%s",
                         redir7000 ? 0x7000 : 0x7120,
-                        redir7000 ? " (REDIR7000: SP=0x5AC8 + init complète A-tables)" : "");
+                        redir7000 ? " (REDIR7000: SP=0x5AC8 + full A-tables init)" : "");
                 redirect_log++;
             }
             /* @BEQUILLE - INITTAB  (CALYPSO_INITTAB, EXISTS, default OFF)
@@ -1208,7 +1208,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (mrti2) {
                 static int rlg = 0;
                 if (rlg < 3) { rlg++;
-                    fprintf(stderr, "[c54x] TABLE-REPOPULATE @0x886a (clear a wipe la table) -> run 0xc704 insn=%u\n", s->insn_count); }
+                    fprintf(stderr, "[c54x] TABLE-REPOPULATE @0x886a (clear wiped the table) -> run 0xc704 insn=%u\n", s->insn_count); }
                 s->pc = 0xc704;
             }
         }
@@ -1234,22 +1234,22 @@ int c54x_run(C54xState *s, int n_insns)
             if (_d247t) {
                 static unsigned _n7102=0, _nd247=0, _nd25f=0, _n87ff=0;
                 if (s->pc == 0x7102 && _n7102++ < 20)
-                    fprintf(stderr, "[c54x] D247-TRACE #%u @0x7102 (caller reel de 0xd247) "
+                    fprintf(stderr, "[c54x] D247-TRACE #%u @0x7102 (real caller of 0xd247) "
                             "d[3f70]=0x%04x SP=0x%04x insn=%u\n",
                             _n7102, s->data[0x3f70], s->sp, s->insn_count);
                 if (s->pc == 0xd247 && _nd247++ < 20)
                     fprintf(stderr, "[c54x] D247-TRACE #%u ENTRY 0xd247 d[3f70]=0x%04x SP=0x%04x "
-                            "d[4c41]=0x%04x d[4c46]=0x%04x d[4c5c]=0x%04x (avant install) insn=%u\n",
+                            "d[4c41]=0x%04x d[4c46]=0x%04x d[4c5c]=0x%04x (before install) insn=%u\n",
                             _nd247, s->data[0x3f70], s->sp, s->data[0x4c41], s->data[0x4c46],
                             s->data[0x4c5c], s->insn_count);
                 if (s->pc == 0xd25f && _nd25f++ < 20)
                     fprintf(stderr, "[c54x] D247-TRACE #%u RET 0xd25f d[3f70]=0x%04x "
-                            "d[4c41]=0x%04x d[4c46]=0x%04x d[4c5c]=0x%04x (apres install) insn=%u\n",
+                            "d[4c41]=0x%04x d[4c46]=0x%04x d[4c5c]=0x%04x (after install) insn=%u\n",
                             _nd25f, s->data[0x3f70], s->data[0x4c41], s->data[0x4c46],
                             s->data[0x4c5c], s->insn_count);
                 if (s->pc == 0x87ff && _n87ff++ < 20)
                     fprintf(stderr, "[c54x] D247-TRACE #%u CLEAR-ENTRY 0x87ff d[4c5c]=0x%04x "
-                            "(table AVANT clear) SP=0x%04x insn=%u\n",
+                            "(table BEFORE clear) SP=0x%04x insn=%u\n",
                             _n87ff, s->data[0x4c5c], s->sp, s->insn_count);
             }
         }
@@ -1384,7 +1384,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (_a546on && s->pc == 0xa546) {
                 static unsigned _na546 = 0;
                 if (_na546++ < 20)
-                    fprintf(stderr, "[c54x] A546-HIT #%u : BACC natif via d[0x3fe0]=0x%04x va tirer "
+                    fprintf(stderr, "[c54x] A546-HIT #%u: native BACC via d[0x3fe0]=0x%04x will fire "
                             "d[0x09bc]=0x%04x insn=%u\n",
                             _na546, s->data[0x3fe0], s->data[0x09bc], s->insn_count);
             }
@@ -2472,8 +2472,8 @@ int c54x_run(C54xState *s, int n_insns)
             if (_fb < 0) {
                 _fb = calypso_gate("CALYPSO_FIRS_BANK", 0);
                 fprintf(stderr, "[c54x] FIRS-BANK %s : prologue (0x8336/0x834b/0x834f), "
-                        "table de dispatch (0x8359..0x8363) et six etages du banc\n",
-                        _fb ? "ACTIVE" : "INACTIVE (defaut)");
+                        "dispatch table (0x8359..0x8363) and the six stages of the bank\n",
+                        _fb ? "ACTIVE" : "INACTIVE (default)");
             }
             if (_fb) {
                 static const uint16_t sites[] = {
@@ -2482,11 +2482,11 @@ int c54x_run(C54xState *s, int n_insns)
                     0x8365, 0x8394, 0x83c9, 0x83ff, 0x8435, 0x846b  /* stages   */
                 };
                 static const char *quoi[] = {
-                    "PROLOGUE stm #0x60,AR2", "PROLOGUE stm #0x60,AR5", "PROLOGUE branche table",
+                    "PROLOGUE stm #0x60,AR2", "PROLOGUE stm #0x60,AR5", "PROLOGUE table branch",
                     "DISPATCH->0x8365", "DISPATCH->0x8394", "DISPATCH->0x83c9",
                     "DISPATCH->0x83ff", "DISPATCH->0x8435", "DISPATCH->0x846b",
-                    "ETAGE 0x8365", "ETAGE 0x8394", "ETAGE 0x83c9",
-                    "ETAGE 0x83ff", "ETAGE 0x8435", "ETAGE 0x846b"
+                    "STAGE 0x8365", "STAGE 0x8394", "STAGE 0x83c9",
+                    "STAGE 0x83ff", "STAGE 0x8435", "STAGE 0x846b"
                 };
                 static unsigned long long hits[15];
                 static unsigned shown[15];
@@ -2505,7 +2505,7 @@ int c54x_run(C54xState *s, int n_insns)
                 {   /* periodic summary: which sites were reached, which never */
                     static unsigned long long tick = 0;
                     if ((++tick % 4000000) == 0) {
-                        fprintf(stderr, "[c54x] FIRS-BANK bilan :");
+                        fprintf(stderr, "[c54x] FIRS-BANK summary:");
                         for (int k = 0; k < 15; k++)
                             fprintf(stderr, " %04x=%llu", sites[k],
                                     (unsigned long long)hits[k]);
@@ -2523,15 +2523,15 @@ int c54x_run(C54xState *s, int n_insns)
             static int _cs = -1;
             if (_cs < 0) {
                 _cs = calypso_gate("CALYPSO_CORR_SLIDE", 0);
-                fprintf(stderr, "[c54x] CORR-SLIDE %s : AR1..AR5 + accumulateurs en "
-                        "0x84b4 (entree tour), 0x84bc (store A) et 0x84c5 (store B)\n",
-                        _cs ? "ACTIVE" : "INACTIVE (defaut)");
+                fprintf(stderr, "[c54x] CORR-SLIDE %s: AR1..AR5 + accumulators at "
+                        "0x84b4 (loop entry), 0x84bc (store A) and 0x84c5 (store B)\n",
+                        _cs ? "ACTIVE" : "INACTIVE (default)");
             }
             if (_cs && (exec_pc == 0x84b4 || exec_pc == 0x84bc || exec_pc == 0x84c5)) {
                 static unsigned _n = 0;
                 if (_n < 24) {
                     _n++;
-                    const char *ou = (exec_pc == 0x84b4) ? "entree tour" :
+                    const char *ou = (exec_pc == 0x84b4) ? "loop entry" :
                                      (exec_pc == 0x84bc) ? "store A    " : "store B    ";
                     fprintf(stderr, "[c54x] CORR-SLIDE #%2u 0x%04x %s | AR0=%d "
                             "AR1=0x%04x AR2=0x%04x AR3=0x%04x AR4=0x%04x AR5=0x%04x "
@@ -2615,7 +2615,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (i435 && s->data[0x435b] == 0) {
                 static unsigned in = 0;
                 if (in++ < 4)
-                    fprintf(stderr, "[c54x] INIT-435B: data[0x435b] 0x0000 -> 0x52ed (masque IMR reset SANS bit4/clobber) insn=%u\n", s->insn_count);
+                    fprintf(stderr, "[c54x] INIT-435B: data[0x435b] 0x0000 -> 0x52ed (IMR reset mask WITHOUT bit4/clobber) insn=%u\n", s->insn_count);
                 s->data[0x435b] = calypso_getenv("CALYPSO_SEED_52FD") ? 0x52fd : 0x52ed;   /* default 0x52ed: without bit 4 (TINT), which avoids the firmware clobber at 0xa509 that strips bit 12 (frame). 0x52fd sets bit 4 and breaks the frame, which shows the firmware does not use TINT0 */
             }
         }
@@ -2672,7 +2672,7 @@ int c54x_run(C54xState *s, int n_insns)
                     uint16_t _tgt = (uint16_t)(s->a & 0xFFFF);
                     bool _in_corr = (_tgt >= CORR_PC_LO && _tgt < CORR_PC_HI);
                     if (_in_corr) {
-                        fprintf(stderr, "[c54x] CALA-WIDE *** DANS-CORRELATEUR *** pc=0x%04x op=0x%04x "
+                        fprintf(stderr, "[c54x] CALA-WIDE *** IN-CORRELATOR *** pc=0x%04x op=0x%04x "
                                 "-> target=0x%04x task_md p0(0804)=%04x p1(0818)=%04x d_dsp_page(08e2)=%04x "
                                 "d[4357]=%04x insn=%u\n",
                                 exec_pc, _cop, _tgt, s->data[0x0804], s->data[0x0818],
@@ -2787,8 +2787,8 @@ int c54x_run(C54xState *s, int n_insns)
                 fprintf(stderr, "[c54x] A4CD-BC A=0x%06llx (AEQ %s -> %s) "
                         "d[434e]=%04x d[434f]=%04x d[*434e]=%04x d[*434f]=%04x d[3f70]=%04x insn=%u\n",
                         (unsigned long long)(s->a & 0xFFFFFFULL),
-                        (s->a & 0xFFFFFFFFFFULL) == 0 ? "vrai" : "faux",
-                        (s->a & 0xFFFFFFFFFFULL) == 0 ? "BRANCHE(skip enable)" : "fall-through(RSBX INTM)",
+                        (s->a & 0xFFFFFFFFFFULL) == 0 ? "true" : "false",
+                        (s->a & 0xFFFFFFFFFFULL) == 0 ? "BRANCH(skip enable)" : "fall-through(RSBX INTM)",
                         s->data[0x434e], s->data[0x434f],
                         s->data[s->data[0x434e] & 0xFFFF], s->data[s->data[0x434f] & 0xFFFF],
                         s->data[0x3f70], s->insn_count);
@@ -2812,7 +2812,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static unsigned mgn = 0;
                 if (mgn++ < 4)
                     fprintf(stderr, "[c54x] MASKROM-GOLIVE: mem[0x5ac8] 0x0000 -> 0x%04x "
-                            "(=data[0x43c0], pointeur go-live firmware) insn=%u\n",
+                            "(=data[0x43c0], firmware go-live pointer) insn=%u\n",
                             s->data[0x43c0], s->insn_count);
                 s->data[0x5ac8] = s->data[0x43c0];
             }
@@ -2828,9 +2828,9 @@ int c54x_run(C54xState *s, int n_insns)
             if (ar5b_n++ < 8) {
                 uint16_t sp = s->sp;
                 fprintf(stderr,
-                    "[c54x] AR5-BAS pc=0xeac9 insn=%u AR0=%04x AR1=%04x AR2=%04x AR3=%04x "
+                    "[c54x] AR5-LOW pc=0xeac9 insn=%u AR0=%04x AR1=%04x AR2=%04x AR3=%04x "
                     "AR4=%04x AR5=%04x AR6=%04x AR7=%04x BK=%04x SP=%04x "
-                    "pile=%04x %04x %04x %04x data[2d0d]=%04x rpt=%d/%u XPC=%u\n",
+                    "stack=%04x %04x %04x %04x data[2d0d]=%04x rpt=%d/%u XPC=%u\n",
                     s->insn_count, s->ar[0], s->ar[1], s->ar[2], s->ar[3],
                     s->ar[4], s->ar[5], s->ar[6], s->ar[7], s->bk, sp,
                     s->data[sp], s->data[(uint16_t)(sp + 1)],
@@ -2857,7 +2857,7 @@ int c54x_run(C54xState *s, int n_insns)
             static unsigned n_b81e;
             uint16_t a2 = s->ar[2];
             if (n_b81e++ < 60 || (s->data[(uint16_t)(a2 + 9)] & 0x8000))
-                printf("  [b81e] ar2=%04x mot9=%04x 3fc1=%04x W0[9]=%04x W1[9]=%04x 3fba=%d 4364=%u xpc=%u insn=%u\n",
+                printf("  [b81e] ar2=%04x word9=%04x 3fc1=%04x W0[9]=%04x W1[9]=%04x 3fba=%d 4364=%u xpc=%u insn=%u\n",
                        a2, s->data[(uint16_t)(a2 + 9)], s->data[0x3fc1], s->data[0x0809], s->data[0x081d],
                        (int16_t)s->data[0x3fba], s->data[0x4364], s->xpc, s->insn_count);
         }
@@ -2868,7 +2868,7 @@ int c54x_run(C54xState *s, int n_insns)
             bool pp_trou = (pp >= 0x2800 && pp < 0x7000) || pp < 0x0060;
             if (!pp_trou && n_trou < 4) {
                 n_trou++;
-                printf("  [trou-prog] entree dans la memoire vide pc=0x%04x depuis pc=0x%04x xpc=%u pmst=%04x SP=%04x pile=%04x %04x %04x insn=%u\n",
+                printf("  [trou-prog] entry into empty memory pc=0x%04x from pc=0x%04x xpc=%u pmst=%04x SP=%04x stack=%04x %04x %04x insn=%u\n",
                        exec_pc, pp, s->xpc, s->pmst, s->sp, s->data[s->sp], s->data[(uint16_t)(s->sp + 1)],
                        s->data[(uint16_t)(s->sp + 2)], s->insn_count);
                 c54x_anneau_vider_stdout("trou-prog", 512);   /* [2026-10-22 22:20] 120 -> 512 : remonter jusqu a l IT */
@@ -3282,7 +3282,7 @@ int c54x_run(C54xState *s, int n_insns)
                     fprintf(stderr, "[c54x] GOTAIL-PROG[0x%04x..]= %04x %04x %04x %04x\n",
                             a, s->prog[a], s->prog[(uint16_t)(a+1)],
                             s->prog[(uint16_t)(a+2)], s->prog[(uint16_t)(a+3)]);
-                fprintf(stderr, "[c54x] VEC28-NOW data[0x00f0..0x00f3]= %04x %04x %04x %04x (doit brancher vers 0x7234)\n",
+                fprintf(stderr, "[c54x] VEC28-NOW data[0x00f0..0x00f3]= %04x %04x %04x %04x (must branch to 0x7234)\n",
                         s->data[0x00f0], s->data[0x00f1], s->data[0x00f2], s->data[0x00f3]);
                 for (uint16_t a = 0xb360; a <= 0xb384; a += 4)
                     fprintf(stderr, "[c54x] HANDLER-B360[0x%04x..]= %04x %04x %04x %04x\n",
@@ -3350,7 +3350,7 @@ int c54x_run(C54xState *s, int n_insns)
                 s->imr = img;
                 static unsigned kil = 0;
                 if (kil++ < 8)
-                    fprintf(stderr, "[c54x] KEEP-IMR re-arme IMR=0x%04x (bit5/BRINT0 preserve, "
+                    fprintf(stderr, "[c54x] KEEP-IMR re-armed IMR=0x%04x (bit5/BRINT0 preserved, "
                             "shadow d[435b]=0x%04x) @PC=0x%04x insn=%u\n",
                             s->imr, s->data[0x435b], exec_pc, s->insn_count);
             }
@@ -3399,7 +3399,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static unsigned r8n = 0;
                 if (r8n++ < 8)
                     fprintf(stderr, "[c54x] ISR-TO-8341 : frame ISR 0x013b -> 0x8341 "
-                            "(LUT FB setup complet) prev=0x%04x insn=%u\n",
+                            "(full FB LUT setup) prev=0x%04x insn=%u\n",
                             g_prev_pc, s->insn_count);
                 s->pc = 0x8341;
                 return 0;
@@ -3433,7 +3433,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static unsigned csn = 0;
                 if (csn++ < 8)
                     fprintf(stderr, "[c54x] CORR-SETUP @0x8d00 : AR1=0x%04x AR4=0x%04x "
-                            "AR5=0x%04x (setup LUT 0x8341 injecte) insn=%u\n",
+                            "AR5=0x%04x (LUT setup 0x8341 injected) insn=%u\n",
                             a1, a4, a5, s->insn_count);
             }
         }
@@ -3579,7 +3579,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static unsigned glg = 0;
                 if (glg++ < 8)
                     fprintf(stderr, "[c54x] GO-LIVE-TASKW @0x%04x d[3f92]=0x%04x "
-                            "(ORM 0xa539 rejoue, ARM 0810 bit15 set) insn=%u\n",
+                            "(ORM 0xa539 replayed, ARM 0810 bit15 set) insn=%u\n",
                             exec_pc, s->data[0x3f92], s->insn_count);
             }
         }
@@ -3719,7 +3719,7 @@ int c54x_run(C54xState *s, int n_insns)
                 static unsigned ic = 0;
                 if (ic++ < 10)
                     fprintf(stderr, "[c54x] *** INTM-CLEAR #%u : INTM 1->0 @PC=0x%04x "
-                            "IMR=0x%04x insn=%u — interruptions ARMEES ! ***\n",
+                            "IMR=0x%04x insn=%u — interrupts ARMED! ***\n",
                             ic, exec_pc, s->imr, s->insn_count);
             }
             prev_intm = now_intm;
@@ -3734,7 +3734,7 @@ int c54x_run(C54xState *s, int n_insns)
             static unsigned md=0;
             if (md++<40)
                 fprintf(stderr, "[c54x] MVDESYNC #%u PC=0x%04x op=0x%04x "
-                        "(mot-operande execute = mis-decode!) from=0x%04x insn=%u\n",
+                        "(operand word executed = mis-decode!) from=0x%04x insn=%u\n",
                         md, exec_pc, exec_op, g_prev_pc, s->insn_count);
         }
         /* Values of the two CALA slots; the third is the BACC at 0xb40f,
@@ -3807,7 +3807,7 @@ int c54x_run(C54xState *s, int n_insns)
                 if (!gdone && s->pc == 0xb3ff) {
                     gdone = 1;
                     fprintf(stderr, "[c54x] GOLIVE-REDIRECT pc 0xb3ff(wait) -> 0xb3ec(go-live "
-                            "path: set flags + CALL 0xa9ea + BACC 0x703d -> contexte + IMR) "
+                            "path: set flags + CALL 0xa9ea + BACC 0x703d -> context + IMR) "
                             "IMR=0x%04x SP=0x%04x insn=%u\n",
                             s->imr, s->sp, s->insn_count);
                     s->pc = 0xb3ec;
@@ -3838,7 +3838,7 @@ int c54x_run(C54xState *s, int n_insns)
                     /* SP ring at the first storm: the last 64 push/pop events
                      * (pc, op, delta), which name the instruction that
                      * over-pops and drifts SP. */
-                    fprintf(stderr, "[c54x] SP-RING-AT-STORM (64 derniers, ancien->recent ; MISMATCH = op qui touche SP a tort):\n");
+                    fprintf(stderr, "[c54x] SP-RING-AT-STORM (last 64, old->recent; MISMATCH = op that wrongly touches SP):\n");
                     for (int k = 63; k >= 0; k--) {
                         struct sp_evt *e = &g_spring[(g_spring_idx - 1 - k) & 63];
                         const char *mn = (e->op == 0xFC00) ? "RET" : classify_xfer_op(e->op);
@@ -3851,7 +3851,7 @@ int c54x_run(C54xState *s, int n_insns)
                         else if (!strcmp(mn,"B")||!strcmp(mn,"BD")||!strcmp(mn,"BACC")||!strcmp(mn,"FB")||!strcmp(mn,"FBD")||!strcmp(mn,"FBACC")||!strcmp(mn,"FBACCD")) exp = 0;
                         const char *flag = "";
                         if (exp != 99 && e->delta != exp) flag = "  <<< MISMATCH (delta != mnemo)";
-                        else if (exp == 99 && e->delta != 0) flag = "  <<< NON-XFER touche SP (PSHM/POPM/FRAME? ou parasite)";
+                        else if (exp == 99 && e->delta != 0) flag = "  <<< NON-XFER touches SP (PSHM/POPM/FRAME? or spurious)";
                         fprintf(stderr, "  pc=0x%04x op=0x%04x %-7s delta=%+d(exp%+d) sp=0x%04x%s\n",
                                 e->pc, e->op, mn, e->delta, exp, e->sp, flag);
                     }
@@ -3924,7 +3924,7 @@ int c54x_run(C54xState *s, int n_insns)
                 pi_n++;
                 fprintf(stderr, "[c54x] PISTE pc=0x%04x op=0x%04x A=0x%010llx B=0x%010llx "
                         "T=0x%04x AR0=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x "
-                        "BRC=%u rpt=%u insn=%u mot_suivant=0x%04x\n",
+                        "BRC=%u rpt=%u insn=%u next_word=0x%04x\n",
                         s->pc, exec_op, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
                         (unsigned long long)(s->b & 0xFFFFFFFFFFULL), s->t,
                         s->ar[0], s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->ar[6], s->ar[7],
@@ -3945,7 +3945,7 @@ int c54x_run(C54xState *s, int n_insns)
                             "direct@SP=0x%04x:%04x | indirect=%s\n",
                             dpv, (s->st1 & 0x4000) ? 1 : 0, s->sp,
                             adp, s->data[adp], asp, s->data[asp],
-                            (exec_op & 0x80) ? "oui" : "non");
+                            (exec_op & 0x80) ? "yes" : "no");
                 }
                 { /* Optional dump of a data range on each pass, to see a
                    * healthy job diverge from one that emits zeros. */
@@ -4165,7 +4165,7 @@ int c54x_run(C54xState *s, int n_insns)
                         "T=0x%04x AR2=0x%04x %sinsn=%u\n",
                         exec_pc, exec_op, (unsigned long long)(s->a & 0xFFFFFFFFFFULL),
                         (long long)av, s->t, s->ar[2],
-                        (exec_pc == 0x75e8) ? (av <= 0 ? "RCD-PREND(A<=0) " : "RCD-passe(A>0) ") : "",
+                        (exec_pc == 0x75e8) ? (av <= 0 ? "RCD-TAKEN(A<=0) " : "RCD-skip(A>0) ") : "",
                         s->insn_count);
             }
         }
@@ -4183,7 +4183,7 @@ int c54x_run(C54xState *s, int n_insns)
                         "AR1=0x%04x AR2=0x%04x AR3=0x%04x d[DP:9]=0x%04x insn=%u%s\n",
                         exec_pc, exec_op, alo, dp, s->ar[1], s->ar[2], s->ar[3],
                         s->data[(uint16_t)((dp << 7) | 0x09)], s->insn_count,
-                        garbage ? "  <<< A=GARBAGE handler = LE DERAIL" : "");
+                        garbage ? "  <<< A=GARBAGE handler = THE DERAILMENT" : "");
             }
         }
         /* DP-AT-DISP probe (read-only): tracks the LAST instruction that
@@ -4200,7 +4200,7 @@ int c54x_run(C54xState *s, int n_insns)
                     dpw_n++;
                     fprintf(stderr, "[c54x] DP-AT-DISP DP=0x%03x set_by_PC=0x%04x set_op=0x%04x insn=%u%s\n",
                             dp_now, dp_set_pc, dp_set_op, s->insn_count,
-                            (dp_now == 0x124) ? "  <<< BAD DP (coefficient page = LE DERAIL)" : "");
+                            (dp_now == 0x124) ? "  <<< BAD DP (coefficient page = THE DERAILMENT)" : "");
                 }
             }
         }
@@ -4355,12 +4355,12 @@ int c54x_run(C54xState *s, int n_insns)
                       _idpage_every = (_e && *_e) ? (unsigned)strtoul(_e, NULL, 0) : 65536u;
                       if (_idpage_every < 1) _idpage_every = 65536u; }
                     if (_ia)
-                        fprintf(stderr, "[c54x] INTM_ACK=1 (BEQUILLE) : ack ARM sur "
-                                "%s (INTH=%d dpage=%d/%u insn), ack DSP sur %s (=%d), "
+                        fprintf(stderr, "[c54x] INTM_ACK=1 (CRUTCH): ARM ack on "
+                                "%s (INTH=%d dpage=%d/%u insn), DSP ack on %s (=%d), "
                                 "tick TINT0=%d\n",
-                                _iswap ? "1->0 (RETE)" : "0->1 (IT prise)",
+                                _iswap ? "1->0 (RETE)" : "0->1 (IRQ taken)",
                                 _iarm, _idpage, _idpage_every,
-                                _iswap ? "0->1 (IT prise)" : "1->0 (RETE)", _idsp, _int0);
+                                _iswap ? "0->1 (IRQ taken)" : "1->0 (RETE)", _idsp, _int0);
                 }
                 if (_ia && !_busy) {
                     _busy = 1;
@@ -4402,7 +4402,7 @@ int c54x_run(C54xState *s, int n_insns)
                             _rpage ^= 1;
                             static unsigned _n = 0;
                             if (_n++ < 40)
-                                fprintf(stderr, "[c54x] INTM_ACK DSP : level hold relache, "
+                                fprintf(stderr, "[c54x] INTM_ACK DSP: level hold released, "
                                         "r_page=%u PC=0x%04x insn=%u\n",
                                         _rpage, exec_pc, s->insn_count);
                         }
@@ -4508,10 +4508,10 @@ int c54x_run(C54xState *s, int n_insns)
                                     fprintf(stderr,
                                         "[c54x] ORPHAN-RETURN #%llu insn=%u pc=0x%04x op=0x%04x "
                                         "SP=0x%04x → ret_tgt=0x%04x  lastPUSH=%s(pc=0x%04x op=0x%04x) "
-                                        "net_words=%lld — over-pop (pile vierge au-dessus de SP_base)\n",
+                                        "net_words=%lld — over-pop (blank stack above SP_base)\n",
                                         (unsigned long long)g_orphan_hits, s->insn_count,
                                         exec_pc, op, s->sp, ret_tgt,
-                                        lp_found ? "" : "AUCUN", lp_pc, lp_op,
+                                        lp_found ? "" : "NONE", lp_pc, lp_op,
                                         (long long)g_sp_ledger.net_words);
                                     /* Slot this return reads: written (a
                                      * legitimate vector) or untouched (real
@@ -4521,12 +4521,12 @@ int c54x_run(C54xState *s, int n_insns)
                                         if (rs >= STKSLOT_LO && rs <= STKSLOT_HI) {
                                             int si = rs - STKSLOT_LO;
                                             if (g_stkslot_written[si])
-                                                fprintf(stderr, "[c54x]     slot 0x%04x ÉCRIT par "
-                                                    "ST@pc=0x%04x op=0x%04x → VECTEUR LÉGIT (pas un bug)\n",
+                                                fprintf(stderr, "[c54x]     slot 0x%04x WRITTEN by "
+                                                    "ST@pc=0x%04x op=0x%04x → LEGIT VECTOR (not a bug)\n",
                                                     rs, g_stkslot_wpc[si], g_stkslot_wop[si]);
                                             else
-                                                fprintf(stderr, "[c54x]     slot 0x%04x JAMAIS écrit "
-                                                    "→ VIERGE = vrai over-pop garbage\n", rs);
+                                                fprintf(stderr, "[c54x]     slot 0x%04x NEVER written "
+                                                    "→ BLANK = real over-pop garbage\n", rs);
                                         }
                                     }
                                     /* On the very first orphan, dump the whole
@@ -4536,7 +4536,7 @@ int c54x_run(C54xState *s, int n_insns)
                                      * bug. */
                                     if (g_orphan_hits == 1) {
                                         int k;
-                                        fprintf(stderr, "[c54x]   g_spring (anciens→récents, reset→#1):\n");
+                                        fprintf(stderr, "[c54x]   g_spring (oldest→newest, reset→#1):\n");
                                         for (k = 64; k >= 1; k--) {
                                             struct sp_evt *pe = &g_spring[(g_spring_idx - k) & 63];
                                             if (pe->pc == 0 && pe->op == 0 && pe->delta == 0) continue;
@@ -4551,8 +4551,8 @@ int c54x_run(C54xState *s, int n_insns)
                                 if (g_mismatch_hits <= 40)
                                     fprintf(stderr,
                                         "[c54x] MISMATCH-RETURN #%llu insn=%u pc=0x%04x op=0x%04x "
-                                        "SP=0x%04x dépile kind='%c' poussé par pc=0x%04x op=0x%04x — "
-                                        "return lit une valeur non-retour (PSHM)\n",
+                                        "SP=0x%04x pops kind='%c' pushed by pc=0x%04x op=0x%04x — "
+                                        "return reads a non-return value (PSHM)\n",
                                         (unsigned long long)g_mismatch_hits, s->insn_count,
                                         exec_pc, op, s->sp, g_shadow[g_shadow_depth].kind,
                                         g_shadow[g_shadow_depth].pc, g_shadow[g_shadow_depth].op);
@@ -4670,12 +4670,12 @@ int c54x_run(C54xState *s, int n_insns)
             if (_dp < 0) {
                 _dp = calypso_gate("CALYPSO_DISPATCH_PROBE", 0);
                 if (_dp)
-                    fprintf(stderr, "[dispatch] sonde armee : 7 sites d'aiguillage "
-                            "(add #0x4387), l'armement RX 0xa5cd, l'arm/desarm DMA "
-                            "0xa620/0xa62e, le publieur d_fb_det 0x79e4, l'init de "
-                            "table 0xb4b6, et les acces au handler courant "
-                            "data[0x43d8] (0xb01d lit, 0xbb01 ecrit). "
-                            "LECTURE SEULE.\n");
+                    fprintf(stderr, "[dispatch] probe armed: 7 switch sites "
+                            "(add #0x4387), the RX arming 0xa5cd, the DMA arm/disarm "
+                            "0xa620/0xa62e, the d_fb_det publisher 0x79e4, the init of "
+                            "table 0xb4b6, and the accesses to the current handler "
+                            "data[0x43d8] (0xb01d reads, 0xbb01 writes). "
+                            "READ ONLY.\n");
             }
             if (_dp) {
                 /* --- the switch sites: A holds the index before the `add` --- */
@@ -4731,7 +4731,7 @@ int c54x_run(C54xState *s, int n_insns)
                             uint16_t _ea  = s->ar[_arp];
                             fprintf(stderr,
                                     "[dispatch] CHAIN-B05F pc=0x%04x op=0x%04x "
-                                    "A=0x%06llx (bas=0x%04x) TC=%d ARP=%u "
+                                    "A=0x%06llx (low=0x%04x) TC=%d ARP=%u "
                                     "AR[ARP]=0x%04x *AR[ARP]=0x%04x "
                                     "AR0=%04x AR1=%04x AR2=%04x AR3=%04x "
                                     /* data[0x7fff] tests one hypothesis. At
@@ -4760,8 +4760,8 @@ int c54x_run(C54xState *s, int n_insns)
                             fflush(stderr);
                         } else if (exec_pc == 0xb05f && (_pass % 20) == 0) {
                             fprintf(stderr,
-                                    "[dispatch] CHAIN-B05F resume : %llu passages en "
-                                    "0xb05f, %llu pas traces (plafond)\n", _pass, _cn);
+                                    "[dispatch] CHAIN-B05F summary: %llu hits at "
+                                    "0xb05f, %llu steps traced (cap)\n", _pass, _cn);
                             fflush(stderr);
                         }
                     }
@@ -4789,8 +4789,8 @@ int c54x_run(C54xState *s, int n_insns)
                         fprintf(stderr, "[dispatch] *** site 0x%04x  index=%u  "
                                 "-> data[0x%04x] = 0x%04x%s  A=0x%06llx insn=%u\n",
                                 exec_pc, idx, addr, hnd,
-                                (hnd == 0xa5cd) ? "  <<< ARMEMENT RX !" :
-                                (hnd == 0xab38) ? "  (slot vide, RET partage)" : "",
+                                (hnd == 0xa5cd) ? "  <<< RX ARMING!" :
+                                (hnd == 0xab38) ? "  (empty slot, shared RET)" : "",
                                 (unsigned long long)(s->a & 0xFFFFFFULL), s->insn_count);
                     }
                 }
@@ -4829,12 +4829,12 @@ int c54x_run(C54xState *s, int n_insns)
                     } else {
                         if (_cn < 96) { _c[_cn].pc = exec_pc; _c[_cn].tgt = tgt;
                                         _c[_cn].n = 1; _cn++; }
-                        const char *q = (tgt==0xa5cd) ? "  <<< ARMEMENT RX !"
-                                      : (tgt==0xa62e) ? "  (desarmement DMA)"
-                                      : (tgt==0xab38) ? "  (RET partage, slot vide)"
-                                      : (tgt==0xb5a1) ? "  (greffe #2)"
-                                      : (tgt==0xa4c7) ? "  (graine go-live)" : "";
-                        fprintf(stderr, "[dispatch] *** %-5s depuis 0x%04x -> 0x%04x%s"
+                        const char *q = (tgt==0xa5cd) ? "  <<< RX ARMING!"
+                                      : (tgt==0xa62e) ? "  (DMA disarm)"
+                                      : (tgt==0xab38) ? "  (shared RET, empty slot)"
+                                      : (tgt==0xb5a1) ? "  (graft #2)"
+                                      : (tgt==0xa4c7) ? "  (go-live seed)" : "";
+                        fprintf(stderr, "[dispatch] *** %-5s from 0x%04x -> 0x%04x%s"
                                 "  (%s)  data[0x43d8]=0x%04x insn=%u\n",
                                 _kind, exec_pc, tgt, q,
                                 (_op & 0x0100) ? "src=B" : "src=A",
@@ -4846,17 +4846,17 @@ int c54x_run(C54xState *s, int n_insns)
                 /* --- the notable sites, simple pass counting --------------- */
                 {
                     static const struct { uint16_t pc; const char *quoi; } _pt[] = {
-                      {0xa5cd, "ARMEMENT RX (tremplin 0x0158 + DMA2_AAD)"},
-                      {0xa5e8, "  ecriture DMA2_AAD"},
-                      {0xa5f6, "  ecriture DMA2_CTRL (ENABLE=1)"},
-                      {0xa620, "SPCR : RDMA_MASK=0 (mode DMA arme)"},
-                      {0xa62e, "SPCR : RDMA_MASK=1 (mode DMA coupe)"},
-                      {0xa601, "test data[0x435e] bit13 (verrou config DMA)"},
-                      {0x79e4, "publication d_fb_det (data[0x08f8] |= 1)"},
-                      {0x79e3, "  gate : data[@0x7e] doit valoir 4"},
-                      {0xb4b6, "init : recopie de la table -> data[0x4387]"},
-                      {0xb01d, "lecture du handler courant data[0x43d8]"},
-                      {0xbb00, "ECRITURE du handler courant data[0x43d8]"},
+                      {0xa5cd, "RX ARMING (trampoline 0x0158 + DMA2_AAD)"},
+                      {0xa5e8, "  write DMA2_AAD"},
+                      {0xa5f6, "  write DMA2_CTRL (ENABLE=1)"},
+                      {0xa620, "SPCR: RDMA_MASK=0 (DMA mode armed)"},
+                      {0xa62e, "SPCR: RDMA_MASK=1 (DMA mode off)"},
+                      {0xa601, "test data[0x435e] bit13 (DMA config lock)"},
+                      {0x79e4, "d_fb_det publication (data[0x08f8] |= 1)"},
+                      {0x79e3, "  gate: data[@0x7e] must be 4"},
+                      {0xb4b6, "init: table copy -> data[0x4387]"},
+                      {0xb01d, "read of the current handler data[0x43d8]"},
+                      {0xbb00, "WRITE of the current handler data[0x43d8]"},
 
                       /* The RX arming chain. Index 41
                        * (`ld #0x29,A ; call 0xa9ea`) leads to 0xa5cd. Four
@@ -4865,22 +4865,22 @@ int c54x_run(C54xState *s, int n_insns)
                        * the LOADER that puts that entry into A upstream are all
                        * probed - otherwise it is impossible to say where the
                        * chain breaks. */
-                      {0xb220, "site 1 : ld #0x29 -> ARMEMENT RX (AR3=0x00bf)"},
-                      {0xb216, "  entree du bloc du site 1"},
-                      {0xb2b4, "site 2 : ld #0x29 -> ARMEMENT RX (AR3=0x0097)"},
-                      {0xb2aa, "  entree du bloc du site 2"},
-                      {0xb330, "site 3 : ld #0x29 -> ARMEMENT RX (AR3=0x0030)"},
-                      {0xb35d, "site 4 : ld #0x29 -> ARMEMENT RX (AR3=0x0040)"},
+                      {0xb220, "site 1: ld #0x29 -> RX ARMING (AR3=0x00bf)"},
+                      {0xb216, "  entry of the block of site 1"},
+                      {0xb2b4, "site 2: ld #0x29 -> RX ARMING (AR3=0x0097)"},
+                      {0xb2aa, "  entry of the block of site 2"},
+                      {0xb330, "site 3: ld #0x29 -> RX ARMING (AR3=0x0030)"},
+                      {0xb35d, "site 4: ld #0x29 -> RX ARMING (AR3=0x0040)"},
                       /* the `ld #k16,A` that load the entry of block 1, then 2 */
-                      {0xaba9, "  chargeur -> 0xb216"},
-                      {0xabc9, "  chargeur -> 0xb216"},
-                      {0xabf1, "  chargeur -> 0xb2aa"},
-                      {0xabf5, "  chargeur -> 0xb2aa"},
-                      {0xabf9, "  chargeur -> 0xb2aa"},
-                      {0xabfd, "  chargeur -> 0xb2aa"},
-                      {0xb758, "  chargeur -> 0xb2aa"},
+                      {0xaba9, "  loader -> 0xb216"},
+                      {0xabc9, "  loader -> 0xb216"},
+                      {0xabf1, "  loader -> 0xb2aa"},
+                      {0xabf5, "  loader -> 0xb2aa"},
+                      {0xabf9, "  loader -> 0xb2aa"},
+                      {0xabfd, "  loader -> 0xb2aa"},
+                      {0xb758, "  loader -> 0xb2aa"},
                       /* the dispatcher itself: how many times, with which index */
-                      {0xa9ea, "helper index->handler (A = base+index apres le add)"},
+                      {0xa9ea, "helper index->handler (A = base+index after the add)"},
 
                       /* The task queue. The main loop at 0xa4ca does
                        * `call 0xaad5` (dequeue) and, when A != 0, `calad A`.
@@ -4892,12 +4892,12 @@ int c54x_run(C54xState *s, int n_insns)
                        * run, but WHO ENQUEUES. The enqueue is 0xaac3 (39
                        * callers), a ring of 14, the handler arrives in A, and
                        * overflow sets bit 5 of data[0x3f92]. */
-                      {0xaac3, "EMPILEMENT d'une tache (A = handler empile)"},
-                      {0xaaca, "  ecriture effective dans l'anneau"},
-                      {0xaad1, "  ⚠ FILE PLEINE (data[0x3f92] bit5)"},
-                      {0xaae3, "DEPILEMENT effectif (file non vide)"},
-                      {0xaadd, "  file VIDE -> A=0, la boucle tourne a blanc"},
-                      {0xa4cf, "boucle principale : calad du handler depile"},
+                      {0xaac3, "ENQUEUE of a task (A = enqueued handler)"},
+                      {0xaaca, "  actual write into the ring"},
+                      {0xaad1, "  ⚠ QUEUE FULL (data[0x3f92] bit5)"},
+                      {0xaae3, "actual DEQUEUE (queue not empty)"},
+                      {0xaadd, "  queue EMPTY -> A=0, the loop spins idle"},
+                      {0xa4cf, "main loop: calad of the dequeued handler"},
                     };
                     for (unsigned _i = 0; _i < sizeof(_pt)/sizeof(_pt[0]); _i++) {
                         if (exec_pc != _pt[_i].pc) continue;
@@ -4949,8 +4949,8 @@ int c54x_run(C54xState *s, int n_insns)
             if (_xw < 0) {
                 _xw = calypso_gate("CALYPSO_XPCWATCH", 0);
                 if (_xw)
-                    fprintf(stderr, "[c54x] XPCWATCH arme (changements de banque "
-                            "programme + bilan des pages vues)\n");
+                    fprintf(stderr, "[c54x] XPCWATCH armed (program bank "
+                            "changes + summary of the pages seen)\n");
             }
             if (_xw) {
                 uint16_t _x = (uint16_t)(s->xpc & 0xFF);
@@ -4965,9 +4965,9 @@ int c54x_run(C54xState *s, int n_insns)
                 }
                 if ((s->insn_count % 5000000u) == 0 && _xbil < 12) {
                     _xbil++;
-                    fprintf(stderr, "[c54x] XPCWATCH bilan insn=%u : pages XPC vues = "
-                            "0x%08x (bit n = page n ; 0x00000001 = page 0 SEULE = aucune "
-                            "banque jamais entree)\n",
+                    fprintf(stderr, "[c54x] XPCWATCH summary insn=%u: XPC pages seen = "
+                            "0x%08x (bit n = page n; 0x00000001 = page 0 ONLY = no "
+                            "bank ever entered)\n",
                             s->insn_count, (unsigned)_xvus);
                 }
             }
@@ -5010,9 +5010,9 @@ int c54x_run(C54xState *s, int n_insns)
                 if (p && *p) _fvper = (unsigned)strtoul(p, NULL, 0);
                 if (_fv >= 0) {
                     _fvbit = _fv - 16;
-                    fprintf(stderr, "[c54x] FORCE-VEC arme : vecteur %d (IMR bit %d), "
-                            "1 injection / %u insn quand data[0x0159]==0x728a, "
-                            "plafond 200 (BEQUILLE, voir calypso_c54x.c)\n",
+                    fprintf(stderr, "[c54x] FORCE-VEC armed: vector %d (IMR bit %d), "
+                            "1 injection / %u insn when data[0x0159]==0x728a, "
+                            "cap 200 (CRUTCH, see calypso_c54x.c)\n",
                             _fv, _fvbit, _fvper);
                 }
             }
@@ -5054,12 +5054,12 @@ int c54x_run(C54xState *s, int n_insns)
                         }
                         fprintf(stderr, "\n"); }
                     if (_tfr < 3) { _tfr++; _tfarm = 1; _tfn = 0;
-                        fprintf(stderr, "[c54x] TRACEFROM === entree 0x%04x #%u (task_md=%u) ===\n",
+                        fprintf(stderr, "[c54x] TRACEFROM === entry 0x%04x #%u (task_md=%u) ===\n",
                                 _tfpc, _tfr, (unsigned)(s->data[0x0804] ? s->data[0x0804] : s->data[0x0818])); }
                 }
                 if (_tfarm) {
                     if (++_tfn > 4000) { _tfarm = 0;
-                        fprintf(stderr, "[c54x] TRACEFROM fin (4000 insn)\n"); }
+                        fprintf(stderr, "[c54x] TRACEFROM end (4000 insn)\n"); }
                     else {
                         int _d = (int)s->pc - (int)_tfp;
                         if ((_d > 3 || _d < 0) && _tfn < 3000)
@@ -5067,9 +5067,9 @@ int c54x_run(C54xState *s, int n_insns)
                                     _tfp, s->pc, prog_fetch(s, s->pc),
                                     (unsigned long long)(s->a & 0xFFFFFFULL));
                         if (s->pc == 0xa076 || s->pc == 0x79e4 || s->pc == 0x9ac0) {
-                            fprintf(stderr, "[c54x] TRACEFROM *** ATTEINT 0x%04x %s ***\n", s->pc,
+                            fprintf(stderr, "[c54x] TRACEFROM *** REACHED 0x%04x %s ***\n", s->pc,
                                     s->pc == 0xa076 ? "(kernel MAC)" :
-                                    s->pc == 0x79e4 ? "(publisher d_fb_det)" : "(detecteur)");
+                                    s->pc == 0x79e4 ? "(publisher d_fb_det)" : "(detector)");
                             _tfarm = 0; }
                     }
                 }
@@ -5087,7 +5087,7 @@ int c54x_run(C54xState *s, int n_insns)
                     _in_k = 0;
                     if (_con < 40) {
                         _con++;
-                        fprintf(stderr, "[c54x] CORROUT sortie noyau -> PC=0x%04x "
+                        fprintf(stderr, "[c54x] CORROUT kernel exit -> PC=0x%04x "
                                 "A=0x%010llx B=0x%010llx T=%04x "
                                 "AR3=%04x AR4=%04x AR5=%04x AR6=%04x insn=%u\n",
                                 exec_pc,
@@ -5110,7 +5110,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (_vt < 0) _vt = calypso_gate("CALYPSO_VECTAB", 0);
             if (_vt && !_vtdone && exec_pc == 0xb01c && ++_vtseen >= 2) {
                 _vtdone = 1;
-                fprintf(stderr, "[c54x] VECTAB table de vecteurs 0x0080..0x00FF "
+                fprintf(stderr, "[c54x] VECTAB vector table 0x0080..0x00FF "
                         "(f880=B long, f4eb=RETE stub, f495=NOP)\n");
                 for (int _v = 0; _v < 32; _v++) {
                     uint16_t _a = (uint16_t)(0x0080 + _v * 4);
@@ -5123,9 +5123,9 @@ int c54x_run(C54xState *s, int n_insns)
                     fprintf(stderr, "[c54x] VECTAB   vec%-2d @0x%04x  w0=0x%04x w1=0x%04x  %-12s"
                             "%s%s\n", _v, _a, _w0, _w1, _kind,
                             _v == 19 ? "  [FRAME]" : _v == 21 ? "  [BRINT0]" : "",
-                            _fb ? "   <<<< CIBLE DANS LA ZONE FB" : "");
+                            _fb ? "   <<<< TARGET IN THE FB AREA" : "");
                 }
-                fprintf(stderr, "[c54x] VECTAB fin ; code juste AVANT 0x76f8 "
+                fprintf(stderr, "[c54x] VECTAB end; code just BEFORE 0x76f8 "
                         "(0x76e8..0x76f7):");
                 for (int _k = 0; _k < 16; _k++)
                     fprintf(stderr, " %04x", prog_fetch(s, (uint16_t)(0x76e8 + _k)));
@@ -5149,19 +5149,19 @@ int c54x_run(C54xState *s, int n_insns)
                 static int _seen = 0;
                 if (++_seen >= 2) {   /* after the table init */
                     _sddone = 1;
-                    fprintf(stderr, "[c54x] SCANDATA cellules data[] pointant dans "
+                    fprintf(stderr, "[c54x] SCANDATA data[] cells pointing into "
                             "[0x%04x..0x%04x] (routine FB) :\n", _lo, _hi);
                     for (uint32_t _a = 0; _a < C54X_DATA_SIZE; _a++) {
                         uint16_t _v = s->data[_a];
                         if (_v < _lo || _v > _hi) continue;
                         fprintf(stderr, "[c54x] SCANDATA   data[0x%04x] = 0x%04x%s\n",
                                 (unsigned)_a, _v,
-                                (_a >= 0x4380 && _a <= 0x43ff) ? "   <<<< DANS LA TABLE DE DISPATCH" :
+                                (_a >= 0x4380 && _a <= 0x43ff) ? "   <<<< IN THE DISPATCH TABLE" :
                                 (_a >= 0x0800 && _a <  0x2800) ? "   (API RAM)" : "");
                         if (++_sdhit > 60) break;
                     }
-                    fprintf(stderr, "[c54x] SCANDATA total=%u  (0 = routine FB inatteignable "
-                            "par dispatch calcule dans cette image)\n", _sdhit);
+                    fprintf(stderr, "[c54x] SCANDATA total=%u  (0 = FB routine unreachable "
+                            "by computed dispatch in this image)\n", _sdhit);
                 }
             }
         }
@@ -5187,7 +5187,7 @@ int c54x_run(C54xState *s, int n_insns)
                             "task_md=%u%s insn=%u\n", _site, exec_pc,
                             (unsigned long long)(s->a & 0xFFFFFFULL),
                             s->data[0x43c0], s->data[0x4387], s->data[0x43d8],
-                            _md, _isfb ? "  <<<< TACHE FB" : "", s->insn_count);
+                            _md, _isfb ? "  <<<< FB TASK" : "", s->insn_count);
                 }
             }
         }
@@ -5202,7 +5202,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (_sr && !_srd && exec_pc == 0xb01c) {
                 _srd = 1;
                 uint16_t _sx = s->xpc; unsigned _tot = 0;
-                fprintf(stderr, "[c54x] SCANREF cible=0x%04x (f074=CALL f272=RPTBD f820/f880=B "
+                fprintf(stderr, "[c54x] SCANREF target=0x%04x (f074=CALL f272=RPTBD f820/f880=B "
                         "76f8=ST#imm 10f8=LD)\n", _srt);
                 for (unsigned _bk = 0; _bk < 4; _bk++) {
                     s->xpc = (uint16_t)_bk; unsigned _h = 0;
@@ -5216,7 +5216,7 @@ int c54x_run(C54xState *s, int n_insns)
                     }
                 }
                 s->xpc = _sx;
-                fprintf(stderr, "[c54x] SCANREF total=%u sur 4 banks ; code @0x%04x..+15:", _tot, _srt);
+                fprintf(stderr, "[c54x] SCANREF total=%u over 4 banks; code @0x%04x..+15:", _tot, _srt);
                 for (int _k = 0; _k < 16; _k++)
                     fprintf(stderr, " %04x", prog_fetch(s, (uint16_t)(_srt + _k)));
                 fprintf(stderr, "\n");
@@ -5229,7 +5229,7 @@ int c54x_run(C54xState *s, int n_insns)
             if (_sf && !_sfd && exec_pc == 0xb01c) {
                 _sfd = 1;
                 const uint16_t _tg[4] = { 0x7708, 0x76fb, 0x770d, 0x795f };
-                const char *_nm[4] = { "corps FB", "stub entree", "sous-prog", "correlation" };
+                const char *_nm[4] = { "FB body", "entry stub", "subroutine", "correlation" };
                 uint16_t _sx = s->xpc;
                 for (unsigned _bk = 0; _bk < 4; _bk++) {
                     s->xpc = (uint16_t)_bk;
@@ -5247,7 +5247,7 @@ int c54x_run(C54xState *s, int n_insns)
                     }
                 }
                 s->xpc = _sx;
-                fprintf(stderr, "[c54x] SCANFB fin (f074=CALL, f272=BD, fc00=RET, 76f8=ST #imm)\n");
+                fprintf(stderr, "[c54x] SCANFB end (f074=CALL, f272=BD, fc00=RET, 76f8=ST #imm)\n");
             }
         }
         {   /* FBENTRY (CALYPSO_FBENTRY): traces the FB routine range
@@ -5273,18 +5273,18 @@ int c54x_run(C54xState *s, int n_insns)
                                 s->ar[1], s->ar[2], s->st0, s->st1); }
                 } else if (_in) { _in = 0; _after = 10;
                     if (_n < 250) { _n++;
-                        fprintf(stderr, "[c54x] FBENTRY *** SORTIE vers 0x%04x *** (op=0x%04x) "
-                                "SP=0x%04x pile[SP]=0x%04x pile[SP+1]=0x%04x%s\n",
+                        fprintf(stderr, "[c54x] FBENTRY *** EXIT to 0x%04x *** (op=0x%04x) "
+                                "SP=0x%04x stack[SP]=0x%04x stack[SP+1]=0x%04x%s\n",
                                 exec_pc, prog_fetch(s, exec_pc), s->sp,
                                 s->data[s->sp], s->data[(uint16_t)(s->sp + 1)],
                                 (exec_pc >= 0x0080 && exec_pc <= 0x00ff)
-                                    ? "  [VECTEUR IT]" : ""); }
+                                    ? "  [IRQ VECTOR]" : ""); }
                 } else if (_after > 0) { _after--;
                     if (_n < 250) { _n++;
-                        fprintf(stderr, "[c54x] FBENTRY   apres-sortie pc=0x%04x op=0x%04x SP=0x%04x%s\n",
+                        fprintf(stderr, "[c54x] FBENTRY   after-exit pc=0x%04x op=0x%04x SP=0x%04x%s\n",
                                 exec_pc, prog_fetch(s, exec_pc), s->sp,
                                 (exec_pc == 0x7707 || exec_pc == 0x7708)
-                                    ? "  <<<< RETOUR DANS LA ROUTINE FB" : ""); }
+                                    ? "  <<<< RETURN INTO THE FB ROUTINE" : ""); }
                 }
             }
         }
@@ -5304,9 +5304,9 @@ int c54x_run(C54xState *s, int n_insns)
                     if (prog_fetch(s, (uint16_t)_p) == 0x43d8) {
                         uint16_t _o2 = prog_fetch(s, (uint16_t)(_p-2));
                         uint16_t _o1 = prog_fetch(s, (uint16_t)(_p-1));
-                        const char *_k = (_o2 == 0x76f8) ? "ST #imm -> INSTALLE"
-                                       : (_o2 == 0x10f8) ? "LD -> LIT"
-                                       : (_o1 == 0x76f8) ? "ST #imm (dec) -> INSTALLE" : "?";
+                        const char *_k = (_o2 == 0x76f8) ? "ST #imm -> INSTALLS"
+                                       : (_o2 == 0x10f8) ? "LD -> READS"
+                                       : (_o1 == 0x76f8) ? "ST #imm (dec) -> INSTALLS" : "?";
                         fprintf(stderr, "[c54x] SCAN43D8 @0x%04x prev2=0x%04x prev1=0x%04x  %s\n",
                                 _p, _o2, _o1, _k);
                         if (++_h > 60) break;
@@ -5314,7 +5314,7 @@ int c54x_run(C54xState *s, int n_insns)
                 }
                 }
                 s->xpc = _savedxpc;
-                fprintf(stderr, "[c54x] SCAN43D8 total=%u sur 4 banks\n", _h);
+                fprintf(stderr, "[c54x] SCAN43D8 total=%u over 4 banks\n", _h);
                 fprintf(stderr, "[c54x] SCAN43D8 code @0xbaf8..0xbb10:");
                 for (int _k2 = 0; _k2 < 25; _k2++)
                     fprintf(stderr, " %04x", prog_fetch(s, (uint16_t)(0xbaf8 + _k2)));
@@ -5346,13 +5346,13 @@ int c54x_run(C54xState *s, int n_insns)
                 if (_md != _pmd) {
                     if (_md == 5 && _rounds < 3) {
                         _rounds++; _arm = 1; _steps = 0;
-                        fprintf(stderr, "[c54x] FBCALL === tache FB #%u (d_task_md=5) ===\n", _rounds);
+                        fprintf(stderr, "[c54x] FBCALL === FB task #%u (d_task_md=5) ===\n", _rounds);
                     }
                     _pmd = _md;
                 }
                 if (_arm) {
                     if (++_steps > 20000) { _arm = 0;
-                        fprintf(stderr, "[c54x] FBCALL fin (20000 insn) sans 0x7700\n"); }
+                        fprintf(stderr, "[c54x] FBCALL end (20000 insn) without 0x7700\n"); }
                     else {
                         int _d = (int)s->pc - (int)_ppc;
                         if ((_d > 3 || _d < 0) && _logged < 300) {
@@ -5383,7 +5383,7 @@ int c54x_run(C54xState *s, int n_insns)
                     unsigned _md = s->data[0x0804] ? s->data[0x0804] : s->data[0x0818];
                     fprintf(stderr, "[c54x] DISPIDX idx=%u slot=data[0x%04x]=0x%04x "
                             "d_task_md=%u%s insn=%u\n", _idx, _slotaddr, _slot, _md,
-                            (_md == 5) ? "  <<<< TACHE FB" : "", s->insn_count);
+                            (_md == 5) ? "  <<<< FB TASK" : "", s->insn_count);
                 }
             }
         }
@@ -5399,7 +5399,7 @@ int c54x_run(C54xState *s, int n_insns)
                     if ((_k % 16) == 0) fprintf(stderr, "\n  0x%04x:", 0x4380 + _k);
                     fprintf(stderr, " %04x", s->data[0x4380 + _k]);
                 }
-                fprintf(stderr, "\n  (0xab38 = handler par defaut ; on cherche le slot FB)\n");
+                fprintf(stderr, "\n  (0xab38 = default handler; looking for the FB slot)\n");
             }
         }
         {   /* TASKGO (CALYPSO_TASKGO): on each rising edge of d_task_md to 5
@@ -5427,10 +5427,10 @@ int c54x_run(C54xState *s, int n_insns)
                             s->pc, s->xpc, prog_fetch(s, s->pc),
                             (unsigned long long)(s->a & 0xFFFFFFULL));
                     if (s->pc >= 0x7700 && s->pc <= 0x79f0) {
-                        fprintf(stderr, "[c54x] TASKGO *** ATTEINT LA ROUTINE FB 0x%04x ***\n", s->pc);
+                        fprintf(stderr, "[c54x] TASKGO *** REACHED THE FB ROUTINE 0x%04x ***\n", s->pc);
                         _armed = 0; }
                 } else if (_armed) { _armed = 0;
-                    fprintf(stderr, "[c54x] TASKGO fin (250 pas) sans 0x7700 ; PC max vu=0x%04x\n", _hi); }
+                    fprintf(stderr, "[c54x] TASKGO end (250 steps) without 0x7700; max PC seen=0x%04x\n", _hi); }
             }
         }
         }   /* C54X_SONDES : TRACEFROM .. TASKGO */
@@ -5463,10 +5463,10 @@ int c54x_run(C54xState *s, int n_insns)
                 const char *t = calypso_getenv("CALYPSO_DISPATCH_INSTALL_TASK");
                 _ditask = (t && *t) ? atoi(t) : -1;   /* -1 = any task */
                 if (_di2 >= 0)
-                    fprintf(stderr, "[c54x] DISPATCH-INSTALL arme : data[0x43d8] "
-                            "<- 0x%04x pour d_task_md=%s (BEQUILLE, voir "
+                    fprintf(stderr, "[c54x] DISPATCH-INSTALL armed: data[0x43d8] "
+                            "<- 0x%04x for d_task_md=%s (CRUTCH, see "
                             "calypso_c54x.c)\n", (unsigned)_di2,
-                            _ditask < 0 ? "toute tache non nulle" : "la tache demandee");
+                            _ditask < 0 ? "any nonzero task" : "the requested task");
             }
             /* @BEQUILLE - FORCE_TASK  (CALYPSO_FORCE_TASK=<n>, default OFF)
              *   masks   : the L1's inability to SUSTAIN its CCCH command. It orders a
@@ -5492,9 +5492,9 @@ int c54x_run(C54xState *s, int n_insns)
                     const char *e = calypso_getenv("CALYPSO_FORCE_TASK");
                     _ft = (e && *e) ? (int)strtol(e, NULL, 0) : -1;
                     if (_ft >= 0)
-                        fprintf(stderr, "[c54x] FORCE-TASK arme : d_task_md <- %d "
-                                "quand l'ARM ne commande rien (BEQUILLE — la commande "
-                                "est fabriquee, le RESULTAT ne l'est pas)\n", _ft);
+                        fprintf(stderr, "[c54x] FORCE-TASK armed: d_task_md <- %d "
+                                "when the ARM commands nothing (CRUTCH — the command "
+                                "is fabricated, the RESULT is not)\n", _ft);
                 }
                 /* A reception command is never a single word. osmocom-bb
                  * calypso/dsp.c:479 has three fields:
@@ -5587,7 +5587,7 @@ int c54x_run(C54xState *s, int n_insns)
 
                     if (_ftn++ < 20)
                         fprintf(stderr, "[c54x] FORCE-TASK #%u page=%u d_task_d<-%d "
-                                "d_burst_d<-%u tsc=%d d_dsp_page<-0x%04x (fin de "
+                                "d_burst_d<-%u tsc=%d d_dsp_page<-0x%04x (end of "
                                 "scenario) insn=%u\n", _ftn, pg, _ft, bid, _ftsc,
                                 (unsigned)(0x0002u | pg), s->insn_count);
                 }
@@ -5624,9 +5624,9 @@ int c54x_run(C54xState *s, int n_insns)
                 } else if (_cur != 0xab38 && _cur != (uint16_t)_di2) {
                     static int _dit = 0;
                     if (!_dit++)
-                        fprintf(stderr, "[c54x] DISPATCH-INSTALL : un VRAI handler "
-                                "0x%04x est apparu dans data[0x43d8] — la bequille "
-                                "se retire, cherchez qui l'a pose\n", _cur);
+                        fprintf(stderr, "[c54x] DISPATCH-INSTALL: a REAL handler "
+                                "0x%04x appeared in data[0x43d8] — the crutch "
+                                "withdraws, find out who set it\n", _cur);
                 }
             }
         }
@@ -5669,8 +5669,8 @@ int c54x_run(C54xState *s, int n_insns)
                 if (_dcn2 < 2) _dcn2 = 2;
                 if (_dcn2 > DC_MAX) _dcn2 = DC_MAX;
                 if (_dc)
-                    fprintf(stderr, "[c54x] DISPCALL arme : %d PC apres chaque passage "
-                            "a 0xb01c, replie, 40 lignes max\n", _dcn2);
+                    fprintf(stderr, "[c54x] DISPCALL armed: %d PCs after each pass "
+                            "at 0xb01c, folded, 40 lines max\n", _dcn2);
             }
             if (_dc) {
                 if (exec_pc == 0xb01c) {          /* (re)arm */
@@ -5699,14 +5699,14 @@ int c54x_run(C54xState *s, int n_insns)
                                     if (_dc_seq[_i] >= 0x7700 && _dc_seq[_i] <= 0x79f0) _fb = 1;
                                 }
                                 fprintf(stderr, "[c54x] DISPCALL slot=data[0x43d8]=0x%04x "
-                                        "d_task_md=%u insn=%u (x%u identiques avant) :",
+                                        "d_task_md=%u insn=%u (x%u identical before):",
                                         _dc_slot, (unsigned)_dc_md, s->insn_count, _dc_rep);
                                 for (_i = 0; _i < _dc_k; _i++)
                                     fprintf(stderr, " 0x%04x", _dc_seq[_i]);
                                 fprintf(stderr, "  -> %s%s\n",
-                                        _entre ? "*** ENTRE DANS LE SLOT ***"
-                                               : "slot JAMAIS atteint",
-                                        _fb ? " + banque FB 0x7700-0x79f0" : "");
+                                        _entre ? "*** ENTERS THE SLOT ***"
+                                               : "slot NEVER reached",
+                                        _fb ? " + FB bank 0x7700-0x79f0" : "");
                             }
                             _dc_rep = 0;
                             for (_i = 0; _i < _dc_k; _i++) _dc_prev[_i] = _dc_seq[_i];
@@ -5746,7 +5746,7 @@ int c54x_run(C54xState *s, int n_insns)
                             exec_pc, s->ar[0], s->ar[1],
                             s->data[0x433e], s->data[0x433f], s->data[0x3fde],
                             exec_pc == 0xaa8d
-                                ? (s->ar[1] ? "banz -> DEPILE" : "banz -> VIDE")
+                                ? (s->ar[1] ? "banz -> DEQUEUES" : "banz -> EMPTY")
                                 : "",
                             s->insn_count);
                 }
@@ -5772,10 +5772,10 @@ int c54x_run(C54xState *s, int n_insns)
                             s->pc, s->xpc, prog_fetch(s, s->pc),
                             (unsigned long long)(s->a & 0xFFFFFFULL), s->insn_count);
                     if (s->pc >= 0x7700 && s->pc <= 0x79f0) {
-                        fprintf(stderr, "[c54x] AB38-FLOW *** ATTEINT LA ROUTINE FB 0x%04x ***\n", s->pc);
+                        fprintf(stderr, "[c54x] AB38-FLOW *** REACHED THE FB ROUTINE 0x%04x ***\n", s->pc);
                         _armed = 0; }
                 } else if (_armed) { _armed = 0;
-                    fprintf(stderr, "[c54x] AB38-FLOW fin de fenetre (120 pas) sans atteindre 0x7700\n"); }
+                    fprintf(stderr, "[c54x] AB38-FLOW end of window (120 steps) without reaching 0x7700\n"); }
             }
         }
         {   /* FBROUTE (CALYPSO_FBROUTE): high-water mark of the PC inside the
@@ -5868,7 +5868,7 @@ int c54x_run(C54xState *s, int n_insns)
                     if (exec_pc > _hi) {
                         _hi = exec_pc;
                         fprintf(stderr, "[c54x] FBROUTE high-water PC=0x%04x (hits=%u) "
-                                "[0x7725=CALL corr, 0x798c=SNR incond, 0x79e4=ORM d_fb_det]\n",
+                                "[0x7725=CALL corr, 0x798c=SNR uncond, 0x79e4=ORM d_fb_det]\n",
                                 exec_pc, _in);
                     }
                 }
@@ -5884,7 +5884,7 @@ int c54x_run(C54xState *s, int n_insns)
                         unsigned _dp = (unsigned)(s->st0 & 0x1FF);
                         unsigned _ea = _dp * 0x80 + 0x7e;   /* dma(0x7e), DP-relative */
                         fprintf(stderr, "[c54x] FBROUTE jalon PC=0x%04x #%u A=0x%06llx "
-                                "DP=0x%03x dma(0x7e)=data[0x%04x]=0x%04x (garde veut 4) insn=%u\n",
+                                "DP=0x%03x dma(0x7e)=data[0x%04x]=0x%04x (guard wants 4) insn=%u\n",
                                 exec_pc, _ms[_k], (unsigned long long)(s->a & 0xFFFFFFULL),
                                 _dp, _ea, (_ea < 0x10000) ? s->data[_ea] : 0, s->insn_count);
                     }
@@ -5981,26 +5981,26 @@ int c54x_run(C54xState *s, int n_insns)
                     double rms  = np > 1 ? sqrt(en / (double)(np - 1)) : 0.0;
                     double ad   = fabs(dphi);
                     const char *v;
-                    if (rms < 1.0)                        v = "VIDE (buffer non alimente)";
+                    if (rms < 1.0)                        v = "EMPTY (buffer not fed)";
                     else if (coh > 0.90 && ad > 1.37 && ad < 1.77)
-                        v = (dphi > 0) ? "FCCH @1SPS OK -- c est ce que le kernel cherche"
-                                       : "FCCH @1SPS MIROIR -> CALYPSO_DL_IQ_CONJ=1";
+                        v = (dphi > 0) ? "FCCH @1SPS OK -- this is what the kernel looks for"
+                                       : "FCCH @1SPS MIRROR -> CALYPSO_DL_IQ_CONJ=1";
                     else if (coh > 0.90 && ad > 0.29 && ad < 0.49)
-                        v = "4 SPS NON DECIME -> CALYPSO_BSP_IQ_DECIM=4 (et FB_IQ_OWNS=0)";
+                        v = "4 SPS NOT DECIMATED -> CALYPSO_BSP_IQ_DECIM=4 (and FB_IQ_OWNS=0)";
                     else if (coh > 0.90 && ad < 0.29)
-                        v = "sur-echantillonne (>4 SPS) ou pas un ton -> verifier la source";
-                    else                                  v = "BRUIT/DATA -- pas un ton FCCH";
+                        v = "oversampled (>4 SPS) or not a tone -> check the source";
+                    else                                  v = "NOISE/DATA -- not an FCCH tone";
                     static unsigned _prevwr = 0;
                     unsigned _dwr = calypso_daram_wr_count - _prevwr;
                     _prevwr = calypso_daram_wr_count;
-                    fprintf(stderr, "[c54x] DARAM-SANITY rec=%u fn=%u depots_depuis=%u coh=%.3f "
+                    fprintf(stderr, "[c54x] DARAM-SANITY rec=%u fn=%u deposits_since=%u coh=%.3f "
                             "dphi=%+.3f (%+.2fxpi/2) rms=%.0f : %s%s\n", _ddn,
                             calypso_daram_last_fn, _dwr, coh, dphi, dphi / (M_PI/2), rms, v,
-                            _dwr == 0 ? "  [BUFFER FIGE : aucun depot BSP depuis le dump precedent]" : "");
+                            _dwr == 0 ? "  [BUFFER FROZEN: no BSP deposit since the previous dump]" : "");
                 }
                 if (++_ddn >= _ddmax) {
                     fflush(_ddf); fclose(_ddf); _ddf = NULL;
-                    fprintf(stderr, "[c54x] DARAM-DUMP done : %u records de %u mots\n", _ddn, nw);
+                    fprintf(stderr, "[c54x] DARAM-DUMP done: %u records of %u words\n", _ddn, nw);
                 } else if ((_ddn % 20) == 0) {
                     fflush(_ddf);
                     fprintf(stderr, "[c54x] DARAM-DUMP rec=%u\n", _ddn);
@@ -6715,7 +6715,7 @@ int c54x_run(C54xState *s, int n_insns)
                 dsp_yield = (e && *e) ? atoi(e) : 32768;
                 if (dsp_yield < 0) dsp_yield = 0;
                 fprintf(stderr, "[c54x] CALYPSO_DSP_YIELD = %d insn/yield %s\n",
-                        dsp_yield, dsp_yield ? "(variateur ON)" : "(OFF, legacy)");
+                        dsp_yield, dsp_yield ? "(throttle ON)" : "(OFF, legacy)");
             }
             /* Yield only at an INTERRUPTIBLE point. The yield hands control to
              * the main loop, which delivers the interrupt to the DSP, and on a
@@ -6820,11 +6820,11 @@ void c54x_early_boot(C54xState *s)
     c54x_run(s, 2000);   /* reset (0xff80) -> 0xb419 (sets IDLE) -> park at 0xb41c */
     if (s->pc >= 0xb41c && s->pc <= 0xb428) {
         g_c54x_early_booted = true;   /* suppresses the re-reset in calypso_trx.c */
-        fprintf(stderr, "[c54x-earlyboot] PARK pc=0x%04x (de 0x%04x) insn=%u "
-                "data[0x0fff]=0x%04x data[0x0ffe]=0x%04x (attendu IDLE 0x0001)\n",
+        fprintf(stderr, "[c54x-earlyboot] PARK pc=0x%04x (from 0x%04x) insn=%u "
+                "data[0x0fff]=0x%04x data[0x0ffe]=0x%04x (expected IDLE 0x0001)\n",
                 s->pc, pc0, s->insn_count, s->data[0x0fff], s->data[0x0ffe]);
     } else {
-        fprintf(stderr, "[c54x-earlyboot] WARN pas parque pc=0x%04x insn=%u "
+        fprintf(stderr, "[c54x-earlyboot] WARN not parked pc=0x%04x insn=%u "
                 "-> execution continue\n", s->pc, s->insn_count);
     }
 }
@@ -7093,7 +7093,7 @@ void c54x_reset(C54xState *s)
                     s->sp, s->pmst, s->st0, s->st1, s->imr, s->ifr, s->ar[0],
                     s->brc, s->rsa, s->rea);
         } else {
-            C54_LOG("reset: registres = hardcode C (mode c54x ou pas de .bin) "
+            C54_LOG("reset: registers = hardcoded C (c54x mode or no .bin) "
                     "SP=0x%04x PMST=0x%04x IMR=0x%04x IFR=0x%04x AR0=0x%04x",
                     s->sp, s->pmst, s->imr, s->ifr, s->ar[0]);
         }
@@ -7243,8 +7243,8 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
     if (imr_bit == 5 && !unmasked && calypso_fix_enabled("FIX_BRINT0_UNMASK")) {
         static unsigned _bu = 0;
         if (_bu++ < 5)
-            fprintf(stderr, "[c54x] FIX_BRINT0_UNMASK : bit 5 demasque ARTIFICIELLEMENT "
-                    "(IMR=0x%04x, IFR=0x%04x, PC=0x%04x) — diagnostic, pas un correctif\n",
+            fprintf(stderr, "[c54x] FIX_BRINT0_UNMASK: bit 5 ARTIFICIALLY unmasked "
+                    "(IMR=0x%04x, IFR=0x%04x, PC=0x%04x) — diagnostic, not a fix\n",
                     s->imr, s->ifr, s->pc);
         unmasked = true;
     }
@@ -7334,7 +7334,7 @@ void c54x_interrupt_ex(C54xState *s, int vec, int imr_bit)
             (s->ifr & (1u << 12)) && (s->imr & (1u << 12))) {
             static unsigned _fp = 0;
             if (_fp++ < 30)
-                fprintf(stderr, "[c54x] FRAME-IT-PRIO override vec=%d->28 (frame latchee) "
+                fprintf(stderr, "[c54x] FRAME-IT-PRIO override vec=%d->28 (frame latched) "
                         "IFR=0x%04x IMR=0x%04x PC=0x%04x insn=%u\n",
                         vec, s->ifr, s->imr, s->pc, s->insn_count);
             vec = 28; imr_bit = 12;
@@ -7437,7 +7437,7 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
             prev_h = h;
             if (n_tot <= 20 || (n_tot % 500) == 0)
                 fprintf(stderr, "[c54x] FEED-FP OUT #%llu fp=%08x nz=%u/%d "
-                        "identiques=%llu/%llu\n",
+                        "identical=%llu/%llu\n",
                         n_tot, h, nz, n, n_same, n_tot);
         }
     }
@@ -7509,7 +7509,7 @@ void c54x_bsp_load(C54xState *s, const uint16_t *samples, int n)
             if (r && *r) snr_db = atof(r);
             graine0 = (g && *g) ? (uint32_t)strtoul(g, NULL, 0) : 0x9e3779b9u;
             if (sigma_fixe > 0 || snr_db > -999)
-                fprintf(stderr, "[c54x] INJECTEUR DE BRUIT : %s %g\n", sigma_fixe > 0 ? "sigma" : "SNR dB",
+                fprintf(stderr, "[c54x] NOISE INJECTOR: %s %g\n", sigma_fixe > 0 ? "sigma" : "SNR dB",
                         sigma_fixe > 0 ? sigma_fixe : snr_db);
         }
         if ((sigma_fixe > 0 || snr_db > -999) && n >= 2) {

@@ -103,13 +103,13 @@ MASQUE64 = (1 << 64) - 1
 def _adresse(txt, option):
     hote, sep, port = txt.rpartition(":")
     if not sep or not hote:
-        raise argparse.ArgumentTypeError("%s : HOTE:PORT attendu, pas %r" % (option, txt))
+        raise argparse.ArgumentTypeError("%s: HOST:PORT expected, not %r" % (option, txt))
     try:
         p = int(port)
     except ValueError:
-        raise argparse.ArgumentTypeError("%s : port invalide %r" % (option, port))
+        raise argparse.ArgumentTypeError("%s: invalid port %r" % (option, port))
     if not 0 < p < 65536:
-        raise argparse.ArgumentTypeError("%s : port hors bornes %d" % (option, p))
+        raise argparse.ArgumentTypeError("%s: port out of range %d" % (option, p))
     return (hote, p)
 
 
@@ -262,10 +262,10 @@ class Stats:
         pps = (self.dl - self.dl_prec) / dt
         self.t_prec, self.dl_prec = now, self.dl
         ber = (self.inverses / self.bits) if self.bits else 0.0
-        return ("%s t=%.0fs DL recus=%d relayes=%d alteres=%d effaces=%d hors_tn=%d autres=%d iq_deja=%d"
-                " iq_produits=%d souples=%d | bits=%d inverses=%d BER=%.3e | UL relayes=%d sans_dest=%d"
-                " | erreurs_envoi=%d | %.0f pq/s"
-                % ("BILAN" if final else "STATS", now - self.t0, self.dl, self.relayes, self.alteres,
+        return ("%s t=%.0fs DL received=%d relayed=%d altered=%d erased=%d off_tn=%d other=%d iq_already=%d"
+                " iq_made=%d soft=%d | bits=%d flipped=%d BER=%.3e | UL relayed=%d no_dest=%d"
+                " | send_errors=%d | %.0f pkt/s"
+                % ("SUMMARY" if final else "STATS", now - self.t0, self.dl, self.relayes, self.alteres,
                    self.effaces, self.hors_tn, self.autres, self.iq_deja, self.iq_produits, self.souples,
                    self.bits, self.inverses, ber, self.ul, self.ul_sans_dest, self.err_envoi, pps))
 
@@ -433,37 +433,37 @@ class Degradeur:
 def _parser():
     p = argparse.ArgumentParser(
         prog="injecteur_bruit.py",
-        description="Proxy UDP transparent pont -> couche 1 qui degrade le sens descendant "
-                    "(bits inverses, AWGN, I/Q bruite). Le montant est relaye sans modification.")
+        description="Transparent UDP proxy bridge -> layer 1 that degrades the downlink "
+                    "(flipped bits, AWGN, noisy I/Q). The uplink is relayed unchanged.")
     p.add_argument("--cible", choices=sorted(PROFILS), default="dsp",
-                   help="format du flux : dsp (TRXD 8 o + 148 bits, BSP de c54x_exe) ou grgsm "
-                        "(GSMTAP vers la L1 gr-gsm de QEMU) ; defaut dsp")
-    p.add_argument("--mode", choices=MODES, default="ber", help="defaut ber")
-    p.add_argument("--ecoute", help="HOTE:PORT ou la source envoie (dsp 127.0.0.1:6702, grgsm 127.0.0.1:14730)")
-    p.add_argument("--vers", help="HOTE:PORT de la couche 1 (dsp 127.0.0.1:16702, grgsm 127.0.0.1:4730)")
-    p.add_argument("--source", help="HOTE:PORT local d'emission vers la L1 (defaut : port libre)")
-    p.add_argument("--retour", help="HOTE:PORT ou renvoyer le montant (defaut : l'emetteur du dernier descendant)")
-    p.add_argument("--ber", type=float, default=0.0, help="mode ber : taux moyen d'inversion (0..1)")
+                   help="stream format: dsp (TRXD 8 B + 148 bits, c54x_exe BSP) or grgsm "
+                        "(GSMTAP to QEMU's gr-gsm L1); default dsp")
+    p.add_argument("--mode", choices=MODES, default="ber", help="default ber")
+    p.add_argument("--ecoute", help="HOST:PORT the source sends to (dsp 127.0.0.1:6702, grgsm 127.0.0.1:14730)")
+    p.add_argument("--vers", help="HOST:PORT of layer 1 (dsp 127.0.0.1:16702, grgsm 127.0.0.1:4730)")
+    p.add_argument("--source", help="local HOST:PORT to send to the L1 from (default: free port)")
+    p.add_argument("--retour", help="HOST:PORT to send the uplink back to (default: sender of the last downlink)")
+    p.add_argument("--ber", type=float, default=0.0, help="ber mode: mean flip rate (0..1)")
     p.add_argument("--rafales", type=float, default=0.0, metavar="L",
-                   help="mode ber : erreurs en rafales de L bits en moyenne (Gilbert-Elliott)")
-    p.add_argument("--ber-rafale", type=float, default=0.5, help="taux d'erreur dans une rafale (defaut 0,5)")
+                   help="ber mode: errors in bursts of L bits on average (Gilbert-Elliott)")
+    p.add_argument("--ber-rafale", type=float, default=0.5, help="error rate inside a burst (default 0.5)")
     p.add_argument("--snr-db", type=float, default=None,
-                   help="modes souple et iq : SNR en dB, P_signal / (2 sigma^2) par echantillon complexe "
-                        "(meme definition que CALYPSO_BSP_SNR_DB)")
+                   help="souple and iq modes: SNR in dB, P_signal / (2 sigma^2) per complex sample "
+                        "(same definition as CALYPSO_BSP_SNR_DB)")
     p.add_argument("--perte", type=float, default=0.0,
-                   help="probabilite d'effacer un burst (dsp : bits aleatoires) ou un bloc (grgsm : non transmis)")
-    p.add_argument("--tn", default="tous", help="intervalles a degrader, ex. 0 ou 1,2 (defaut tous)")
-    p.add_argument("--graine", type=lambda s: int(s, 0), default=None, help="graine (deterministe)")
-    p.add_argument("--amp", type=int, default=30000, help="mode iq : amplitude (defaut 30000, comme le BSP)")
+                   help="probability of erasing a burst (dsp: random bits) or a block (grgsm: not sent)")
+    p.add_argument("--tn", default="tous", help="timeslots to degrade, e.g. 0 or 1,2 (default tous = all)")
+    p.add_argument("--graine", type=lambda s: int(s, 0), default=None, help="seed (deterministic)")
+    p.add_argument("--amp", type=int, default=30000, help="iq mode: amplitude (default 30000, like the BSP)")
     p.add_argument("--iq-elargir", type=float, default=0.3,
-                   help="mode iq : elargissement des NB comme gmsk_elargir (defaut 0,3 ; 0 = aucun)")
+                   help="iq mode: NB widening like gmsk_elargir (default 0.3; 0 = none)")
     p.add_argument("--forcer-iq", action="store_true",
-                   help="mode iq malgre CALYPSO_BSP_STREAM=1 ou CALYPSO_BSP_IQ_PASSTHROUGH=0")
-    p.add_argument("--stats", type=float, default=10.0, help="periode des statistiques en s (0 = seulement le bilan)")
-    p.add_argument("--journal", help="fichier journal (en plus de stderr)")
-    p.add_argument("--pidfile", help="ecrit le pid, efface a l'arret")
-    p.add_argument("--etiquette", default="", help="libre, pour reconnaitre le processus (pkill -f)")
-    p.add_argument("--verifier", action="store_true", help="controle la configuration et sort")
+                   help="iq mode despite CALYPSO_BSP_STREAM=1 or CALYPSO_BSP_IQ_PASSTHROUGH=0")
+    p.add_argument("--stats", type=float, default=10.0, help="statistics period in s (0 = final summary only)")
+    p.add_argument("--journal", help="log file (in addition to stderr)")
+    p.add_argument("--pidfile", help="writes the pid, removed on exit")
+    p.add_argument("--etiquette", default="", help="free text, to recognise the process (pkill -f)")
+    p.add_argument("--verifier", action="store_true", help="checks the configuration and exits")
     p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     return p
 
@@ -476,33 +476,33 @@ def _valider(a, p):
     a.source = _adresse(a.source, "--source") if a.source else None
     a.retour = _adresse(a.retour, "--retour") if a.retour else None
     if a.ecoute == a.vers:
-        p.error("--ecoute et --vers designent la meme adresse %s:%d : l'injecteur s'enverrait ses propres paquets" % a.ecoute)
+        p.error("--ecoute and --vers are the same address %s:%d: the injector would send itself its own packets" % a.ecoute)
     if a.cible == "grgsm" and a.mode not in MODES_GRGSM:
-        p.error("cible grgsm : mode %s impossible. Le flux GSMTAP vers QEMU porte des blocs L2 deja decodes "
-                "(16 o d'en-tete + 23 o), ni valeurs souples ni bursts a moduler (calypso_l1_grgsm.c "
-                "gsmtap_readable). Modes possibles : %s (et --perte)." % (a.mode, ", ".join(MODES_GRGSM)))
+        p.error("grgsm target: mode %s not possible. The GSMTAP stream to QEMU carries already decoded L2 blocks "
+                "(16 B header + 23 B), no soft values and no bursts to modulate (calypso_l1_grgsm.c "
+                "gsmtap_readable). Possible modes: %s (and --perte)." % (a.mode, ", ".join(MODES_GRGSM)))
     for nom in ("ber", "perte", "ber_rafale"):
         v = getattr(a, nom)
         if not 0.0 <= v <= 1.0:
-            p.error("--%s doit etre entre 0 et 1 (%g)" % (nom.replace("_", "-"), v))
+            p.error("--%s must be between 0 and 1 (%g)" % (nom.replace("_", "-"), v))
     if a.mode == "ber" and a.rafales:
         if a.rafales < 1.0:
-            p.error("--rafales : longueur moyenne en bits >= 1 (%g)" % a.rafales)
+            p.error("--rafales: mean length in bits >= 1 (%g)" % a.rafales)
         if not 0.0 < a.ber_rafale <= 1.0 or a.ber >= a.ber_rafale:
-            p.error("--rafales : il faut --ber (%g) < --ber-rafale (%g) <= 1" % (a.ber, a.ber_rafale))
+            p.error("--rafales: needs --ber (%g) < --ber-rafale (%g) <= 1" % (a.ber, a.ber_rafale))
     if a.mode == "souple" and a.snr_db is None:
-        p.error("mode souple : --snr-db obligatoire")
+        p.error("souple mode: --snr-db required")
     if a.snr_db is not None and not -50.0 <= a.snr_db <= 100.0:
-        p.error("--snr-db hors bornes raisonnables (%g)" % a.snr_db)
+        p.error("--snr-db outside reasonable bounds (%g)" % a.snr_db)
     if a.tn in ("", "tous", "all"):
         a.tn_set = None
     else:
         try:
             a.tn_set = {int(x) for x in a.tn.split(",") if x.strip() != ""}
         except ValueError:
-            p.error("--tn : liste d'intervalles 0..7 attendue (%r)" % a.tn)
+            p.error("--tn: list of timeslots 0..7 expected (%r)" % a.tn)
         if not a.tn_set or any(not 0 <= x <= 7 for x in a.tn_set):
-            p.error("--tn : intervalles 0..7 (%r)" % a.tn)
+            p.error("--tn: timeslots 0..7 (%r)" % a.tn)
     if a.graine is None:
         a.graine = int.from_bytes(os.urandom(4), "little")
         a.graine_tiree = True
@@ -512,25 +512,25 @@ def _valider(a, p):
     np = None
     if a.mode == "iq":
         if a.cible != "dsp":
-            p.error("mode iq : cible dsp seulement")
+            p.error("iq mode: dsp target only")
         try:
             import numpy as np  # noqa: F811 - only the iq mode needs it
         except ImportError:
-            p.error("mode iq : numpy est necessaire et introuvable pour %s "
-                    "(apt-get install python3-numpy, ou pip install numpy). "
-                    "Les modes relais, ber et souple n'en ont pas besoin." % sys.executable)
+            p.error("iq mode: numpy is required and not found for %s "
+                    "(apt-get install python3-numpy, or pip install numpy). "
+                    "The relais, ber and souple modes do not need it." % sys.executable)
         if not a.forcer_iq:
             if os.environ.get("CALYPSO_BSP_STREAM", "") == "1":
-                p.error("mode iq refuse : CALYPSO_BSP_STREAM=1. En STREAM le BSP range les 148 premiers octets "
-                        "de chaque paquet comme des BITS avant de regarder s'il s'agit d'I/Q "
-                        "(calypso_bsp.c bsp_trxd_readable -> bsp_ts0_stocker) : l'I/Q y serait lu comme du bruit "
-                        "de bits. Lancez c54x_exe sans STREAM, ou --forcer-iq (BRUIT_OPTS=--forcer-iq).")
+                p.error("iq mode refused: CALYPSO_BSP_STREAM=1. In STREAM the BSP stores the first 148 bytes "
+                        "of each packet as BITS before checking whether it is I/Q "
+                        "(calypso_bsp.c bsp_trxd_readable -> bsp_ts0_stocker): the I/Q would be read as bit "
+                        "noise. Start c54x_exe without STREAM, or --forcer-iq (BRUIT_OPTS=--forcer-iq).")
             if os.environ.get("CALYPSO_BSP_IQ_PASSTHROUGH", "") == "0":
-                p.error("mode iq refuse : CALYPSO_BSP_IQ_PASSTHROUGH=0, le BSP ne lit pas l'I/Q.")
+                p.error("iq mode refused: CALYPSO_BSP_IQ_PASSTHROUGH=0, the BSP does not read I/Q.")
         if not 1000 <= a.amp <= 32767:
-            p.error("--amp : 1000..32767 (%d)" % a.amp)
+            p.error("--amp: 1000..32767 (%d)" % a.amp)
         if not 0.0 <= a.iq_elargir <= 2.0:
-            p.error("--iq-elargir : 0..2 (%g)" % a.iq_elargir)
+            p.error("--iq-elargir: 0..2 (%g)" % a.iq_elargir)
     return np
 
 
@@ -540,8 +540,8 @@ def _ouvrir(a):
         amont.bind(a.ecoute)
     except OSError as e:
         amont.close()
-        raise SystemExit("injecteur_bruit : impossible d'ecouter sur %s:%d (%s) -- un autre processus "
-                         "tient-il deja ce port ? ss -lunp | grep :%d" % (a.ecoute[0], a.ecoute[1], e.strerror, a.ecoute[1]))
+        raise SystemExit("injecteur_bruit: cannot listen on %s:%d (%s) -- is another process "
+                         "already holding this port? ss -lunp | grep :%d" % (a.ecoute[0], a.ecoute[1], e.strerror, a.ecoute[1]))
     aval = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if a.source:
         loc = a.source
@@ -552,7 +552,7 @@ def _ouvrir(a):
     except OSError as e:
         amont.close()
         aval.close()
-        raise SystemExit("injecteur_bruit : impossible de lier le port d'emission %s:%d (%s)" % (loc[0], loc[1], e.strerror))
+        raise SystemExit("injecteur_bruit: cannot bind the send port %s:%d (%s)" % (loc[0], loc[1], e.strerror))
     for s in (amont, aval):
         s.setblocking(False)
         try:
@@ -576,25 +576,25 @@ def _journal(a):
 
 def _annoncer(a, aval, np=None):
     loc = aval.getsockname()
-    log.info("injecteur de bruit %s : cible %s, mode %s%s", VERSION, a.cible, a.mode,
+    log.info("noise injector %s: target %s, mode %s%s", VERSION, a.cible, a.mode,
              " (EXPERIMENTAL)" if a.mode == "iq" else "")
     if a.mode == "ber":
         if a.rafales:
-            log.info("BER moyen %.3e en rafales de %.1f bits (taux %.2f dans une rafale, Gilbert-Elliott)",
+            log.info("mean BER %.3e in bursts of %.1f bits (rate %.2f inside a burst, Gilbert-Elliott)",
                      a.ber, a.rafales, a.ber_rafale)
         else:
-            log.info("BER %.3e (bits independants)", a.ber)
+            log.info("BER %.3e (independent bits)", a.ber)
         if a.cible == "grgsm" and a.ber > 0:
-            log.info("ATTENTION grgsm : bits inverses dans le bloc L2 DEJA DECODE, rien ne les detecte "
-                     "(ni FEC ni CRC) ; --perte modelise l'echec CRC")
+            log.info("WARNING grgsm: bits flipped in the ALREADY DECODED L2 block, nothing detects them "
+                     "(neither FEC nor CRC); --perte models the CRC failure")
     if a.mode == "souple":
         snr = 10.0 ** (a.snr_db / 10.0)
-        log.info("SNR %.2f dB ; sur bits durs (le cas du pont) : +-1 + AWGN + decision dure, "
-                 "BER attendu Q(sqrt(2 snr)) = %.3e", a.snr_db, _q_gauss(math.sqrt(2.0 * snr)))
+        log.info("SNR %.2f dB; on hard bits (the bridge case): +-1 + AWGN + hard decision, "
+                 "expected BER Q(sqrt(2 snr)) = %.3e", a.snr_db, _q_gauss(math.sqrt(2.0 * snr)))
     if a.mode == "iq":
-        log.info("I/Q GMSK 4 ech/symbole, amplitude %d, elargissement NB %.2f, %s ; "
-                 "contourne sb_moduler/gmsk_elargir du BSP", a.amp, a.iq_elargir,
-                 ("AWGN %.2f dB" % a.snr_db) if a.snr_db is not None else "SANS AWGN")
+        log.info("I/Q GMSK 4 samples/symbol, amplitude %d, NB widening %.2f, %s; "
+                 "bypasses the BSP's sb_moduler/gmsk_elargir", a.amp, a.iq_elargir,
+                 ("AWGN %.2f dB" % a.snr_db) if a.snr_db is not None else "NO AWGN")
         if a.snr_db is not None and np is not None:
             # int16 clipping: at 30000 only 2767 of headroom remain. Estimated
             # here to announce it (the C side, CALYPSO_BSP_SNR_DB, clips the same way).
@@ -607,16 +607,16 @@ def _annoncer(a, aval, np=None):
             if ecr > 0.01:
                 yc = np.clip(y.real, -32768, 32767) + 1j * np.clip(y.imag, -32768, 32767)
                 eff = 10.0 * math.log10(a.amp * a.amp / float(np.mean(np.abs(yc - s) ** 2)))
-                log.info("ATTENTION ecretage int16 : ~%.0f %% des echantillons, SNR effectif ~%.1f dB "
-                         "(bruit non gaussien) ; --amp plus bas pour l'eviter", 100.0 * ecr, eff)
+                log.info("WARNING int16 clipping: ~%.0f %% of the samples, effective SNR ~%.1f dB "
+                         "(non-Gaussian noise); lower --amp to avoid it", 100.0 * ecr, eff)
     if a.perte:
-        log.info("effacement : %.3e des %s", a.perte, "bursts (bits aleatoires)" if a.cible == "dsp" else "blocs (non transmis)")
+        log.info("erasure: %.3e of the %s", a.perte, "bursts (random bits)" if a.cible == "dsp" else "blocks (not sent)")
     if (a.mode == "relais" or (a.mode == "ber" and a.ber == 0.0)) and not a.perte:
-        log.info("aucune degradation configuree : relais transparent")
-    log.info("intervalles : %s ; graine %d%s", "tous" if a.tn_set is None else ",".join(map(str, sorted(a.tn_set))),
-             a.graine, " (tiree : --graine %d pour rejouer)" % a.graine if a.graine_tiree else "")
-    log.info("PRET ecoute=%s:%d vers=%s:%d emission=%s:%d retour=%s", a.ecoute[0], a.ecoute[1], a.vers[0], a.vers[1],
-             loc[0], loc[1], ("%s:%d" % a.retour) if a.retour else "emetteur du descendant")
+        log.info("no degradation configured: transparent relay")
+    log.info("timeslots: %s; seed %d%s", "all" if a.tn_set is None else ",".join(map(str, sorted(a.tn_set))),
+             a.graine, " (drawn: --graine %d to replay)" % a.graine if a.graine_tiree else "")
+    log.info("READY listen=%s:%d to=%s:%d send=%s:%d return=%s", a.ecoute[0], a.ecoute[1], a.vers[0], a.vers[1],
+             loc[0], loc[1], ("%s:%d" % a.retour) if a.retour else "downlink sender")
 
 
 def main(argv=None):
@@ -627,7 +627,7 @@ def main(argv=None):
         amont, aval = _ouvrir(a)
         amont.close()
         aval.close()
-        print("injecteur_bruit : configuration valide (cible %s, mode %s, ecoute %s:%d -> %s:%d)"
+        print("injecteur_bruit: configuration valid (target %s, mode %s, listen %s:%d -> %s:%d)"
               % (a.cible, a.mode, a.ecoute[0], a.ecoute[1], a.vers[0], a.vers[1]))
         return 0
     _journal(a)
@@ -694,7 +694,7 @@ def main(argv=None):
                     prochain = now + a.stats
     finally:
         log.info("%s", st.ligne(final=True))
-        log.info("arret (%s)", "signal %d" % arret[0] if arret else "fin")
+        log.info("stop (%s)", "signal %d" % arret[0] if arret else "end")
         sel.close()
         amont.close()
         aval.close()

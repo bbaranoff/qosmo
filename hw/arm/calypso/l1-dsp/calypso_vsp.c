@@ -61,7 +61,7 @@ bool calypso_vsp_actif(void)
     if (on < 0) {
         const char *e = calypso_getenv("CALYPSO_VSP");
         on = (e && *e == '1') ? 1 : 0;
-        if (on) printf("  [vsp] port voix SP0 modelise (CALYPSO_VSP=1) : DRR 0x20 <- %s, DXR 0x21 -> %s, IT 20\n",
+        if (on) printf("  [vsp] voice port SP0 modelled (CALYPSO_VSP=1): DRR 0x20 <- %s, DXR 0x21 -> %s, IRQ 20\n",
                        VSP_SHM_UL, VSP_SHM_DL);
     }
     return on;
@@ -141,7 +141,7 @@ long calypso_vsp_trame(C54xState *dsp, calypso_vsp_courir_fn courir, uint32_t fn
         }
     }
     if (v.trames % 1000 == 0) {
-        printf("  [vsp] fn=%u sur 1000 trames : rint=%lu (arme %lu, desarme %lu) sous-alim UL=%lu | crete UL %ld DL %ld | SPC=0x%04x IMR=0x%04x | retard micro max %u ms, sauts %lu\n",
+        printf("  [vsp] fn=%u over 1000 frames: rint=%lu (armed %lu, disarmed %lu) UL underrun=%lu | peak UL %ld DL %ld | SPC=0x%04x IMR=0x%04x | max mic delay %u ms, skips %lu\n",
                fn, v.rint, v.arme, v.desarme, v.sous_ul, v.ul_max, v.dl_max, dsp->data[VSP_SPC], dsp->imr,
                v.file_ul_max / 8, v.saut_ul);
         fflush(stdout);

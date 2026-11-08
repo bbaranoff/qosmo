@@ -145,19 +145,19 @@ bool c54x_irq_level_check(C54xState *s)
                 if (s->delay_slots == 0 && _ip != 0x1FF) w_ready++;
                 if (w_log < 20) {
                     w_log++;
-                    fprintf(stderr, "[c54x] LEVELCHK-WINDOW #%u FENETRE OUVERTE "
+                    fprintf(stderr, "[c54x] LEVELCHK-WINDOW #%u WINDOW OPEN "
                             "PC=0x%04x pend=0x%04x IFR=0x%04x IMR=0x%04x delay=%d "
                             "IPTR=0x%03x insn=%u -> %s\n",
                             w_log, s->pc, _p, s->ifr, s->imr, s->delay_slots, _ip,
                             s->insn_count,
-                            (s->delay_slots == 0 && _ip != 0x1FF) ? "PRISE"
-                              : (s->delay_slots ? "BLOQUE:delay" : "BLOQUE:IPTR=0x1FF"));
+                            (s->delay_slots == 0 && _ip != 0x1FF) ? "TAKEN"
+                              : (s->delay_slots ? "BLOCKED:delay" : "BLOCKED:IPTR=0x1FF"));
                 }
             }
         }
         if ((w_calls % 2000000ULL) == 0)
-            fprintf(stderr, "[c54x] LEVELCHK-WINDOW resume : appels=%llu intm0=%llu "
-                    "intm0+pend=%llu prises=%llu insn=%u\n",
+            fprintf(stderr, "[c54x] LEVELCHK-WINDOW summary: calls=%llu intm0=%llu "
+                    "intm0+pend=%llu taken=%llu insn=%u\n",
                     (unsigned long long)w_calls, (unsigned long long)w_intm0,
                     (unsigned long long)w_pend, (unsigned long long)w_ready,
                     s->insn_count);

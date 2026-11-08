@@ -347,7 +347,7 @@ inst_verify_run() {
     [ -n "$l" ] || { inst_hint "le configure a-t-il garde --enable-l1-grgsm ? ($BUILD_DIR/config.log)"
                      inst_fail "machine calypso absente de -M help"; return $INST_RC_FAIL; }
     case "$l" in
-        *"couche 1 : grgsm"*) ;;
+        *"couche 1 : grgsm"*|*"layer 1: grgsm"*) ;;
         *) inst_fail "machine calypso sans la couche 1 gr-gsm : $l"; return $INST_RC_FAIL ;;
     esac
     if [ -z "$DESTDIR" ] && [ -x "$PREFIX/bin/qosmo" ]; then

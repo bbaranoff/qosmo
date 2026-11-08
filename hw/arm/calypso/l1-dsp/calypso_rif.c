@@ -141,8 +141,8 @@ bool calypso_rif_on(void)
     if (on < 0) {
         on = calypso_gate("CALYPSO_RIF_XIO", 1);
         if (!on)
-            fprintf(stderr, "[rif] CALYPSO_RIF_XIO=0 : RIF non modelise, PORTR/PORTW "
-                    "redeviennent des no-op (comportement d'avant le 03/08)\n");
+            fprintf(stderr, "[rif] CALYPSO_RIF_XIO=0: RIF not modelled, PORTR/PORTW "
+                    "are no-ops again (behaviour before 03/08)\n");
     }
     return on != 0;
 }
@@ -185,12 +185,12 @@ static bool rif_backpressure_on(void)
     static int on = -1;
     if (on < 0) {
         on = calypso_gate("CALYPSO_RIF_BACKPRESSURE", 0);
-        fprintf(stderr, "[rif] BEQUILLE contre-pression %s "
+        fprintf(stderr, "[rif] back-pressure CRUTCH %s "
                 "(CALYPSO_RIF_BACKPRESSURE=%d) — %s\n",
                 on ? "ACTIVE" : "inactive", on,
-                on ? "un burst n'ecrase plus un predecesseur non lu ; "
-                     "DEVIATION du §12.6, le debit mesure n'est plus celui du DSP"
-                   : "comportement materiel conserve : ecrasement + RSRFULL (defaut)");
+                on ? "a burst no longer overwrites an unread predecessor; "
+                     "DEVIATION from §12.6, the measured rate is no longer the DSP's"
+                   : "hardware behaviour kept: overwrite + RSRFULL (default)");
     }
     return on != 0;
 }
@@ -226,10 +226,10 @@ static void rif_init(void)
     rif.init = true;
     rif.spcr = SPCR_RESET & SPCR_RW_MASK;
     rif.spcx = SPCX_RESET;
-    fprintf(stderr, "[rif] RIF XIO arme (CAL207 §12) : DXR@0x0000 DRR@0x0001 "
+    fprintf(stderr, "[rif] RIF XIO armed (CAL207 §12): DXR@0x0000 DRR@0x0001 "
             "SPCX@0x0002=0x%04x SPCR@0x0003=0x%04x ; RX IT = INT0n vec16/bit0, "
-            "choisie par SPCR.RINT_MASK (bit11) / RDMA_MASK (bit13), tous deux "
-            "MASQUES au reset — c'est au firmware de les ouvrir.\n",
+            "selected by SPCR.RINT_MASK (bit11) / RDMA_MASK (bit13), both "
+            "MASKED at reset — the firmware has to open them.\n",
             SPCX_RESET, SPCR_RESET);
 }
 
@@ -288,7 +288,7 @@ bool calypso_rif_portr(C54xState *s, uint16_t pa, uint16_t *out)
          * fabricate a sample. */
         *out = rif.drr;
         if (rif.n_drr_rd++ < 20)
-            fprintf(stderr, "[rif] DRR read #%u = 0x%04x (fifo=%d etage=%d/%d) "
+            fprintf(stderr, "[rif] DRR read #%u = 0x%04x (fifo=%d stage=%d/%d) "
                     "PC=0x%04x\n", rif.n_drr_rd, *out, rif.fifo_n,
                     rif.stage_pos, rif.stage_n, s ? s->pc : 0);
         return true;
@@ -437,8 +437,8 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
         if (rif.stage_n + n > RIF_STAGE_MAX) {
             rif.rsrfull = true;
             if (rif.n_overrun++ < 10)
-                fprintf(stderr, "[rif] OVERRUN #%u : %d mots en attente + %d nouveaux > %d, "
-                        "les plus anciens sont perdus\n", rif.n_overrun, reste, n, RIF_STAGE_MAX);
+                fprintf(stderr, "[rif] OVERRUN #%u: %d words pending + %d new > %d, "
+                        "the oldest are lost\n", rif.n_overrun, reste, n, RIF_STAGE_MAX);
             int perte = rif.stage_n + n - RIF_STAGE_MAX;
             memmove(rif.stage, rif.stage + perte, (size_t)(rif.stage_n - perte) * sizeof(uint16_t));
             rif.stage_n -= perte;
@@ -453,8 +453,8 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     if (rif.stage_pos < rif.stage_n) {
         rif.rsrfull = true;
         if (rif.n_overrun++ < 10)
-            fprintf(stderr, "[rif] OVERRUN #%u : %d mots du burst precedent non lus "
-                    "(RSRFULL pose, cf. §12.6 : le bit garde la trace du probleme)\n",
+            fprintf(stderr, "[rif] OVERRUN #%u: %d words of the previous burst unread "
+                    "(RSRFULL set, cf. §12.6: the bit keeps track of the problem)\n",
                     rif.n_overrun, rif.stage_n - rif.stage_pos);
 
         /* @BEQUILLE RIF_BACKPRESSURE — see rif_backpressure_on() above.
@@ -475,8 +475,8 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
             if (++rif.bp_run <= rif_bp_max_skip()) {
                 rif.n_bp_skip++;
                 if (rif.n_bp_skip <= 10 || (rif.n_bp_skip % 2000) == 0)
-                    fprintf(stderr, "[rif] BP-SKIP #%u : burst refuse, %d/%d mots "
-                            "du precedent encore a lire (refus consecutifs %u/%u)\n",
+                    fprintf(stderr, "[rif] BP-SKIP #%u: burst refused, %d/%d words "
+                            "of the previous one still to read (consecutive refusals %u/%u)\n",
                             rif.n_bp_skip, rif.stage_n - rif.stage_pos,
                             rif.stage_n, rif.bp_run, rif_bp_max_skip());
                 return;          /* no delivery, hence no notification */
@@ -485,9 +485,9 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
              * through rather than freeze reception. A non-zero counter here
              * CONTRADICTS any claim of progress. */
             rif.n_bp_force++;
-            fprintf(stderr, "[rif] BP-FORCE #%u : %u refus consecutifs atteints "
-                    "(CALYPSO_RIF_BP_MAX_SKIP), burst impose — le DSP ne draine "
-                    "plus, la contre-pression ne suffit pas\n",
+            fprintf(stderr, "[rif] BP-FORCE #%u: %u consecutive refusals reached "
+                    "(CALYPSO_RIF_BP_MAX_SKIP), burst forced — the DSP no longer "
+                    "drains, back-pressure is not enough\n",
                     rif.n_bp_force, rif.bp_run);
         }
     }
@@ -516,9 +516,9 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
     }
 
     if (rif.n_burst <= 10 || (rif.n_burst % 500) == 0)
-        fprintf(stderr, "[rif] BILAN bursts=%u notifies=%u (IT=%u DMA=%u) muets=%u ; "
-                "ecritures SPCR=%u dont %u liberent un masque de reception, "
-                "%u relachent RRST\n",
+        fprintf(stderr, "[rif] SUMMARY bursts=%u notified=%u (IRQ=%u DMA=%u) silent=%u; "
+                "SPCR writes=%u of which %u release a receive mask, "
+                "%u release RRST\n",
                 rif.n_burst, rif.n_int + rif.n_dma, rif.n_int, rif.n_dma,
                 rif.n_burst - rif.n_int - rif.n_dma,
                 rif.n_spcr_wr, rif.n_wr_arme, rif.n_wr_rrst_on);
@@ -528,12 +528,12 @@ void calypso_rif_rx_burst(C54xState *s, const uint16_t *w, int n)
                 rif.n_burst, n, rif.fifo_n, RIF_FIFO_DEPTH,
                 !rint, !rdma,
                 rint ? "INT0n vec16/bit0"
-                     : (rdma ? "requete DMA (end-DMA vers l'ARM, §3.7.1)"
-                             : "AUCUNE notification — les deux masques sont poses, "
-                               "le firmware n'a pas arme le recepteur"),
+                     : (rdma ? "DMA request (end-DMA to the ARM, §3.7.1)"
+                             : "NO notification — both masks are set, "
+                               "the firmware has not armed the receiver"),
                 rif.n_int, rif.n_dma, rif.n_overrun);
 
     if (rif_backpressure_on() && (rif.n_burst <= 10 || (rif.n_burst % 500) == 0))
-        fprintf(stderr, "[rif] BP-BILAN burst=%u overrun=%u refuses=%u imposes=%u\n",
+        fprintf(stderr, "[rif] BP-BILAN burst=%u overrun=%u refused=%u forced=%u\n",
                 rif.n_burst, rif.n_overrun, rif.n_bp_skip, rif.n_bp_force);
 }

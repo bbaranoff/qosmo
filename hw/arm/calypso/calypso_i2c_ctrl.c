@@ -67,7 +67,7 @@ static void i2c_ctrl_transfer(CalypsoI2CCtrlState *s)
         }
     } else if (i2c_start_send(s->bus, s->device) < 0) {
         s->status |= STATUS_ERROR_DEV;
-        qemu_log_mask(LOG_GUEST_ERROR, "calypso-i2c: aucun esclave en 0x%02x\n",
+        qemu_log_mask(LOG_GUEST_ERROR, "calypso-i2c: no slave at 0x%02x\n",
                       s->device);
     } else {
         i2c_send(s->bus, s->address);

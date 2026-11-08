@@ -217,7 +217,7 @@ void calypso_trx_autosync_fn(uint32_t sch_fn)
     }
     g_trx->fn_offset = offset;
     g_trx->fn_synced = true;
-    fprintf(stderr, "[trx] horloge FN calee sur le SCH gr-gsm : fn=%u offset=%lld (brut=%lld)\n",
+    fprintf(stderr, "[trx] FN clock aligned on the gr-gsm SCH: fn=%u offset=%lld (raw=%lld)\n",
             sch_fn, (long long)offset, (long long)raw);
 }
 
@@ -240,7 +240,7 @@ static bool pont_recv(CalypsoTRX *s, CalypsoPontMsg *m, int timeout_ms)
     }
     ssize_t n = recv(s->pont_fd, m, sizeof(*m), 0);
     if (n != (ssize_t)sizeof(*m)) {
-        fprintf(stderr, "[trx] pont DSP : connexion perdue (recv=%zd)\n", n);
+        fprintf(stderr, "[trx] DSP bridge: connection lost (recv=%zd)\n", n);
         close(s->pont_fd);
         s->pont_fd = -1;
         return false;
@@ -253,13 +253,13 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
     const char *sock = (strcmp(spec, "1") == 0) ? CALYPSO_PONT_SOCK : spec;
     int shm = shm_open(CALYPSO_PONT_SHM, O_RDWR, 0);
     if (shm < 0) {
-        fprintf(stderr, "[trx] pont DSP : shm_open(%s) : %s - lancez d'abord "
+        fprintf(stderr, "[trx] DSP bridge: shm_open(%s): %s - start first "
                 "c54x_exe --arm\n", CALYPSO_PONT_SHM, strerror(errno));
         exit(1);
     }
     struct stat st;
     if (fstat(shm, &st) < 0 || st.st_size < CALYPSO_PONT_SHM_BYTES) {
-        fprintf(stderr, "[trx] pont DSP : segment %s trop petit (%lld < %d)\n",
+        fprintf(stderr, "[trx] DSP bridge: segment %s too small (%lld < %d)\n",
                 CALYPSO_PONT_SHM, (long long)st.st_size, CALYPSO_PONT_SHM_BYTES);
         exit(1);
     }
@@ -267,7 +267,7 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
      * (the DSP API window), the rest is private and empty. */
     void *base = NULL;
     if (posix_memalign(&base, 4096, CALYPSO_API_SIZE) != 0) {
-        fprintf(stderr, "[trx] pont DSP : posix_memalign\n");
+        fprintf(stderr, "[trx] DSP bridge: posix_memalign\n");
         exit(1);
     }
     memset(base, 0, CALYPSO_API_SIZE);
@@ -275,7 +275,7 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
                      MAP_SHARED | MAP_FIXED, shm, 0);
     close(shm);
     if (map == MAP_FAILED || map != base) {
-        fprintf(stderr, "[trx] pont DSP : mmap : %s\n", strerror(errno));
+        fprintf(stderr, "[trx] DSP bridge: mmap: %s\n", strerror(errno));
         exit(1);
     }
     s->api_ram = base;
@@ -284,7 +284,7 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
     struct sockaddr_un sa = { .sun_family = AF_UNIX };
     snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", sock);
     if (s->pont_fd < 0 || connect(s->pont_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        fprintf(stderr, "[trx] pont DSP : connect(%s) : %s - lancez d'abord "
+        fprintf(stderr, "[trx] DSP bridge: connect(%s): %s - start first "
                 "c54x_exe --arm\n", sock, strerror(errno));
         exit(1);
     }
@@ -292,14 +292,14 @@ static void pont_connect(CalypsoTRX *s, const char *spec)
     if (!pont_send(s, PONT_HELLO, CALYPSO_API_WORDS, CALYPSO_PONT_MAGIC, 0) ||
         !pont_recv(s, &m, 2000) || m.type != PONT_HELLO_OK ||
         m.a != CALYPSO_API_WORDS || m.b != CALYPSO_PONT_MAGIC) {
-        fprintf(stderr, "[trx] pont DSP : poignee de main refusee par %s\n", sock);
+        fprintf(stderr, "[trx] DSP bridge: handshake refused by %s\n", sock);
         exit(1);
     }
     s->pont = true;
-    fprintf(stderr, "[trx] pont DSP : API RAM partagee (%s) + socket %s - le C54x "
-            "est dans c54x_exe, la couche 1 gr-gsm est desactivee\n",
+    fprintf(stderr, "[trx] DSP bridge: shared API RAM (%s) + socket %s - the C54x "
+            "is in c54x_exe, the gr-gsm layer 1 is disabled\n",
             CALYPSO_PONT_SHM, sock);
-    calypso_l1_disable("DSP externe");
+    calypso_l1_disable("external DSP");
 }
 
 /* ── Request reference of the IMMEDIATE ASSIGNMENT (DSP setup) ───────────
@@ -335,9 +335,9 @@ static uint32_t pont_last_rach_fn(void)
     if (!cherche) {
         cherche = 1;
         adr = calypso_firmware_symbol("last_rach");
-        fprintf(stderr, "[trx] reference de requete : last_rach %s (%s)\n",
-                adr ? "trouve" : "INTROUVABLE",
-                calypso_firmware_elf() ? calypso_firmware_elf() : "pas d'ELF");
+        fprintf(stderr, "[trx] request reference: last_rach %s (%s)\n",
+                adr ? "found" : "NOT FOUND",
+                calypso_firmware_elf() ? calypso_firmware_elf() : "no ELF");
     }
     if (!adr) {
         return 0;
@@ -381,7 +381,7 @@ void calypso_trx_rach_conf(uint32_t fn)
     if (s->rach_file_r == s->rach_file_w) {
         static unsigned n;
         if (n++ < 5) {
-            fprintf(stderr, "[trx] RACH_CONF fn=%u sans RA en attente\n", fn);
+            fprintf(stderr, "[trx] RACH_CONF fn=%u with no pending RA\n", fn);
         }
         return;
     }
@@ -419,8 +419,8 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
     if (!memo) {
         static unsigned n;
         if (n++ < 5) {
-            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : aucune trame memorisee "
-                    "pour cette RA - reference laissee telle quelle\n", d[7]);
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x: no frame stored "
+                    "for this RA - reference left as is\n", d[7]);
         }
         return false;
     }
@@ -435,8 +435,8 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
     if (*out != (uint16_t)(d[8] | (d[9] << 8)) && !actif) {
         static unsigned n0;
         if (n0++ < 20)
-            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference de la BTS != last_rach (fn=%u), "
-                    "laissee telle quelle (MONTANT_REQREF=0)\n", d[7], memo);
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x: BTS reference != last_rach (fn=%u), "
+                    "left as is (MONTANT_REQREF=0)\n", d[7], memo);
         return false;
     }
     if (*out != (uint16_t)(d[8] | (d[9] << 8))) {
@@ -445,7 +445,7 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
             uint8_t at1 = (d[8] >> 3) & 0x1f;
             uint8_t at3 = (uint8_t)(((d[8] & 7) << 3) | ((d[9] >> 5) & 7));
             uint8_t at2 = d[9] & 0x1f;
-            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference %u/%u/%u de la BTS "
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x: BTS reference %u/%u/%u "
                     "-> %u/%u/%u (last_rach fn=%u)\n",
                     d[7], at1, at2, at3, t1p, t2, t3, memo);
         }
@@ -455,7 +455,7 @@ static bool pont_reqref_corrigee(CalypsoTRX *s, hwaddr woff, uint16_t *out)
          * Logged for the coverage table (99-couverture.sh: ROM path). */
         static unsigned n;
         if (n++ < 20)
-            fprintf(stderr, "[trx] IMM ASS ra=0x%02x : reference %u/%u/%u identique a last_rach (fn=%u), rien a reecrire\n",
+            fprintf(stderr, "[trx] IMM ASS ra=0x%02x: reference %u/%u/%u same as last_rach (fn=%u), nothing to rewrite\n",
                     d[7], t1p, t2, t3, memo);
     }
     return true;
@@ -671,7 +671,7 @@ void calypso_trx_dsp_reset_line(bool active)
          * NEW bootloader (api_read advances the DSP during that wait). */
         s->api_ram[API_BL_STATUS / 2] = 0;
         pont_send(s, PONT_RESET, 0, 0, 0);
-        fprintf(stderr, "[trx] pont DSP : RESET_DSP relache par le firmware -> "
+        fprintf(stderr, "[trx] DSP bridge: RESET_DSP released by the firmware -> "
                 "PONT_RESET (fn=%u)\n", s->fn);
     }
     precedent = active;
@@ -734,7 +734,7 @@ static void tpu_write(void *o, hwaddr off, uint64_t val, unsigned sz)
          * pumped by tdma_tick. osmocom-bb writes TPU_INT_CTRL beforehand, so
          * nothing changes for it. */
         if (!s->tdma_running && !(s->tpu_regs[TPU_INT_CTRL / 2] & ICTRL_MCU_FRAME)) {
-            fprintf(stderr, "[trx] TPU valide (TP_Enable) sans ecriture de TPU_INT_CTRL : depart du TDMA\n");
+            fprintf(stderr, "[trx] TPU enabled (TP_Enable) without a TPU_INT_CTRL write: TDMA starts\n");
             tdma_start(s);
         }
     }
@@ -973,8 +973,8 @@ static void pont_echange(CalypsoTRX *s)
             }
         } else if (s->pont_fd >= 0) {
             if (++s->pont_timeouts == 1 || (s->pont_timeouts % 2170) == 0) {
-                fprintf(stderr, "[trx] pont DSP : DSP en retard, tick saute "
-                        "(fn=%u, %u sauts, %" PRIu64 " trames jouees)\n",
+                fprintf(stderr, "[trx] DSP bridge: DSP late, tick skipped "
+                        "(fn=%u, %u skips, %" PRIu64 " frames played)\n",
                         s->fn, s->pont_timeouts, s->pont_frames);
             }
         }
@@ -1049,8 +1049,8 @@ static void pont_boot_tick(void *opaque)
 {
     CalypsoTRX *s = opaque;
     if (s->tdma_running) {
-        fprintf(stderr, "[trx] pont DSP : le TDMA du firmware prend le relais du "
-                "timer de boot (%" PRIu64 " trames de boot)\n", s->pont_frames);
+        fprintf(stderr, "[trx] DSP bridge: the firmware TDMA takes over from the "
+                "boot timer (%" PRIu64 " boot frames)\n", s->pont_frames);
         return;
     }
     if (runstate_is_running()) {
@@ -1113,9 +1113,9 @@ static void tdma_tick(void *opaque)
         if (!fini && s->eoi_attentes + 1 >= (unsigned)PONT_ATTENTES_MAX &&
             s->eoi_attentes + 1 < (unsigned)PONT_ATTENTES_MAX * 32 && s->phase_a_recue) {
             if (s->eoi_attentes + 1 == (unsigned)PONT_ATTENTES_MAX && ++s->eoi_longues <= 20) {
-                fprintf(stderr, "[trx] pont DSP : l1_sync de l'ARM toujours pas finie apres 256 attentes "
-                        "(fn=%u, IT trame %s, EOI %" PRIu64 "/%" PRIu64 ") : on attend au lieu de forcer le GO\n",
-                        s->fn, calypso_inth_irq_pending(CALYPSO_IRQ_TPU_FRAME) ? "EN ATTENTE" : "servie",
+                fprintf(stderr, "[trx] DSP bridge: ARM l1_sync still not finished after 256 waits "
+                        "(fn=%u, frame IRQ %s, EOI %" PRIu64 "/%" PRIu64 "): waiting instead of forcing GO\n",
+                        s->fn, calypso_inth_irq_pending(CALYPSO_IRQ_TPU_FRAME) ? "PENDING" : "served",
                         calypso_inth_frame_eoi(), s->eoi_cible);
             }
             s->eoi_attentes++;
@@ -1131,7 +1131,7 @@ static void tdma_tick(void *opaque)
             return;
         }
         if (fini && s->eoi_attentes >= (unsigned)PONT_ATTENTES_MAX && s->eoi_longues <= 20) {
-            fprintf(stderr, "[trx] pont DSP : l1_sync finie apres %u attentes (fn=%u)\n", s->eoi_attentes, s->fn);
+            fprintf(stderr, "[trx] DSP bridge: l1_sync finished after %u waits (fn=%u)\n", s->eoi_attentes, s->fn);
         }
         if (!fini && ++s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX) {
             if (g_uart_modem) {
@@ -1156,8 +1156,8 @@ static void tdma_tick(void *opaque)
         bool arm_relance_dsp = s->bl_lu_fn && (uint32_t)(s->fn + 1 - s->bl_lu_fn) <= 4;
         if (!fini && pont_arm_lock() && !arm_relance_dsp && s->eoi_attentes < (unsigned)PONT_ATTENTES_MAX * 64) {
             if (++s->eoi_attentes == (unsigned)PONT_ATTENTES_MAX * 64) {
-                fprintf(stderr, "[trx] pont DSP : CALYPSO_PONT_ARM_LOCK, l1_sync toujours pas finie "
-                        "(fn=%u, EOI %" PRIu64 "/%" PRIu64 ") : GO force\n",
+                fprintf(stderr, "[trx] DSP bridge: CALYPSO_PONT_ARM_LOCK, l1_sync still not finished "
+                        "(fn=%u, EOI %" PRIu64 "/%" PRIu64 "): GO forced\n",
                         s->fn, calypso_inth_frame_eoi(), s->eoi_cible);
             }
             timer_mod_ns(s->tdma_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + PONT_RETRY_NS);
@@ -1173,10 +1173,10 @@ static void tdma_tick(void *opaque)
             }
             s->eoi_cible = calypso_inth_frame_eoi();   /* resync after a lost frame IRQ */
             if (++s->eoi_timeouts <= 20 || (s->eoi_timeouts % 2170) == 0) {
-                fprintf(stderr, "[trx] pont DSP : phase A %s, l1_sync de l'ARM %s apres 8192 attentes "
-                        "(fn=%u, %u fois), GO envoye quand meme\n",
-                        s->phase_a_recue ? "recue" : "PAS recue",
-                        calypso_inth_frame_eoi() >= s->eoi_cible ? "finie" : "PAS finie",
+                fprintf(stderr, "[trx] DSP bridge: phase A %s, ARM l1_sync %s after 8192 waits "
+                        "(fn=%u, %u times), GO sent anyway\n",
+                        s->phase_a_recue ? "received" : "NOT received",
+                        calypso_inth_frame_eoi() >= s->eoi_cible ? "finished" : "NOT finished",
                         s->fn, s->eoi_timeouts);
             }
         }
@@ -1432,7 +1432,7 @@ void calypso_trx_init(MemoryRegion *sysmem, qemu_irq *irqs)
          * the ARM. The later tdma_start() from the TPU only resets fn to 0. */
         s->pont_boot_timer = timer_new_ns(QEMU_CLOCK_REALTIME, pont_boot_tick, s);
         timer_mod_ns(s->pont_boot_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + GSM_TDMA_NS);
-        fprintf(stderr, "[trx] pont DSP : timer de boot lance (echange DSP seul, "
-                "sans IRQ TPU, jusqu'a ce que le firmware active le TDMA)\n");
+        fprintf(stderr, "[trx] DSP bridge: boot timer started (DSP exchange only, "
+                "no TPU IRQ, until the firmware enables the TDMA)\n");
     }
 }

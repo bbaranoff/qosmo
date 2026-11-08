@@ -402,8 +402,8 @@ void c54x_ifr_clear(C54xState *s, uint16_t mask, const char *site)
     if (en < 0) {
         en = calypso_gate("CALYPSO_IFR_CLEAR_WHO", 1);
         if (en)
-            fprintf(stderr, "[c54x] IFR-CLEAR-WHO arme : tout effacement d'un bit "
-                    "DEMASQUE de l'IFR est nomme par son site\n");
+            fprintf(stderr, "[c54x] IFR-CLEAR-WHO armed: every clear of an "
+                    "UNMASKED IFR bit is named by its site\n");
     }
     if (!en) {
         return;

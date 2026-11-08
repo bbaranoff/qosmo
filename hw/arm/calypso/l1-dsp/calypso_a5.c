@@ -146,7 +146,7 @@ static void a5_calculer(C54xState *s, unsigned algo)
             static unsigned n_sd;
             if (n_sd < 400 && ft != fn) {
                 n_sd++;
-                if (n_sd <= 400) printf("  [a5-dl] tick=%u a5fn=%u bsp=%u dernier_depot=%u -> flux DL %u (p26 %u)\n",
+                if (n_sd <= 400) printf("  [a5-dl] tick=%u a5fn=%u bsp=%u last_deposit=%u -> DL stream %u (p26 %u)\n",
                                         calypso_trx_get_fn(), fn, ft, calypso_daram_last_fn, fn_dl, fn_dl % 26u);
             }
         }
@@ -173,9 +173,9 @@ static void a5_calculer(C54xState *s, unsigned algo)
         if (a5.n_calculs < 8 || change || (a5.n_calculs % 500) == 0) {
             extern unsigned calypso_daram_last_fn;
             printf("  [a5] #%lu A5/%u fn=%u (T1=%u T2=%u T3=%u) Kc=%02x%02x%02x%02x%02x%02x%02x%02x%s "
-                   "| dernier depot BSP fn=%u (ecart %+d)\n", a5.n_calculs, algo, fn, t1, t2, t3,
+                   "| last BSP deposit fn=%u (offset %+d)\n", a5.n_calculs, algo, fn, t1, t2, t3,
                    key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-                   change ? " (NOUVEAU Kc)" : "", calypso_daram_last_fn,
+                   change ? " (NEW Kc)" : "", calypso_daram_last_fn,
                    (int)(fn - calypso_daram_last_fn));
             fflush(stdout);
         }
@@ -190,7 +190,7 @@ static void a5_calculer(C54xState *s, unsigned algo)
         int e = (int)(fn - calypso_daram_last_fn);
         hist[fn % 26u][e >= -1 && e <= 2 ? e + 1 : 4]++;
         if (a5.n_calculs && (a5.n_calculs % 2000) == 0) {
-            printf("  [a5-hist] #%lu recales=%lu ecart(-1/0/+1/+2/autre) par fn%%26 :", a5.n_calculs, a5.n_recales);
+            printf("  [a5-hist] #%lu realigned=%lu offset(-1/0/+1/+2/other) per fn%%26:", a5.n_calculs, a5.n_recales);
             for (int p = 0; p < 26; p++)
                 if (hist[p][0] + hist[p][1] + hist[p][2] + hist[p][3] + hist[p][4])
                     printf(" %d:%lu/%lu/%lu/%lu/%lu", p, hist[p][0], hist[p][1], hist[p][2], hist[p][3], hist[p][4]);

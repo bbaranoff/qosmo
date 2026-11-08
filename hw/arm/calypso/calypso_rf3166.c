@@ -47,11 +47,11 @@ void calypso_rf3166_tspact_update(uint16_t tspact, uint32_t fn)
          * nothing. */
         if (!calypso_asm4532_tx_connected()) {
             pa.faults++;
-            fprintf(stderr, "[rf3166] ⚠ PA_ENABLE assertee alors que l'antenne "
-                    "n'est PAS commutee sur le PA (TRENA relachee) — fn=%u, "
-                    "faute #%u\n", fn, pa.faults);
+            fprintf(stderr, "[rf3166] ⚠ PA_ENABLE asserted while the antenna "
+                    "is NOT switched to the PA (TRENA released) — fn=%u, "
+                    "fault #%u\n", fn, pa.faults);
         } else {
-            PA_LOG("PA ON  (bande %s) fn=%u  [burst #%u]",
+            PA_LOG("PA ON  (band %s) fn=%u  [burst #%u]",
                    calypso_asm4532_band_gsm() ? "GSM900" : "DCS1800",
                    fn, pa.bursts);
         }

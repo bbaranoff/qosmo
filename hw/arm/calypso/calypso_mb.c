@@ -105,7 +105,7 @@ static void calypso_machine_init(MachineState *machine)
     } else {
         s->soc.flash_boot = true;
         calypso_uart_romload_passthrough();
-        fprintf(stderr, "[calypso] demarrage dans la flash a 0x00000000 (pas de -kernel)\n");
+        fprintf(stderr, "[calypso] booting from flash at 0x00000000 (no -kernel)\n");
     }
 
     if (machine->kernel_filename) {
@@ -116,7 +116,7 @@ static void calypso_machine_init(MachineState *machine)
             ret = load_image_targphys(machine->kernel_filename, CALYPSO_XRAM_BASE,
                                       CALYPSO_XRAM_SIZE);
             if (ret < 0) {
-                error_report("firmware illisible : '%s'", machine->kernel_filename);
+                error_report("unreadable firmware: '%s'", machine->kernel_filename);
                 exit(1);
             }
             entry = CALYPSO_XRAM_BASE;
@@ -135,7 +135,7 @@ static void calypso_machine_class_init(ObjectClass *oc, void *data)
      * soon as the machine runs under another. */
     static char desc[96];
     snprintf(desc, sizeof(desc),
-             "TI Calypso baseband (firmware osmocom-bb, couche 1 : %s)",
+             "TI Calypso baseband (osmocom-bb firmware, layer 1: %s)",
              calypso_l1_name());
     mc->desc = desc;
     mc->init = calypso_machine_init;

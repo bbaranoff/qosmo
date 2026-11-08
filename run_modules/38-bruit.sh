@@ -181,7 +181,7 @@ mod_bruit_start() {
 mod_bruit_wait() {
     [ -n "${BRUIT_MODE:-}" ] || { mod_ok; return $MOD_RC_OK; }
     local log; log="$(_bruit_log)"
-    wait_until "${MOD_TIMEOUT[bruit]}" "injecteur pret" log_has "$log" "PRET ecoute=" || {
+    wait_until "${MOD_TIMEOUT[bruit]}" "injecteur pret" log_has "$log" "PRET ecoute=\|READY listen=" || {
         modb_tail "$log" 15
         mod_hint "lisez $log"
         return $MOD_RC_FAIL; }
@@ -189,7 +189,7 @@ mod_bruit_wait() {
         modb_tail "$log" 15
         mod_fail "l'injecteur s'est arrete aussitot lance"
         return $MOD_RC_FAIL; }
-    mod_say "$(grep -a 'PRET ecoute=' "$log" | tail -1)"
+    mod_say "$(grep -aE 'PRET ecoute=|READY listen=' "$log" | tail -1)"
     mod_ok
 }
 

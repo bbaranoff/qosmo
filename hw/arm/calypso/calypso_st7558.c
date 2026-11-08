@@ -78,7 +78,7 @@ static void st7558_export(St7558State *s)
         memcpy(buf + SHM_HDR + p * LCD_W, s->ram + p * ST7558_COLS, LCD_W);
     }
     if (pwrite(s->shm_fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf)) {
-        fprintf(stderr, "[st7558] ecriture de %s : %s\n", s->shm_path, strerror(errno));
+        fprintf(stderr, "[st7558] writing %s: %s\n", s->shm_path, strerror(errno));
     }
 }
 
@@ -204,7 +204,7 @@ static void st7558_realize(DeviceState *dev, Error **errp)
     if (strcmp(s->shm_path, "none")) {
         s->shm_fd = open(s->shm_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
         if (s->shm_fd < 0) {
-            fprintf(stderr, "[st7558] %s : %s (pas d'image partagee)\n",
+            fprintf(stderr, "[st7558] %s: %s (no shared image)\n",
                     s->shm_path, strerror(errno));
         } else {
             fchmod(s->shm_fd, 0666);
@@ -212,7 +212,7 @@ static void st7558_realize(DeviceState *dev, Error **errp)
                 fprintf(stderr, "[st7558] ftruncate %s : %s\n", s->shm_path, strerror(errno));
             }
             st7558_export(s);
-            fprintf(stderr, "[st7558] ecran C123 96x65 : image partagee %s\n", s->shm_path);
+            fprintf(stderr, "[st7558] C123 96x65 screen: shared image %s\n", s->shm_path);
         }
     }
     s->con = graphic_console_init(dev, 0, &st7558_ops, s);

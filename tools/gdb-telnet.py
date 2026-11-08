@@ -77,9 +77,9 @@ def filter_telnet(data, state):
 def session(conn, args):
     conn.sendall(bytes([IAC, WILL, ECHO, IAC, WILL, SGA, IAC, DO, SGA]))
     banner = (f"\r\n[gdb-telnet] gdb -> QEMU gdbstub :{args.stub}  elf={args.elf}\r\n"
-              "[gdb-telnet] cible EN MARCHE (continue &). Ctrl-C = stop, go = repart, "
-              "quit = ferme (QEMU reprend)\r\n"
-              "[gdb-telnet] panneau osmocom charge : tape  help_osmo\r\n\r\n")
+              "[gdb-telnet] target RUNNING (continue &). Ctrl-C = stop, go = resume, "
+              "quit = close (QEMU resumes)\r\n"
+              "[gdb-telnet] osmocom panel loaded: type  help_osmo\r\n\r\n")
     conn.sendall(banner.encode())
     pid, fd = pty.fork()
     if pid == 0:
@@ -112,7 +112,7 @@ def session(conn, args):
         try:
             os.execvp(cmd[0], cmd)
         except OSError as e:
-            os.write(2, f"exec {cmd[0]} : {e}\n".encode()); os._exit(127)
+            os.write(2, f"exec {cmd[0]}: {e}\n".encode()); os._exit(127)
     state = {'pending': b''}
     try:
         while True:
@@ -174,30 +174,30 @@ def session(conn, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--port', type=int, default=44444, help='port telnet (defaut 44444)')
-    ap.add_argument('--bind', default='127.0.0.1', help="adresse d'ecoute (defaut 127.0.0.1)")
-    ap.add_argument('--stub', type=int, default=1234, help='port du gdbstub QEMU (defaut 1234)')
-    ap.add_argument('--elf', default=os.environ.get('CALYPSO_GDB_ELF', ''), help='ELF du firmware (symboles)')
+    ap.add_argument('--port', type=int, default=44444, help='telnet port (default 44444)')
+    ap.add_argument('--bind', default='127.0.0.1', help='listen address (default 127.0.0.1)')
+    ap.add_argument('--stub', type=int, default=1234, help='QEMU gdbstub port (default 1234)')
+    ap.add_argument('--elf', default=os.environ.get('CALYPSO_GDB_ELF', ''), help='firmware ELF (symbols)')
     ap.add_argument('--gdb', default='gdb-multiarch')
     args = ap.parse_args()
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.bind, args.port)); srv.listen(2)
-    log(f"ecoute telnet {args.bind}:{args.port} -> gdbstub :{args.stub} ({args.gdb}, elf={args.elf or '-'})")
+    log(f"telnet listening on {args.bind}:{args.port} -> gdbstub :{args.stub} ({args.gdb}, elf={args.elf or '-'})")
     while True:
         conn, peer = srv.accept()
         log(f"session {peer[0]}:{peer[1]}")
         try:
             session(conn, args)
         except Exception as e:
-            log(f"session : {e}")
+            log(f"session: {e}")
         finally:
             try:
                 conn.close()
             except OSError:
                 pass
-            log("session fermee, gdb termine, QEMU reprend")
+            log("session closed, gdb ended, QEMU resumes")
 
 
 if __name__ == '__main__':

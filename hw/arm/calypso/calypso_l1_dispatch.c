@@ -99,8 +99,8 @@ void calypso_l1_register(const CalypsoL1Ops *ops)
         /* Two layer 1 implementations linked into the same binary: the
          * fork's meson.build picked up the other one's sources. Keep the last
          * registered so the result stays deterministic, but say so loudly. */
-        fprintf(stderr, "calypso: DEUX couches 1 enregistrees (%s puis %s) - "
-                        "verifier hw/arm/calypso/meson.build\n",
+        fprintf(stderr, "calypso: TWO layer 1s registered (%s then %s) - "
+                        "check hw/arm/calypso/meson.build\n",
                 l1->name ? l1->name : "?", ops->name ? ops->name : "?");
     }
     l1 = ops;
@@ -113,7 +113,7 @@ void calypso_l1_register(const CalypsoL1Ops *ops)
 void calypso_l1_disable(const char *why)
 {
     if (l1) {
-        fprintf(stderr, "calypso: couche 1 « %s » desactivee (%s)\n",
+        fprintf(stderr, "calypso: layer 1 '%s' disabled (%s)\n",
                 l1->name ? l1->name : "?", why ? why : "");
     }
     l1 = NULL;
@@ -121,7 +121,7 @@ void calypso_l1_disable(const char *why)
 
 const char *calypso_l1_name(void)
 {
-    return (l1 && l1->name) ? l1->name : "aucune";
+    return (l1 && l1->name) ? l1->name : "none";
 }
 
 void calypso_l1_do_init(const char *firmware_elf)
@@ -132,7 +132,7 @@ void calypso_l1_do_init(const char *firmware_elf)
      * calypso_trx_init(). */
     const char *ext = getenv("CALYPSO_DSP_EXTERN");
     if (ext && *ext) {
-        calypso_l1_disable("DSP externe, CALYPSO_DSP_EXTERN");
+        calypso_l1_disable("external DSP, CALYPSO_DSP_EXTERN");
         return;
     }
     if (l1 && l1->init) {

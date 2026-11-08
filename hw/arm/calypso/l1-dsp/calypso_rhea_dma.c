@@ -140,8 +140,8 @@ static bool rhea_dma_on(void)
     if (on < 0) {
         on = calypso_gate("CALYPSO_RHEA_DMA", 1);
         if (!on)
-            fprintf(stderr, "[rhea-dma] CALYPSO_RHEA_DMA=0 : retour au stub muet "
-                    "(lectures a 0, ecritures jetees) — comportement d'avant le 03/08\n");
+            fprintf(stderr, "[rhea-dma] CALYPSO_RHEA_DMA=0: back to the silent stub "
+                    "(reads return 0, writes dropped) — behaviour before 03/08\n");
     }
     return on != 0;
 }
@@ -155,19 +155,19 @@ static void rhea_dma_init(void)
     rd.alloc_cfg = ALLOC_RESET;
     for (int i = 0; i < 4; i++)
         rd.ch[i].ctrl = CTRL_RESET;
-    fprintf(stderr, "[rhea-dma] controleur DMA RHEA arme (CAL207 §11) @0xFFFFFC00 : "
-            "4 canaux, reset CTRL=0x%04x (DIRECTION=1 Rhea->API, MAS=1 16 bits, "
-            "IRQ_MODE=1, ENABLE=0). Canaux RIF : DMA1=TX DMA2=RX (§6 Table 2). "
-            "ENREGISTREMENT SEUL : aucun transfert n'est execute.\n", CTRL_RESET);
+    fprintf(stderr, "[rhea-dma] RHEA DMA controller armed (CAL207 §11) @0xFFFFFC00: "
+            "4 channels, reset CTRL=0x%04x (DIRECTION=1 Rhea->API, MAS=1 16 bits, "
+            "IRQ_MODE=1, ENABLE=0). RIF channels: DMA1=TX DMA2=RX (§6 Table 2). "
+            "RECORDING ONLY: no transfer is executed.\n", CTRL_RESET);
 }
 
 /* Translates the API address (in BYTES, §11.3.3) into both useful frames. */
 static void log_aad(int n, uint16_t aad)
 {
     uint32_t byte = aad & 0x0FFF;
-    fprintf(stderr, "[rhea-dma] *** DMA%d_AAD = 0x%03x octets  ->  mot DSP 0x%04x  "
-            "(= ARM 0x%08x). C'est la DESTINATION du tampon de reception dans la "
-            "memoire API.\n",
+    fprintf(stderr, "[rhea-dma] *** DMA%d_AAD = 0x%03x bytes  ->  DSP word 0x%04x  "
+            "(= ARM 0x%08x). This is the DESTINATION of the receive buffer in "
+            "API memory.\n",
             n + 1, byte, (unsigned)(0x0800 + byte / 2), 0xFFD00000u + byte);
 }
 
@@ -229,8 +229,8 @@ uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
                              * hence level 1. */
                             double pc = g_rd_fini ? 100.0 * g_rd_acquitte / g_rd_fini : 0.0;
                             bool mauvais = g_rd_fini > 100 && pc < 90.0;
-                            fprintf(stderr, "[rhea-dma] %sbilan : %llu transferts finis, "
-                                    "%llu acquittes par la ROM (%.0f%%)\n",
+                            fprintf(stderr, "[rhea-dma] %ssummary: %llu transfers finished, "
+                                    "%llu acknowledged by the ROM (%.0f%%)\n",
                                     mauvais ? "WARN " : "", g_rd_fini, g_rd_acquitte, pc);
                         }
                     }
@@ -238,8 +238,8 @@ uint64_t calypso_rhea_dma_read(void *opaque, hwaddr off, unsigned size)
                      * "completed / acknowledged transfers" tells whether the
                      * ROM's queues overflow. */
                     if (n_clr++ < 4000)
-                        fprintf(stderr, "[rhea-dma] DMA%d_CTRL lu = 0x%04x : acquitte "
-                                "(finis=%llu acquittes=%llu)\n",
+                        fprintf(stderr, "[rhea-dma] DMA%d_CTRL read = 0x%04x: acknowledged "
+                                "(finished=%llu acknowledged=%llu)\n",
                                 n + 1, v, g_rd_fini, g_rd_acquitte);
                     rd.ch[n].ctrl &= (uint16_t)~(CTRL_IRQ_STATE | CTRL_RHEA_ERROR);
                 }
@@ -292,7 +292,7 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
             break;
         case RD_RDPTH:
             rd.ch[n].rdpth = v & 0x07FF;
-            fprintf(stderr, "[rhea-dma] DMA%d_RDPTH <- %u octets\n", n + 1, v & 0x7FF);
+            fprintf(stderr, "[rhea-dma] DMA%d_RDPTH <- %u bytes\n", n + 1, v & 0x7FF);
             break;
         case RD_AAD:
             /* Logged unmasked: AAD is the answer to "where must the burst land". */
@@ -301,7 +301,7 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
             break;
         case RD_ALGTH:
             rd.ch[n].algth = v & 0x0FFF;
-            fprintf(stderr, "[rhea-dma] DMA%d_ALGTH <- %u octets (= %u mots de page API) PC=0x%04x\n",
+            fprintf(stderr, "[rhea-dma] DMA%d_ALGTH <- %u bytes (= %u API page words) PC=0x%04x\n",
                     n + 1, v & 0xFFF, (v & 0xFFF) / 2, rd_dsp ? (rd_dsp->pc & 0xffff) : 0);
             break;
         case RD_CTRL: {
@@ -321,9 +321,9 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
             if (n == 1 && ((v ^ before) & (CTRL_ENABLE | CTRL_ONE_SHOT))) {
                 extern int calypso_bsp_dma_trace_on(void); extern uint32_t calypso_trx_get_fn(void);
                 if (calypso_bsp_dma_trace_on())
-                    printf("  [dma-arm] tick=%u insn=%u pc=0x%04x %s one_shot=%d fenetre=%u\n", calypso_trx_get_fn(),
+                    printf("  [dma-arm] tick=%u insn=%u pc=0x%04x %s one_shot=%d window=%u\n", calypso_trx_get_fn(),
                            rd_dsp ? rd_dsp->insn_count : 0, rd_dsp ? (rd_dsp->pc & 0xffff) : 0,
-                           (v & CTRL_ENABLE) ? "ARME" : "desarme", !!(v & CTRL_ONE_SHOT), rd.ch[n].algth / 4);
+                           (v & CTRL_ENABLE) ? "ARMED" : "disarmed", !!(v & CTRL_ONE_SHOT), rd.ch[n].algth / 4);
             }
             if (n == 1 && (v & CTRL_ENABLE) && !(before & CTRL_ENABLE) && !(v & CTRL_ONE_SHOT))
                 rd_skip_pending = arm_skip_words();      /* FB search armed: set the TOA origin */
@@ -331,19 +331,19 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
             if (inerte) {
                 static unsigned long long n_rmw[4];
                 if (n_rmw[n]++ == 0 || (n_rmw[n] % 20000) == 0)
-                    fprintf(stderr, "[rhea-dma] DMA%d_CTRL DESARMEMENT x%llu "
-                            "(0xa643 andm #0xfffe = efface ENABLE ; sans effet ici, "
-                            "ENABLE valait deja 0 — relu/reecrit 0x%04x)\n",
+                    fprintf(stderr, "[rhea-dma] DMA%d_CTRL DISARM x%llu "
+                            "(0xa643 andm #0xfffe = clears ENABLE; no effect here, "
+                            "ENABLE was already 0 — reread/rewritten 0x%04x)\n",
                             n + 1, n_rmw[n], v);
                 break;
             }
             log_ctrl(n, v);
             if (v & CTRL_DMA_START) {
                 rd.n_start++;
-                fprintf(stderr, "[rhea-dma] *** DMA%d DMA_START #%u — l'ARM DEMANDE un "
-                        "transfert. Ce module NE L'EXECUTE PAS (instrument de lecture). "
-                        "Parametres courants : RAD=0x%04x RDPTH=%u AAD=0x%03x "
-                        "(mot DSP 0x%04x) ALGTH=%u\n",
+                fprintf(stderr, "[rhea-dma] *** DMA%d DMA_START #%u — the ARM REQUESTS a "
+                        "transfer. This module DOES NOT EXECUTE IT (read-only instrument). "
+                        "Current parameters: RAD=0x%04x RDPTH=%u AAD=0x%03x "
+                        "(DSP word 0x%04x) ALGTH=%u\n",
                         n + 1, rd.n_start, rd.ch[n].rad, rd.ch[n].rdpth,
                         rd.ch[n].aad, (unsigned)(0x0800 + rd.ch[n].aad / 2),
                         rd.ch[n].algth);
@@ -359,7 +359,7 @@ void calypso_rhea_dma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
         return;
     }
 
-    fprintf(stderr, "[rhea-dma] WR  +0x%02x = 0x%04x (hors carte §11)\n",
+    fprintf(stderr, "[rhea-dma] WR  +0x%02x = 0x%04x (outside the §11 map)\n",
             (unsigned)off, v);
 }
 
@@ -392,7 +392,7 @@ static void rhea_abort_impl(const char *why)
     rd.ch[1].ctrl |= CTRL_RHEA_ERROR;
     static unsigned long long n_ab;
     if (n_ab++ < 20)
-        fprintf(stderr, "[rhea-dma] RHEA_ERROR pose : %s (CAL207 §11.3.5, efface a la lecture)\n", why);
+        fprintf(stderr, "[rhea-dma] RHEA_ERROR set: %s (CAL207 §11.3.5, cleared on read)\n", why);
 }
 #define rhea_abort(w) rhea_abort_impl(w)
 
@@ -466,37 +466,37 @@ void calypso_rhea_dma_rx_request(C54xState *s)
     if (!(ctrl & CTRL_ENABLE)) {
         static unsigned long long n_off;
         if (n_off++ == 0 || (n_off % 5000) == 0)
-            fprintf(stderr, "[rhea-dma] requete RX x%llu ignoree : DMA2 ENABLE=0 "
-                    "(le firmware n'a pas arme ce canal — on ne l'arme pas a sa "
+            fprintf(stderr, "[rhea-dma] RX request x%llu ignored: DMA2 ENABLE=0 "
+                    "(the firmware has not armed this channel — we do not arm it in its "
                     "place)\n", n_off);
         return;
     }
     if (!(ctrl & CTRL_DIRECTION)) {
         static unsigned n_dir;
         if (n_dir++ < 5)
-            fprintf(stderr, "[rhea-dma] requete RX ignoree : DMA2 DIRECTION=0 "
-                    "(API->Rhea), ce n'est pas une reception\n");
+            fprintf(stderr, "[rhea-dma] RX request ignored: DMA2 DIRECTION=0 "
+                    "(API->Rhea), this is not a reception\n");
         return;
     }
 
     /* ALGTH is a length in BYTES (§11.3.3); API memory is addressed in words. */
     int max_words = rd.ch[n].algth ? (int)(rd.ch[n].algth / 2) : 0;
     if (max_words <= 0) {
-        rhea_abort("ALGTH nulle");   /* BEFORE the if: the hardware state must not
+        rhea_abort("ALGTH zero");   /* BEFORE the if: the hardware state must not
                                       * depend on a log cap. */
         static unsigned n_len;
         if (n_len++ < 5)
-            fprintf(stderr, "[rhea-dma] requete RX ignoree : DMA2_ALGTH=%u — aucune "
-                    "longueur de page programmee\n", rd.ch[n].algth);
+            fprintf(stderr, "[rhea-dma] RX request ignored: DMA2_ALGTH=%u — no "
+                    "page length programmed\n", rd.ch[n].algth);
         return;
     }
 
     uint16_t *api = s ? s->api_ram : NULL;
     if (!api) {
-        rhea_abort("memoire API absente");
+        rhea_abort("API memory missing");
         static unsigned n_api;
         if (n_api++ < 5)
-            fprintf(stderr, "[rhea-dma] requete RX ignoree : memoire API absente\n");
+            fprintf(stderr, "[rhea-dma] RX request ignored: API memory missing\n");
         return;
     }
 
@@ -508,15 +508,15 @@ void calypso_rhea_dma_rx_request(C54xState *s)
         max_words = (int)(C54X_API_SIZE - dst_idx);
         static unsigned n_clip;
         if (max_words <= 0) {
-            rhea_abort("AAD hors fenetre API");
+            rhea_abort("AAD outside API window");
             if (n_clip++ < 5)
-                fprintf(stderr, "[rhea-dma] requete RX ignoree : AAD=0x%03x hors "
-                        "memoire API\n", rd.ch[n].aad);
+                fprintf(stderr, "[rhea-dma] RX request ignored: AAD=0x%03x outside "
+                        "API memory\n", rd.ch[n].aad);
             return;
         }
         if (n_clip++ < 5)
-            fprintf(stderr, "[rhea-dma] transfert TRONQUE a %d mots : AAD=0x%03x + "
-                    "ALGTH depasse la fenetre API\n", max_words, rd.ch[n].aad);
+            fprintf(stderr, "[rhea-dma] transfer TRUNCATED to %d words: AAD=0x%03x + "
+                    "ALGTH exceeds the API window\n", max_words, rd.ch[n].aad);
     }
 
     static uint16_t buf[4096];
@@ -632,8 +632,8 @@ void calypso_rhea_dma_rx_request(C54xState *s)
             (pdst <= 0x4f && pdst + (unsigned)got > 0x4b)) {
             static unsigned nov;
             if (nov++ < 20)
-                fprintf(stderr, "[rhea-dma] *** ECRASEMENT a_sch : depot %u mots en "
-                        "0x%04x..0x%04x recouvre a_sch (0x37..0x3b / 0x4b..0x4f) ***\n",
+                fprintf(stderr, "[rhea-dma] *** a_sch OVERWRITE: deposit of %u words at "
+                        "0x%04x..0x%04x overlaps a_sch (0x37..0x3b / 0x4b..0x4f) ***\n",
                         got, pdst, pdst + got - 1);
         }
         for (int i = 0; i < got; i++)
@@ -668,8 +668,8 @@ void calypso_rhea_dma_rx_request(C54xState *s)
         if (pages >= 64) {                        /* guard: never loop forever */
             static unsigned n_cap;
             if (n_cap++ < 5)
-                fprintf(stderr, "[rhea-dma] ⚠ plafond de 64 pages atteint sur une "
-                        "requete (burst anormalement long ?) — reste non draine\n");
+                fprintf(stderr, "[rhea-dma] ⚠ cap of 64 pages reached on one "
+                        "request (abnormally long burst?) — remainder not drained\n");
             break;
         }
     }
@@ -678,8 +678,8 @@ void calypso_rhea_dma_rx_request(C54xState *s)
         rd.ch[n].ctrl |= CTRL_IDLE;            /* nothing transferred -> idle */
         static unsigned long long n_empty;
         if (n_empty++ == 0 || (n_empty % 5000) == 0)
-            fprintf(stderr, "[rhea-dma] requete RX x%llu : recepteur RIF vide, "
-                    "rien a transferer\n", n_empty);
+            fprintf(stderr, "[rhea-dma] RX request x%llu: RIF receiver empty, "
+                    "nothing to transfer\n", n_empty);
         return;
     }
     int got = total;
@@ -710,8 +710,8 @@ void calypso_rhea_dma_rx_request(C54xState *s)
         static unsigned long long n_sb;
         bool fenetre = (got != 296);
         if (n_ok <= 20 || (n_ok % 500) == 0 || (fenetre && n_sb++ < 2000))
-            fprintf(stderr, "[rhea-dma] *** TRANSFERT RX #%llu fn=%u : %d mots RIF -> "
-                    "api_ram[0x%04x..0x%04x] en %d page(s) (mot DSP 0x%04x, ARM 0x%08x) "
+            fprintf(stderr, "[rhea-dma] *** RX TRANSFER #%llu fn=%u: %d RIF words -> "
+                    "api_ram[0x%04x..0x%04x] in %d page(s) (DSP word 0x%04x, ARM 0x%08x) "
                     "ALGTH=%u IRQ_MODE=%d ONE_SHOT=%d\n",
                     n_ok, calypso_bsp_get_last_fn(),
                     got, dst_idx, dst_idx + (got > max_words ? max_words : got) - 1, pages,
@@ -726,13 +726,13 @@ void calypso_rhea_dma_rx_request(C54xState *s)
          * at nz=2211/2368) and invites the wrong conclusion that the DMA carries
          * only zeros. */
         if (n_ok <= 20 || (n_ok % 500) == 0 || (fenetre && n_sb <= 2000)) {
-            fprintf(stderr, "[rhea-dma]     RIF avant = %d mots ; pages = "
-                    "%d+%d+%d+%d+%d+%d+%d+%d ; 1er mot non nul a l'index %d "
-                    "(attendu 42)\n", niveau_avant,
+            fprintf(stderr, "[rhea-dma]     RIF before = %d words; pages = "
+                    "%d+%d+%d+%d+%d+%d+%d+%d; 1st nonzero word at index %d "
+                    "(expected 42)\n", niveau_avant,
                     got_page[0], got_page[1], got_page[2], got_page[3],
                     got_page[4], got_page[5], got_page[6], got_page[7], premier_nz);
-            fprintf(stderr, "[rhea-dma]     contenu : %d/%d mots non nuls ; "
-                    "8 premiers = %04x %04x %04x %04x %04x %04x %04x %04x\n",
+            fprintf(stderr, "[rhea-dma]     content: %d/%d nonzero words; "
+                    "first 8 = %04x %04x %04x %04x %04x %04x %04x %04x\n",
                     nz_total, total,
                     head8[0], head8[1], head8[2], head8[3],
                     head8[4], head8[5], head8[6], head8[7]);
@@ -817,14 +817,14 @@ bool calypso_rhea_dma_xio(bool write, uint16_t pa, uint16_t *val, uint16_t pc)
                              tab[ntab].wr = write ? 1 : 0; tab[ntab].n = 1;
                              found = ntab++; }
             fprintf(stderr, "[rhea-dma] XIO %s PA=0x%04x (+0x%02x) %s0x%04x PC=0x%04x "
-                    "— NOUVEAU site (acces DSP, canal cede par ALLOC_CONFIG)\n",
+                    "— NEW site (DSP access, channel yielded by ALLOC_CONFIG)\n",
                     write ? "PORTW" : "PORTR", pa, (unsigned)off,
                     write ? "<- " : "-> ", val ? *val : 0, pc);
         } else {
             tab[found].n++;
             if ((tab[found].n % 20000) == 0)
-                fprintf(stderr, "[rhea-dma] XIO %s PA=0x%04x PC=0x%04x : %llu passages "
-                        "(valeur courante 0x%04x)\n", write ? "PORTW" : "PORTR",
+                fprintf(stderr, "[rhea-dma] XIO %s PA=0x%04x PC=0x%04x: %llu hits "
+                        "(current value 0x%04x)\n", write ? "PORTW" : "PORTR",
                         pa, pc, tab[found].n, val ? *val : 0);
         }
     }

@@ -22,12 +22,13 @@ verdict "oui" "$("$QEMU" -M help 2>/dev/null | grep -q '^calypso ' && echo oui |
 
 # 2. it names the layer 1 actually linked. This is the only short way to know
 #    what was built; an L1 that sneaks into the build shows up here.
-l1="$("$QEMU" -M help 2>/dev/null | sed -n 's/.*couche 1 : \([a-z0-9]*\)).*/\1/p')"
-attendu="${QOSMO_L1_ATTENDUE:-aucune}"
+l1="$("$QEMU" -M help 2>/dev/null | sed -n 's/.*\(couche 1 :\|layer 1:\) \([a-z0-9]*\)).*/\2/p')"
+[ "$l1" = aucune ] && l1=none            # older builds printed "couche 1 : aucune"
+attendu="${QOSMO_L1_ATTENDUE:-none}"; [ "$attendu" = aucune ] && attendu=none
 verdict "$attendu" "${l1:-<absent>}" "la machine annonce sa couche 1 (QOSMO_L1_ATTENDUE=$attendu)"
 
 # 3. without L1, no layer 1 symbol must have been linked
-if [ "$attendu" = "aucune" ]; then
+if [ "$attendu" = "none" ]; then
     fuites="$(nm -C "$QEMU" 2>/dev/null | grep -cE ' [Tt] (calypso_l1_grgsm|calypso_c54x|c54x_)' || true)"
     verdict "0" "${fuites:-0}" "aucun symbole de couche 1 lie dans la base nue"
 fi

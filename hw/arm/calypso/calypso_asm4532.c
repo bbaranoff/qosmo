@@ -45,7 +45,7 @@ void calypso_asm4532_tspact_update(uint16_t tspact, uint32_t fn)
 
     if (!asm4532.init) {
         asm4532.init = true;
-        ASM_LOG("etat initial : tspact=0x%04x TX=%d bande=%s fn=%u",
+        ASM_LOG("initial state: tspact=0x%04x TX=%d band=%s fn=%u",
                 tspact, tx_new, gsm_new ? "GSM900" : "DCS1800", fn);
     }
 
@@ -53,15 +53,15 @@ void calypso_asm4532_tspact_update(uint16_t tspact, uint32_t fn)
         if (tx_new) {
             asm4532.tx_windows++;
         }
-        ASM_LOG("TRENA %s -> antenne sur %s (bande %s) fn=%u  [fenetre #%u]",
-                tx_new ? "ASSERTEE" : "relachee",
-                tx_new ? "le PA (TX)" : "le chemin Rx",
+        ASM_LOG("TRENA %s -> antenna on %s (band %s) fn=%u  [window #%u]",
+                tx_new ? "ASSERTED" : "released",
+                tx_new ? "the PA (TX)" : "the Rx path",
                 gsm_new ? "GSM900" : "DCS1800", fn, asm4532.tx_windows);
     } else if (gsm_new != asm4532.gsm && tx_new) {
         /* Band change DURING a TX window: the firmware does not do this,
          * rffe_mode() sets both lines together. Report it rather than
          * absorbing it silently. */
-        ASM_LOG("⚠ bande changee PENDANT la fenetre TX : %s -> %s fn=%u",
+        ASM_LOG("⚠ band changed DURING the TX window: %s -> %s fn=%u",
                 asm4532.gsm ? "GSM900" : "DCS1800",
                 gsm_new ? "GSM900" : "DCS1800", fn);
     }

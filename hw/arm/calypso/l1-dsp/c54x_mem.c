@@ -58,8 +58,8 @@ uint16_t data_read(C54xState *s, uint16_t addr)
              * from a disabled one. ARMEE with no A/B line after it means the
              * demod reads neither 0x0cce nor 0x4c00 - a result, not a failure. */
             fprintf(stderr, "[c54x] FEED-DST %s (CALYPSO_FEED_DST=%d) — "
-                    "A=0x0cce..0x0df5 (dest DMA), B=0x4c00..0x4d27 (correlateur)\n",
-                    fd_on ? "ARMEE" : "eteinte", fd_on);
+                    "A=0x0cce..0x0df5 (DMA dest), B=0x4c00..0x4d27 (correlator)\n",
+                    fd_on ? "ARMED" : "off", fd_on);
         }
         if (fd_on) {
             int zone = (addr >= 0x0cce && addr <= 0x0df5) ? 0
@@ -87,7 +87,7 @@ uint16_t data_read(C54xState *s, uint16_t addr)
                                 z == 0 ? "A" : "B");
                         for (int j = 0; j < npc[z]; j++)
                             fprintf(stderr, " 0x%04x(%u)", pcs[z][j], pcn[z][j]);
-                        fprintf(stderr, "%s\n", npc[z] ? "" : " (aucune lecture)");
+                        fprintf(stderr, "%s\n", npc[z] ? "" : " (no read)");
                     }
                     fflush(stderr);
                 }
@@ -205,11 +205,11 @@ uint16_t g_rmap_pclo, g_rmap_pchi;
 
 static void rmap_dump(void)
 {
-    fprintf(stderr, "[c54x] RMAP PC 0x%04x..0x%04x  lectures=%u  PCs=%d%s\n",
+    fprintf(stderr, "[c54x] RMAP PC 0x%04x..0x%04x  reads=%u  PCs=%d%s\n",
             g_rmap_pclo, g_rmap_pchi, g_rmap_tot, g_rmap_n,
-            g_rmap_n >= RMAP_PCS ? "  *** SATUREE ***" : "");
+            g_rmap_n >= RMAP_PCS ? "  *** SATURATED ***" : "");
     for (int i = 0; i < g_rmap_n; i++) {
-        fprintf(stderr, "[c54x] RMAP   PC=0x%04x n=%-7u lit 0x%04x..0x%04x  ex:",
+        fprintf(stderr, "[c54x] RMAP   PC=0x%04x n=%-7u reads 0x%04x..0x%04x  ex:",
                 g_rmap[i].pc, g_rmap[i].n, g_rmap[i].amn, g_rmap[i].amx);
         for (int k = 0; k < g_rmap[i].na && k < 8; k++)
             fprintf(stderr, " %04x", g_rmap[i].a[k]);
@@ -284,7 +284,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
         if (_dw < 0) {
             _dw = calypso_gate("CALYPSO_DTASKD_WATCH", 0);
             if (_dw) {
-                fprintf(stderr, "[dtaskd] patte 4/4 armee (lectures DSP page W) : "
+                fprintf(stderr, "[dtaskd] hook 4/4 armed (DSP reads of page W): "
                         "d_task_d=data[0x0800]/[0x0814]  d_task_md=data[0x0804]/[0x0818]\n");
                 fflush(stderr);
             }
@@ -297,7 +297,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
             if (_n <= 30 || (_n % 5000) == 0) {
                 fprintf(stderr,
                         "[dtaskd] DSP<RD  %-9s data[0x%04x] = 0x%04x  "
-                        "(d_task_d lus=%llu  d_task_md lus=%llu)  PC=0x%04x insn=%u\n",
+                        "(d_task_d read=%llu  d_task_md read=%llu)  PC=0x%04x insn=%u\n",
                         is_d ? "d_task_d" : "d_task_md", addr, s->data[addr],
                         _nd, _nmd, s->last_exec_pc, s->insn_count);
                 fflush(stderr);
@@ -323,8 +323,8 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
         if (_dw2 < 0) _dw2 = calypso_gate("CALYPSO_DMAWATCH", 0);
         if (_dw2 && addr >= 0x0054 && addr <= 0x0057 && _dwr < 40) {
             _dwr++;
-            const char *_nm = (addr==0x0054) ? "DMPREC?(modele:DMSA)" :
-                              (addr==0x0055) ? "DMSA?(modele:DMSDI)" :
+            const char *_nm = (addr==0x0054) ? "DMPREC?(model:DMSA)" :
+                              (addr==0x0055) ? "DMSA?(model:DMSDI)" :
                               (addr==0x0056) ? "DMSDI?" : "DMSDN";
             fprintf(stderr, "[c54x] DMAWATCH RD 0x%04x %-20s = 0x%04x PC=0x%04x insn=%u\n",
                     addr, _nm, s->data[addr], s->pc, s->insn_count);
@@ -335,9 +335,9 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
         if (_dr < 0) _dr = calypso_gate("CALYPSO_DEMODRD", 0);
         if (_dr && _drn < 60 && s->pc == 0x9fb5) {   /* sample reads only */
             _drn++;
-            fprintf(stderr, "[c54x] DEMODRD PC=0x%04x XPC=%u op=0x%04x lit data[0x%04x]=0x%04x "
+            fprintf(stderr, "[c54x] DEMODRD PC=0x%04x XPC=%u op=0x%04x reads data[0x%04x]=0x%04x "
                     "AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x "
-                    "BK=%04x | 5 mots: %04x %04x %04x %04x %04x | insn=%u\n",
+                    "BK=%04x | 5 words: %04x %04x %04x %04x %04x | insn=%u\n",
                     s->pc, (unsigned)s->xpc, prog_fetch(s, s->pc), addr, s->data[addr],
                     s->ar[0], s->ar[1], s->ar[2], s->ar[3], s->ar[4], s->ar[5],
                     s->ar[6], s->ar[7], s->bk,
@@ -351,7 +351,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
         if (_sr < 0) _sr = calypso_gate("CALYPSO_SLOTSRC", 0);
         if (_sr && _srn < 40 && s->data[addr] == 0xab38) {
             _srn++;
-            fprintf(stderr, "[c54x] SLOTSRC-RD data[0x%04x] = 0xab38 (STUB) lu PC=0x%04x insn=%u\n",
+            fprintf(stderr, "[c54x] SLOTSRC-RD data[0x%04x] = 0xab38 (STUB) read PC=0x%04x insn=%u\n",
                     addr, s->pc, s->insn_count);
         }
     }
@@ -449,7 +449,7 @@ static uint16_t data_read_locked(C54xState *s, uint16_t addr)
             fprintf(stderr,
                 "[c54x] DISP-POLL-RD data[0x%04x]=0x%04x PC=0x%04x INTM=%d insn=%u%s\n",
                 addr, v, s->pc, !!(s->st1 & ST1_INTM), s->insn_count,
-                v ? "  <-- NON-ZERO (flag posé !)" : "");
+                v ? "  <-- NON-ZERO (flag set!)" : "");
     }
     /* FBDB-PROBE read 0x3DC0 (= SARAM flag polled by fc63 BITF).
      * Env CALYPSO_FBDB_PROBE=1. Logs first 30 reads + each 10000th. */
@@ -1012,10 +1012,10 @@ static int scratchwr_on(void)
     static int g = -1;
     if (g < 0) {
         g = calypso_gate("CALYPSO_SCRATCH_WR", 0);
-        fprintf(stderr, "[c54x] SCRATCH-WR %s : ecritures dans 0x0060-0x007F "
-                "(scratch-pad DARAM + espace PROGRAMME via MVDP) — zone des "
-                "coefficients du FIRS (pmad=0x0061)\n",
-                g ? "ACTIVE" : "INACTIVE (defaut)");
+        fprintf(stderr, "[c54x] SCRATCH-WR %s: writes to 0x0060-0x007F "
+                "(DARAM scratch-pad + PROGRAM space via MVDP) — area of the "
+                "FIRS coefficients (pmad=0x0061)\n",
+                g ? "ACTIVE" : "INACTIVE (default)");
     }
     return g;
 }
@@ -1046,12 +1046,12 @@ void scratchwr_note(C54xState *s, uint16_t a, uint16_t v, const char *espace)
         fprintf(stderr, "[c54x] SCRATCH-WR %s[0x%04x] <- 0x%04x PC=0x%04x insn=%u%s\n",
                 espace, a, v, s->pc, s->insn_count,
                 (a >= 0x0061 && a <= 0x0066) ? "  <<<< COEFFICIENTS (destination)" :
-                (a >= 0x2CB9 && a <= 0x2CBF) ? "  <<<< SOURCE de la table" : "");
+                (a >= 0x2CB9 && a <= 0x2CBF) ? "  <<<< SOURCE of the table" : "");
     }
     if (((cum[0] + cum[1]) % 500) == 0)
-        fprintf(stderr, "[c54x] SCRATCH-WR bilan : scratch(0x60-0x7F)=%llu "
-                "source(0x2CB0-0x2CBF)=%llu | dont coefficients(0x61-0x66)=%llu "
-                "source utile(0x2CB9-0x2CBF)=%llu\n",
+        fprintf(stderr, "[c54x] SCRATCH-WR summary: scratch(0x60-0x7F)=%llu "
+                "source(0x2CB0-0x2CBF)=%llu | of which coefficients(0x61-0x66)=%llu "
+                "useful source(0x2CB9-0x2CBF)=%llu\n",
                 (unsigned long long)cum[0], (unsigned long long)cum[1],
                 (unsigned long long)cum_coef, (unsigned long long)cum_src);
 }
@@ -1075,7 +1075,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         if (on && g_piege_pile_on && (uint16_t)(addr - g_piege_pile_sp) < 4u && s->insn_count > 3000000) {
             static unsigned n;
             if (n++ < 12) {
-                printf("  [piege-pile] data[0x%04x] %04x -> %04x pendant l'IT (SP interrompu 0x%04x) pc=0x%04x xpc=%u op=0x%04x "
+                printf("  [piege-pile] data[0x%04x] %04x -> %04x during the IRQ (interrupted SP 0x%04x) pc=0x%04x xpc=%u op=0x%04x "
                        "SP=%04x DP=%03x ST1=%04x AR0..7=%04x %04x %04x %04x %04x %04x %04x %04x insn=%u [%u]\n",
                        addr, s->data[addr], val, g_piege_pile_sp, s->pc, s->xpc, s->prog[s->pc], s->sp, s->st0 & 0x1ff,
                        s->st1, s->ar[0], s->ar[1], s->ar[2], s->ar[3], s->ar[4], s->ar[5], s->ar[6], s->ar[7],
@@ -1094,7 +1094,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
     if (addr == 0x3d89 && (val & 0xff00) != 0x4d00) {
         static unsigned n;
         if (n++ < 12)
-            printf("  [garde-3d89] data[0x3d89] <- 0x%04x (etait 0x%04x) PC=0x%04x DP=0x%03x ST0=0x%04x "
+            printf("  [garde-3d89] data[0x3d89] <- 0x%04x (was 0x%04x) PC=0x%04x DP=0x%03x ST0=0x%04x "
                     "ST1=0x%04x SP=0x%04x IMR=0x%04x IFR=0x%04x AR2=0x%04x BK=0x%04x insn=%u\n",
                     val, s->data[0x3d89], s->pc & 0xffff, s->st0 & 0x1ff, s->st0, s->st1, s->sp,
                     s->imr, s->ifr, s->ar[2], s->bk, s->insn_count), fflush(stdout);
@@ -1119,7 +1119,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         static unsigned n;
         if (n++ < 40) {
             uint16_t pg = s->data[0x3fc1];
-            printf("  [base-tch] 4366 <- de57 PC=0x%04x 3fab=%04x 3fc1=%04x mot9=%04x mot0=%04x 3fba=%d 4364=%u insn=%u\n",
+            printf("  [base-tch] 4366 <- de57 PC=0x%04x 3fab=%04x 3fc1=%04x word9=%04x word0=%04x 3fba=%d 4364=%u insn=%u\n",
                    s->pc & 0xffff, s->data[0x3fab], pg, s->data[(uint16_t)(pg + 9)], s->data[pg],
                    (int16_t)s->data[0x3fba], s->data[0x4364], s->insn_count);
         }
@@ -1128,7 +1128,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
         static unsigned n;
         if (n++ < 40) {
             uint16_t pg = s->data[0x3fc1];
-            printf("  [base-tch] 3fab bit8 <- 1 (%04x) PC=0x%04x 3fc1=%04x mot9=%04x mot0=%04x 3fba=%d 4364=%u insn=%u\n",
+            printf("  [base-tch] 3fab bit8 <- 1 (%04x) PC=0x%04x 3fc1=%04x word9=%04x word0=%04x 3fba=%d 4364=%u insn=%u\n",
                    val, s->pc & 0xffff, pg, s->data[(uint16_t)(pg + 9)], s->data[pg], (int16_t)s->data[0x3fba],
                    s->data[0x4364], s->insn_count);
         }
@@ -1167,10 +1167,10 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
             if (old != val || _n < 8) {
                 _n++;
                 fprintf(stderr, "[dispatch] *** data[0x43d8] : 0x%04x -> 0x%04x "
-                        "par PC=0x%04x%s  (data[0x43b0]=0x%04x) insn=%u\n",
+                        "by PC=0x%04x%s  (data[0x43b0]=0x%04x) insn=%u\n",
                         old, val, s->pc,
-                        (val == 0xa5cd) ? "  <<< ARMEMENT RX INSTALLE !" :
-                        (val == 0xab38) ? "  (RET partage = slot vide)" : "",
+                        (val == 0xa5cd) ? "  <<< RX ARMING INSTALLED!" :
+                        (val == 0xab38) ? "  (shared RET = empty slot)" : "",
                         s->data[0x43b0], s->insn_count);
             }
         }
@@ -1314,8 +1314,8 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
     {
         static int sent = -1;
         if (sent < 0) { const char *e = calypso_getenv("CALYPSO_FBDET_SENTINEL"); sent = e ? atoi(e) : 0;
-            if (sent==1) fprintf(stderr, "[c54x] FBDET-SENTINEL=1 FORCE : data[0x08f8] forcé à 0xDEAD\n");
-            else if (sent==2) fprintf(stderr, "[c54x] FBDET-SENTINEL=2 MONITOR : logge la vraie valeur écrite à 0x08f8 (pas de force)\n"); }
+            if (sent==1) fprintf(stderr, "[c54x] FBDET-SENTINEL=1 FORCE: data[0x08f8] forced to 0xDEAD\n");
+            else if (sent==2) fprintf(stderr, "[c54x] FBDET-SENTINEL=2 MONITOR: logs the real value written to 0x08f8 (no forcing)\n"); }
         {
             /* Force a_pm (rxlev) on the array the ARM actually reads:
              * calypso_trx.c reads s->dsp->data[off/2+0x800], not api_ram. The
@@ -1447,7 +1447,7 @@ void data_write(C54xState *s, uint16_t addr, uint16_t val)
          * once every 2000 instead. */
         if (val == 0) {
             if (++awz % 2000 == 1)
-                fprintf(stderr, "[c54x] ANGLE-WR (mise a zero x%u, PC=0x%04x)\n",
+                fprintf(stderr, "[c54x] ANGLE-WR (zeroing x%u, PC=0x%04x)\n",
                         awz, s->pc);
         } else if (aw < 200) {
             int64_t a = (s->a & 0x8000000000LL) ? (int64_t)(s->a | ~0xFFFFFFFFFFLL) : (int64_t)s->a;
@@ -1501,9 +1501,9 @@ uint16_t g_wmap_lo, g_wmap_hi, g_wmap_lo2, g_wmap_hi2;
 
 static void wmap_dump(void)
 {
-    fprintf(stderr, "[c54x] WMAP plages 0x%04x..0x%04x + 0x%04x..0x%04x  ecritures=%u  ecrivains=%d%s\n",
+    fprintf(stderr, "[c54x] WMAP ranges 0x%04x..0x%04x + 0x%04x..0x%04x  writes=%u  writers=%d%s\n",
             g_wmap_lo, g_wmap_hi, g_wmap_lo2, g_wmap_hi2, g_wmap_tot, g_wmap_n,
-            g_wmap_n >= WMAP_PCS ? "  *** TABLE SATUREE, ecrivains manquants ***" : "");
+            g_wmap_n >= WMAP_PCS ? "  *** TABLE SATURATED, writers missing ***" : "");
     for (int i = 0; i < g_wmap_n; i++) {
         fprintf(stderr, "[c54x] WMAP   PC=0x%04x n=%-7u @0x%04x(n=%u) distinct=%s%d  min=0x%04x max=0x%04x  ex:",
                 g_wmap[i].pc, g_wmap[i].n, g_wmap[i].addr0, g_wmap[i].n0,
@@ -1511,9 +1511,9 @@ static void wmap_dump(void)
                 g_wmap[i].mn, g_wmap[i].mx);
         for (int k = 0; k < g_wmap[i].nv && k < 8; k++)
             fprintf(stderr, " %04x", g_wmap[i].v[k]);
-        fprintf(stderr, "%s\n", g_wmap[i].n0 < 2 ? "   <= (trop peu d echantillons)"
-                : g_wmap[i].nv == 1 ? "   <= CONSTANTE dans le temps"
-                                    : "   <= VARIE dans le temps = PORTE DE LA DONNEE");
+        fprintf(stderr, "%s\n", g_wmap[i].n0 < 2 ? "   <= (too few samples)"
+                : g_wmap[i].nv == 1 ? "   <= CONSTANT over time"
+                                    : "   <= VARIES over time = CARRIES THE DATA");
     }
 }
 
@@ -1525,8 +1525,8 @@ static void wmap_heartbeat(void)
     static uint64_t k;
     if (!g_wmap_on) return;
     if (++k % 5000000ULL) return;
-    fprintf(stderr, "[c54x] WMAP heartbeat: writes DSP=%llu, dans plages=%u"
-            " (0 = la plage n est jamais ecrite par une instruction DSP)\n",
+    fprintf(stderr, "[c54x] WMAP heartbeat: writes DSP=%llu, in ranges=%u"
+            " (0 = the range is never written by a DSP instruction)\n",
             (unsigned long long)k, g_wmap_tot);
 }
 
@@ -1589,7 +1589,7 @@ static void dio_init(void)
     g_dio_pclo = lo ? (uint16_t)strtoul(lo, NULL, 0) : 0x9f95;
     g_dio_pchi = hi ? (uint16_t)strtoul(hi, NULL, 0) : 0x9fe2;
     if (g_dio_on)
-        fprintf(stderr, "[c54x] DEMODIO armed PC 0x%04x..0x%04x apres insn=%llu\n",
+        fprintf(stderr, "[c54x] DEMODIO armed PC 0x%04x..0x%04x after insn=%llu\n",
                 g_dio_pclo, g_dio_pchi, (unsigned long long)g_dio_after);
 }
 
@@ -1661,7 +1661,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             double coh = den > 0 ? sqrt(ar*ar+ai*ai)/den : 0;
             double dphi = atan2(ai, ar);
             fprintf(stderr, "[c54x] BUF-0cce %s=%d : coherence=%.3f dphi=%+.3f "
-                    "(FCCH pure vise coh~1, dphi=+1.571)\n",
+                    "(pure FCCH aims at coh~1, dphi=+1.571)\n",
                     addr == 0x08fa ? "TOA" : "ANGLE", (int)(int16_t)val, coh, dphi);
             nb++;
         }
@@ -1761,7 +1761,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         if (n6 < 60) {
             unsigned fn_eval = calypso_daram_last_fn;
             fprintf(stderr, "[c54x] DECALAGE snr=%-6d eval_fn=%-7u p51=%-2u | "
-                    "dernier depot fn=%-7u p51=%-2u | ecart=%d trames\n",
+                    "last deposit fn=%-7u p51=%-2u | offset=%d frames\n",
                     (int)(int16_t)val, fn_eval, fn_eval % 51u,
                     g_depot_fn, g_depot_fn % 51u, (int)(fn_eval - g_depot_fn));
             n6++;
@@ -1782,7 +1782,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             fprintf(stderr, "[c54x] SNR-BINAIRE snr=%-6d fn=%-7u p51=%-2u "
                     "coherence=%.3f dphi=%+.3f %s\n",
                     (int)(int16_t)val, fn, fn % 51u, coh, atan2(ai, ar),
-                    (fn % 51u) % 10 == 0 && (fn % 51u) <= 40 ? "<- trame FCCH" : "");
+                    (fn % 51u) % 10 == 0 && (fn % 51u) <= 40 ? "<- FCCH frame" : "");
             n5++;
         }
     }
@@ -1823,7 +1823,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
     }
     { static long _dwl_n = 0; static int _dwl_on = -1; if (_dwl_on < 0) _dwl_on = calypso_getenv("CALYPSO_DWL_PROVE") ? 1 : 0;
       if (_dwl_on && (_dwl_n++ % 100000) == 0)
-        fprintf(stderr, "[c54x] DWL-PROVE appel #%ld addr=0x%04x pc=0x%04x\n", _dwl_n, addr, s->pc); }
+        fprintf(stderr, "[c54x] DWL-PROVE call #%ld addr=0x%04x pc=0x%04x\n", _dwl_n, addr, s->pc); }
     {   /* FBCNT-WATCH - CALYPSO_FBROUTE=1 (same gate as FBROUTE, of which this
          * is the direct sequel). Read-only, capped.
          *
@@ -1905,7 +1905,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         if (_dw < 0) {
             _dw = calypso_gate("CALYPSO_DTASKD_WATCH", 0);
             if (_dw) {
-                fprintf(stderr, "[dtaskd] patte 3/3 armee (ecritures DSP) : "
+                fprintf(stderr, "[dtaskd] hook 3/3 armed (DSP writes): "
                         "R p0=data[0x0828] R p1=data[0x083C]\n");
                 fflush(stderr);
             }
@@ -1917,7 +1917,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             if (_n <= 40 || (_n % 5000) == 0) {
                 fprintf(stderr,
                         "[dtaskd] DSP>WR  R p%d  data[0x%04x] <- 0x%04x  "
-                        "(non_nuls=%llu  p0=%llu p1=%llu)  PC=0x%04x insn=%u\n",
+                        "(nonzero=%llu  p0=%llu p1=%llu)  PC=0x%04x insn=%u\n",
                         (addr == 0x0828) ? 0 : 1, addr, val,
                         _nz, _n0, _n1, s->last_exec_pc, s->insn_count);
                 fflush(stderr);
@@ -1951,7 +1951,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             && val == 0x4330 && s->data[addr] != 0x4330) {
             _dqrn++;
             fprintf(stderr, "[c54x] DMAQ-RESET data[0x%04x] 0x%04x -> 0x4330 "
-                    "PC=0x%04x (la file contenait %u element(s)) insn=%u\n",
+                    "PC=0x%04x (the queue held %u item(s)) insn=%u\n",
                     addr, s->data[addr], s->pc,
                     (unsigned)((s->data[0x433f] - s->data[0x433e]) & 0xFFFF),
                     s->insn_count);
@@ -1981,7 +1981,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         if (_dw3 < 0) _dw3 = calypso_gate("CALYPSO_DMAWATCH", 0);
         if (_dw3 && addr >= 0x0054 && addr <= 0x0057 && _dww < 40) {
             _dww++;
-            fprintf(stderr, "[c54x] DMAWATCH WR 0x%04x <- 0x%04x (etait 0x%04x) PC=0x%04x insn=%u\n",
+            fprintf(stderr, "[c54x] DMAWATCH WR 0x%04x <- 0x%04x (was 0x%04x) PC=0x%04x insn=%u\n",
                     addr, val, s->data[addr], s->pc, s->insn_count);
         }
     }
@@ -1992,7 +1992,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             _bc2n++;
             fprintf(stderr, "[c54x] BOOTCMD DSP data[0x%04x] 0x%04x -> 0x%04x PC=0x%04x insn=%u%s\n",
                     addr, s->data[addr], val, s->pc, s->insn_count,
-                    (addr == 0x0FFF) ? "   <<<< CELLULE DE COMMANDE" : "");
+                    (addr == 0x0FFF) ? "   <<<< COMMAND CELL" : "");
         }
     }
     {   /* DISPTAB-WR: who fills the dispatch table 0x4380..0x43cf? */
@@ -2024,7 +2024,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             static unsigned _ncn = 0;
             if (_ncn++ < 8)
                 fprintf(stderr, "[c54x] DEMOD-NOCLOBBER skip PC=0x%04x data[0x%04x] <- 0x%04x "
-                        "(ecriture demod ignoree ; l alimentation vient de rx_burst sauf si FB_IQ_OWNS=1)\n", s->pc, addr, val);
+                        "(demod write ignored; the feed comes from rx_burst unless FB_IQ_OWNS=1)\n", s->pc, addr, val);
             return;
         }
     }
@@ -2496,12 +2496,12 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
         }
         if (++pw == 2000) {
             calypso_invariant("correlator_ar4_sweeps", ar4_n > 2,
-                              "AR4 (write ptr) : %d valeur(s) distincte(s) sur %u writes",
+                              "AR4 (write ptr): %d distinct value(s) over %u writes",
                               ar4_n, pw);
         }
         calypso_invariant("correlator_ar5_in_iq_buffer",
                           a5 >= 0x2a00 && a5 <= 0x2b27,
-                          "AR5 (read ptr I/Q) = 0x%04x HORS buffer [0x2a00..0x2b27]", a5);
+                          "AR5 (read ptr I/Q) = 0x%04x OUTSIDE buffer [0x2a00..0x2b27]", a5);
     }
     /* [2026-09-23] Sondes pures A_CD-WR .. DARAM[0x40..0x90] : derriere
      * l'interrupteur. */
@@ -2819,12 +2819,12 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             wrp_seen++;
             if (wrp_seen <= wrp_max)
                 fprintf(stderr, "[c54x] WR-PLAGE #%ld data[0x%04x] idx=%d <- 0x%04x "
-                        "(was 0x%04x) pc=0x%04x ecr=0x%04x insn=%u\n",
+                        "(was 0x%04x) pc=0x%04x wr=0x%04x insn=%u\n",
                         wrp_seen, addr, (int)(addr - (uint16_t)wrp_lo), val,
                         s->data[addr], s->pc, (uint16_t)(s->pc - 1),
                         (unsigned)s->insn_count);
             else if (wrp_seen == wrp_max + 1)
-                fprintf(stderr, "[c54x] WR-PLAGE ... plafond %ld atteint, suite muette\n",
+                fprintf(stderr, "[c54x] WR-PLAGE ... cap %ld reached, rest silent\n",
                         wrp_max);
         }
     }
@@ -3092,7 +3092,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                 if (garde && s->xpc == 0 && s->pc >= 0xe000 && s->pc <= 0xefff && s->insn_count > 1000000) {
                     static unsigned ng;
                     if (ng++ < 40)
-                        printf("  [garde-imr] IMR 0x%04x -> 0x%04x IGNORE (codec PDROM pc=0x%04x op=0x%04x AR3=%04x BK=%04x insn=%u) [%u]\n",
+                        printf("  [garde-imr] IMR 0x%04x -> 0x%04x IGNORED (codec PDROM pc=0x%04x op=0x%04x AR3=%04x BK=%04x insn=%u) [%u]\n",
                                s->imr, (uint16_t)val, s->pc, s->prog[s->pc], s->ar[3], s->bk, s->insn_count, ng);
                     return;
                 }
@@ -3133,7 +3133,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                 if (_pd) { static unsigned _n = 0;
                     if (_n++ < 40 || (_n % 5000) == 0)
                         fprintf(stderr, "[c54x] IFR-CLEAR-WHO #%u site=mmio-write "
-                                "perdus=0x%04x IFR 0x%04x->0x%04x IMR=0x%04x "
+                                "lost=0x%04x IFR 0x%04x->0x%04x IMR=0x%04x "
                                 "INTM=%d PC=0x%04x insn=%u\\n", _n, _pd, _av,
                                 s->ifr, s->imr, (s->st1 & ST1_INTM) ? 1 : 0,
                                 s->pc, s->insn_count);
@@ -3165,12 +3165,12 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                     }
                 }
                 if (!found)
-                    fprintf(stderr, "  NO-WRITER → slot STALE → SP désaligné (POP sans PUSH)");
+                    fprintf(stderr, "  NO-WRITER → slot STALE → SP misaligned (POP without PUSH)");
                 fprintf(stderr, " insn=%u\n", s->insn_count);
                 /* SP event ring: recent pushes and pops, which expose the
                  * unbalanced RET-family return (pop delta > 0 with no matching
                  * push) that shifts SP. */
-                fprintf(stderr, "[c54x]   ORPHAN-SP-RING (anciens→récents, pc:op±delta) :");
+                fprintf(stderr, "[c54x]   ORPHAN-SP-RING (oldest→newest, pc:op±delta):");
                 for (int k = 28; k >= 1; k--) {
                     struct sp_evt *e = &g_spring[(g_spring_idx - k) & 63];
                     fprintf(stderr, " %04x:%04x%+d", e->pc, e->op, e->delta);
@@ -3211,7 +3211,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                 if (garde_sp && val < 0x0060 && s->xpc == 0 && s->pc >= 0xe000 && s->insn_count > 1000000) {
                     static unsigned ngs;
                     if (ngs++ < 40)
-                        printf("  [garde-sp] SP 0x%04x -> 0x%04x IGNORE (PDROM pc=0x%04x op=0x%04x DP=0x%03x AR6=%04x insn=%u) [%u]\n",
+                        printf("  [garde-sp] SP 0x%04x -> 0x%04x IGNORED (PDROM pc=0x%04x op=0x%04x DP=0x%03x AR6=%04x insn=%u) [%u]\n",
                                s->sp, val, s->pc, s->prog[s->pc], s->st0 & 0x1ff, s->ar[6], s->insn_count, ngs);
                     return;
                 }
@@ -3227,7 +3227,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                 if (bkw_n < 40) {
                     fprintf(stderr, "[c54x] BK-WR (MMR) 0x%04x→0x%04x PC=0x%04x op=0x%04x "
                             "%s insn=%u\n", s->bk, val, s->pc, prog_fetch(s, s->pc),
-                            (val == 0) ? "<<< BK=0 (casse circular!)" : "", s->insn_count);
+                            (val == 0) ? "<<< BK=0 (breaks circular!)" : "", s->insn_count);
                     bkw_n++;
                 }
             }
@@ -3380,18 +3380,18 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
                 watch  = calypso_gate("CALYPSO_API_HOM_WATCH", 1);
                 strict = calypso_gate("CALYPSO_API_HOM_STRICT", 0);
                 if (strict)
-                    fprintf(stderr, "[c54x] API_HOM_STRICT=1 : les ecritures DSP "
-                            "dans la fenetre API sont ABANDONNEES pendant HOM "
-                            "(CAL000 §7.2.1). Changement de comportement — a "
-                            "valider sous charge.\n");
+                    fprintf(stderr, "[c54x] API_HOM_STRICT=1: DSP writes "
+                            "to the API window are DROPPED during HOM "
+                            "(CAL000 §7.2.1). Behaviour change — to be "
+                            "validated under load.\n");
             }
             if ((watch || strict) && calypso_xio_api_hom()) {
                 static unsigned long long n_hom = 0;
                 if (n_hom++ == 0 || (n_hom % 5000) == 0)
-                    fprintf(stderr, "[c54x] API-HOM : ecriture DSP dans la fenetre "
-                            "API pendant HOM #%llu — data[0x%04x] <- 0x%04x "
+                    fprintf(stderr, "[c54x] API-HOM: DSP write to the "
+                            "API window during HOM #%llu — data[0x%04x] <- 0x%04x "
                             "PC=0x%04x (%s)\n", n_hom, addr, val, s->pc,
-                            strict ? "ABANDONNEE" : "laissee passer, observation");
+                            strict ? "DROPPED" : "let through, observation");
                 if (strict)
                     return;
             }
@@ -3403,7 +3403,7 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             if (_fa < 0) _fa = calypso_gate("CALYPSO_FBDET_API", 0);
             if (_fa && woff >= 0xF8 && woff <= 0xFD && _fan < 40) {
                 _fan++;
-                fprintf(stderr, "[c54x] FBDET-API DSP api_ram[0x%02x] (mot 0x%04x, %s)"
+                fprintf(stderr, "[c54x] FBDET-API DSP api_ram[0x%02x] (word 0x%04x, %s)"
                         " <- 0x%04x PC=0x%04x insn=%u\n", woff, addr,
                         woff == 0xF8 ? "d_fb_det" : "a_sync_demod",
                         val, s->pc, s->insn_count);
@@ -3765,14 +3765,14 @@ static void data_write_locked(C54xState *s, uint16_t addr, uint16_t val)
             const char *v = calypso_getenv("CALYPSO_DISPATCH_INSTALL");
             _dgv = (v && *v) ? (int)strtoul(v, NULL, 0) : -1;
             if (_dg && _dgv >= 0)
-                fprintf(stderr, "[c54x] DISPATCH-GRAFT arme : toute ecriture de 0xab38 "
-                        "dans data[0x43d8] devient 0x%04x (mode init, BEQUILLE — le "
-                        "mode dispatch est desactive)\n", (unsigned)_dgv);
+                fprintf(stderr, "[c54x] DISPATCH-GRAFT armed: every write of 0xab38 "
+                        "to data[0x43d8] becomes 0x%04x (init mode, CRUTCH — the "
+                        "dispatch mode is disabled)\n", (unsigned)_dgv);
         }
         if (_dg && _dgv >= 0 && val == 0xab38) {
             if (_dgn++ < 20)
-                fprintf(stderr, "[c54x] DISPATCH-GRAFT #%u : l'init (PC=0x%04x) ecrit "
-                        "0xab38 dans data[0x43d8] -> greffe 0x%04x insn=%u\n",
+                fprintf(stderr, "[c54x] DISPATCH-GRAFT #%u: the init (PC=0x%04x) writes "
+                        "0xab38 to data[0x43d8] -> graft 0x%04x insn=%u\n",
                         _dgn, s->pc, (unsigned)_dgv, s->insn_count);
             val = (uint16_t)_dgv;
         }
@@ -3810,8 +3810,8 @@ int c54x_xpc_haut_init(void)
 {
     if (g_c54x_xpc_haut < 0) {
         g_c54x_xpc_haut = calypso_gate("CALYPSO_XPC_HAUT", 1);
-        fprintf(stderr, "[c54x] XPC-HAUT %s : 0xE000-0xFFFF %s\n", g_c54x_xpc_haut ? "ACTIF" : "INACTIF",
-                g_c54x_xpc_haut ? "banque par XPC en pages 1 et 2 (PROM1/PROM2)" : "toujours en page 0");
+        fprintf(stderr, "[c54x] XPC-HAUT %s : 0xE000-0xFFFF %s\n", g_c54x_xpc_haut ? "ACTIVE" : "INACTIVE",
+                g_c54x_xpc_haut ? "banked by XPC in pages 1 and 2 (PROM1/PROM2)" : "always in page 0");
     }
     return g_c54x_xpc_haut;
 }
@@ -3842,10 +3842,10 @@ uint16_t c54x_ovly_bas(void)
     if (g < 0) {
         g = calypso_gate("CALYPSO_OVLY_SCRATCH", 1);
         g_c54x_ovly_bas = g ? 0x0060 : 0x0080;
-        fprintf(stderr, "[c54x] OVLY-SCRATCH %s : plancher de l alias programme "
-                "a 0x%04x (scratch-pad DARAM 0x0060-0x007F %s)\n",
-                g ? "ACTIF" : "INACTIF", g ? 0x0060 : 0x0080,
-                g ? "VISIBLE en programme" : "hors alias");
+        fprintf(stderr, "[c54x] OVLY-SCRATCH %s: floor of the program alias "
+                "at 0x%04x (DARAM scratch-pad 0x0060-0x007F %s)\n",
+                g ? "ACTIVE" : "INACTIVE", g ? 0x0060 : 0x0080,
+                g ? "VISIBLE as program" : "outside alias");
     }
     return g ? 0x0060 : 0x0080;
 }
@@ -3979,7 +3979,7 @@ uint16_t c54x_revcarry(C54xState *s, uint16_t ar, uint16_t ar0, int sub)
         if (n < 24) {
             n++;
             fprintf(stderr, "[c54x] BITREV #%u PC=0x%04x AR=0x%04x %c AR0=0x%04x "
-                    "-> 0x%04x (plat: 0x%04x) insn=%u\n",
+                    "-> 0x%04x (flat: 0x%04x) insn=%u\n",
                     n, s->pc, ar, sub ? '-' : '+', ar0, r, plat, s->insn_count);
         }
     }

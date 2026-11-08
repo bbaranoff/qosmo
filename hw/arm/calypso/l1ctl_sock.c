@@ -201,7 +201,7 @@ static void sercomm_frame_complete(L1CTLSock *s)
                     close(dfd);
                 }
                 L1CTL_LOG("DCCH #%u : chan_nr=0x%02x -> SDCCH/%d SS=%d TN=%u "
-                          "(vu sur %s)", dcch_seq, chan_nr, kind ? 8 : 4, ss,
+                          "(seen on %s)", dcch_seq, chan_nr, kind ? 8 : 4, ss,
                           chan_nr & 0x07, l1ctl_tname(payload[0]));
             }
         }

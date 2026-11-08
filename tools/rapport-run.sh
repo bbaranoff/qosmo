@@ -33,87 +33,87 @@ mes() {
     if [ "$v" -gt 0 ] 2>/dev/null; then
         local t; t="$(temoin "$mot" "$fic")"; [ -n "$t" ] && printf '  | %s' "$t"
     else
-        printf '  | motif jamais vu — absence NON prouvee'
+        printf '  | pattern never seen — absence NOT proven'
     fi
     printf '\n'
 }
 titre() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 info()  { printf '  %-24s %s\n' "$1" "$2"; }
 
-printf '\033[1m########## RAPPORT DE RUN — %s ##########\033[0m\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-[ -r "$q" ] || { echo "ERREUR : $q illisible — mauvais repertoire ?"; exit 2; }
-printf 'journaux : %s%s\n' "$L" "$([ "$L" = "$LIVE_DIR" ] && echo '  (run en cours)' || echo '  (photo archivee)')"
-printf 'derniere ecriture : %s\n' "$(stat -c %y "$q" 2>/dev/null | cut -d. -f1)"
+printf '\033[1m########## RUN REPORT — %s ##########\033[0m\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+[ -r "$q" ] || { echo "ERROR: $q unreadable — wrong directory?"; exit 2; }
+printf 'logs: %s%s\n' "$L" "$([ "$L" = "$LIVE_DIR" ] && echo '  (current run)' || echo '  (archived snapshot)')"
+printf 'last write: %s\n' "$(stat -c %y "$q" 2>/dev/null | cut -d. -f1)"
 if [ "$L" = "$LIVE_DIR" ] && [ -n "${_pid_qemu:-}" ]; then
     _t0="$(stat -c %s "$q" 2>/dev/null)"; sleep 2; _t1="$(stat -c %s "$q" 2>/dev/null)"
     if [ "${_t0:-0}" = "${_t1:-0}" ]; then
-        printf '\033[1m  ⚠️ qemu.log NE GROSSIT PAS alors que qemu tourne (pid %s).\n' "$_pid_qemu"
-        printf '     Journaux probablement perimes — verifier LOG_DIR du processus.\033[0m\n'
+        printf '\033[1m  ⚠️ qemu.log is NOT GROWING while qemu is running (pid %s).\n' "$_pid_qemu"
+        printf '     Logs probably stale — check the process LOG_DIR.\033[0m\n'
     fi
 fi
 
-titre "0. IDENTITE DU RUN"
-info "couche 1"     "$(temoin '\[l1\] backend' "$q")"
-info "pont"         "$(temoin 'pont TRX démarré|pont TRX demarre' "$p")"
+titre "0. RUN IDENTITY"
+info "layer 1"      "$(temoin '\[l1\] backend' "$q")"
+info "bridge"       "$(temoin 'pont TRX démarré|pont TRX demarre' "$p")"
 if [ "$L" = "$LIVE_DIR" ]; then
     P="$(pgrep -x qemu-system-arm 2>/dev/null | head -1)"
-    [ -n "$P" ] && info "qemu vivant" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
-                || info "qemu vivant" "ARRETE"
+    [ -n "$P" ] && info "qemu alive" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
+                || info "qemu alive" "STOPPED"
     P="$(pgrep -f 'pont/pont(_dsp)?\.py' 2>/dev/null | head -1)"
-    [ -n "$P" ] && info "pont vivant" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
-                || info "pont vivant" "ARRETE"
+    [ -n "$P" ] && info "bridge alive" "pid=$P age=$(ps -o etime= -p "$P" 2>/dev/null | tr -d ' ')" \
+                || info "bridge alive" "STOPPED"
 fi
 
 titre "1. ACQUISITION L1 (osmocon.log)"
 mes "L1CTL_FBSB_REQ"      'L1CTL_FBSB_REQ'                 "$o"
-mes "FB detectee"         '^FB[01] \('                      "$o"
+mes "FB detected"         '^FB[01] \('                      "$o"
 mes "Synchronize_TDMA"    'Synchronize_TDMA'                "$o"
-mes "SB decodee"          '^SB[0-9] \(|=> SB 0x'            "$o"
-mes "  BSIC non nul"      'BSIC=[1-9]'                      "$o"
+mes "SB decoded"          '^SB[0-9] \(|=> SB 0x'            "$o"
+mes "  BSIC nonzero"      'BSIC=[1-9]'                      "$o"
 mes "RESET FULL"          'L1CTL_RESET_REQ: FULL'           "$o"
-[ -r "$o" ] && info "TOA les plus vus" "$(grep -oE 'TOA= *[0-9]+' "$o" | tr -s ' ' | sort | uniq -c | sort -rn | head -5 | tr '\n' ' ')"
+[ -r "$o" ] && info "most seen TOA"    "$(grep -oE 'TOA= *[0-9]+' "$o" | tr -s ' ' | sort | uniq -c | sort -rn | head -5 | tr '\n' ' ')"
 
-titre "2. COUCHE 1 gr-gsm (qemu.log)"
+titre "2. gr-gsm LAYER 1 (qemu.log)"
 mes "reset L1"            '\[l1\] reset L1'                 "$q"
-mes "canal dedie"         '\[l1\] canal dedie'              "$q"
-mes "chiffrement actif"   '\[l1\] chiffrement A5'           "$q"
-mes "canal TCH"           '\[l1\] canal TCH'                "$q"
-mes "couche 1 en clair"   '\[l1\] couche 1 en clair'        "$q"
+mes "dedicated channel"   '\[l1\] (canal dedie|dedicated channel)' "$q"
+mes "ciphering active"    '\[l1\] (chiffrement A5|A5/[0-9]+ ciphering)' "$q"
+mes "TCH channel"         '\[l1\] (canal TCH|TCH channel)' "$q"
+mes "layer 1 unciphered"  '\[l1\] (couche 1 en clair|layer 1 unciphered)' "$q"
 
-titre "3. PONT TRX (pont.log)"
+titre "3. TRX BRIDGE (pont.log)"
 mes "bursts DL"           'STATS dl_bursts='                "$p"
 mes "RACH"                'rach=[1-9]'                      "$p"
-mes "erreurs"             'Traceback|error'                 "$p"
-[ -r "$p" ] && info "derniere STATS" "$(grep 'STATS' "$p" 2>/dev/null | tail -1 | cut -c1-140)"
+mes "errors"              'Traceback|error'                 "$p"
+[ -r "$p" ] && info "last STATS"     "$(grep 'STATS' "$p" 2>/dev/null | tail -1 | cut -c1-140)"
 
-titre "4. COUCHES 2/3 (mobile.log) — jusqu ou va l abonne"
+titre "4. LAYERS 2/3 (mobile.log) — how far the subscriber gets"
 mes "sync ARFCN"          'Sync to ARFCN'                   "$m"
 mes "SYSTEM INFORMATION"  'SYSTEM INFORMATION [0-9]'        "$m"
-mes "  sans sysinfo"      'No sysinfo yet'                  "$m"
+mes "  no sysinfo"        'No sysinfo yet'                  "$m"
 mes "camp"                'camping \(normal\)|camped normally' "$m"
 mes "CHANNEL REQUEST"     'CHANNEL REQUEST'                 "$m"
 mes "IMMEDIATE ASSIGN"    'IMMEDIATE ASSIGNMENT'            "$m"
 mes "LAPDm SABM"          'LAPD_STATE_SABM_SENT'            "$m"
-mes "cipher negocie"      'cipher [1-9]'                    "$m"
+mes "cipher agreed"       'cipher [1-9]'                    "$m"
 mes "LU REQUEST"          'LOCATION UPDATING REQUEST'       "$m"
 mes "LU ACCEPT"           'LOCATION UPDATING ACCEPT'        "$m"
 mes "LU REJECT"           'LOCATION UPDATING REJECT'        "$m"
 mes "TMSI"                'TMSI'                            "$m"
 mes "SMS"                 'SMS-DELIVER|new SMS|CP-DATA'     "$m"
-mes "appel"               'CC_SETUP|MNCC_SETUP'             "$m"
+mes "call"                'CC_SETUP|MNCC_SETUP'             "$m"
 [ -r "$m" ] && info "timers MM"  "$(grep -oE 'T3[0-9]{3}' "$m" | sort | uniq -c | sort -rn | head -4 | tr '\n' ' ')"
 [ -r "$m" ] && info "ccch mode"  "$(grep -oE 'ccch mode [A-Z]+' "$m" | sort | uniq -c | tr '\n' ' ')"
 
-titre "5. RESEAU (bts / side-car)"
-mes "BTS erreurs"         'ERROR'                           "$b"
-[ -r "$b" ] && info "erreur dominante" "$(grep -oE 'send\(\) failed on TRXD[^(]*|ERROR [a-z0-9.]+:' "$b" | sort | uniq -c | sort -rn | head -2 | tr '\n' ' ')"
+titre "5. NETWORK (bts / side-car)"
+mes "BTS errors"          'ERROR'                           "$b"
+[ -r "$b" ] && info "dominant error"   "$(grep -oE 'send\(\) failed on TRXD[^(]*|ERROR [a-z0-9.]+:' "$b" | sort | uniq -c | sort -rn | head -2 | tr '\n' ' ')"
 mes "sidecar mobile err"  'error|fail'                      "$L/sidecar-mobile.log"
 
 titre "6. SERVICES"
 mes "SMSC"                'sms|deliver'                     "$L/smsc-op1.log"
 mes "asterisk warn/err"   'error|warning'                   "$L/asterisk.log"
 
-titre "7. VERDICT — jusqu ou va la chaine"
+titre "7. VERDICT — how far the chain gets"
 etape() {
     if [ "${2:-0}" -gt 0 ] 2>/dev/null; then printf '  [ OK ] %-22s (%s)\n' "$1" "$2"
     else printf '  [ .. ] %-22s (0)\n' "$1"; fi
@@ -122,10 +122,10 @@ etape "synchro FB"        "$(n '^FB[01] \(' "$o")"
 etape "synchro SB"        "$(n '^SB[0-9] \(|=> SB 0x' "$o")"
 etape "sysinfo"           "$(n 'SYSTEM INFORMATION [0-9]' "$m")"
 etape "camp"              "$(n 'camping \(normal\)|camped normally' "$m")"
-etape "acces RACH"        "$(n 'CHANNEL REQUEST' "$m")"
-etape "canal dedie"       "$(n 'IMMEDIATE ASSIGNMENT' "$m")"
-etape "LU demande"        "$(n 'LOCATION UPDATING REQUEST' "$m")"
-etape "LU accepte"        "$(n 'LOCATION UPDATING ACCEPT' "$m")"
+etape "RACH access"       "$(n 'CHANNEL REQUEST' "$m")"
+etape "dedicated channel"      "$(n 'IMMEDIATE ASSIGNMENT' "$m")"
+etape "LU requested"      "$(n 'LOCATION UPDATING REQUEST' "$m")"
+etape "LU accepted"       "$(n 'LOCATION UPDATING ACCEPT' "$m")"
 etape "SMS"               "$(n 'SMS-DELIVER|new SMS|CP-DATA' "$m")"
-printf '\n  Methode : un 0 dit que le MOTIF n a pas ete vu. Verifier le motif\n'
-printf '  avant de conclure a une absence.\n'
+printf '\n  Method: a 0 means the PATTERN was not seen. Check the pattern\n'
+printf '  before concluding something is absent.\n'

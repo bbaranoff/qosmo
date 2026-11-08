@@ -328,7 +328,7 @@ static bool dcch_si_guard(void)
     if (g.tick - g.dcch_guard_tick > DCCH_GUARD_TICKS) {
         g.dcch_guard_armed = false;
         calypso_l1ctl_tap_channel_released();
-        L1_LOG("canal dedie libere");
+        L1_LOG("dedicated channel released");
         return false;
     }
     return true;
@@ -458,7 +458,7 @@ static void tch_dl_poll(void)
         if (g.tch_dl_seq && behind >= n_slots) {
             static unsigned nlog;
             if (nlog++ < 10) {
-                L1_LOG("TCH DL : %u trames sautees (anneau de %u)",
+                L1_LOG("TCH DL: %u frames skipped (ring of %u)",
                        behind - (n_slots - 1), n_slots);
             }
         }
@@ -808,7 +808,7 @@ void calypso_l1_dcch_set(int kind, int ss)
     g.sdcch_ss = base;
     g.sdcch_ss_set = true;
     g.sdcch_ch8 = (kind != 0);
-    L1_LOG("canal dedie SDCCH/%d SS=%d : fenetre a_cd fn%%51 %u-%u",
+    L1_LOG("dedicated channel SDCCH/%d SS=%d: a_cd window fn%%51 %u-%u",
            kind ? 8 : 4, ss, base, base + 3);
 }
 
@@ -861,7 +861,7 @@ static void feed_sdcch(const uint8_t *l2, int len, uint32_t fn)
     if (g.sdcch_tail - g.sdcch_head >= SDCCH_RING_N) {
         static unsigned nlog;
         if (nlog++ < 5) {
-            L1_LOG("SDCCH DL : anneau plein, plus ancien bloc abandonne");
+            L1_LOG("SDCCH DL: ring full, oldest block dropped");
         }
         g.sdcch_head++;
     }
@@ -1030,7 +1030,7 @@ static void sch_readable(void *opaque)
         g.sb_valid = true;
         g.sb_capture_fn = calypso_trx_get_fn();
         if (first) {
-            L1_LOG("synchro gr-gsm : ARFCN=%d BSIC=%u FN=%u", arfcn, g.sb_bsic, g.sb_fn);
+            L1_LOG("gr-gsm sync: ARFCN=%d BSIC=%u FN=%u", arfcn, g.sb_bsic, g.sb_fn);
         }
         calypso_trx_autosync_fn((uint32_t)fn);
     }
@@ -1078,7 +1078,7 @@ static void poll_tch_cfg(void)
         if (g.tch_cfg_valid) {
             g.tch_cfg_valid = false;
             g.facch_dl_valid = g.tsacch_dl_valid = false;
-            L1_LOG("canal TCH libere");
+            L1_LOG("TCH channel released");
         }
         last = 0;
         return;
@@ -1089,7 +1089,7 @@ static void poll_tch_cfg(void)
     last = seq;
     g.tch_cfg_valid = true;
     g.facch_dl_valid = g.tsacch_dl_valid = false;
-    L1_LOG("canal TCH : TN=%u TSC=%u ARFCN=%u", b[4], b[5], lduw_le_p(b + 6));
+    L1_LOG("TCH channel: TN=%u TSC=%u ARFCN=%u", b[4], b[5], lduw_le_p(b + 6));
 }
 
 static void publish_kc(void)
@@ -1154,9 +1154,9 @@ static void publish_kc(void)
     memcpy(last, rec, sizeof(rec));
     have_last = true;
     if (algo) {
-        L1_LOG("chiffrement A5/%u actif (Kc publie, seq=%u)", algo, seq);
+        L1_LOG("A5/%u ciphering active (Kc published, seq=%u)", algo, seq);
     } else {
-        L1_LOG("couche 1 en clair (seq=%u)", seq);
+        L1_LOG("layer 1 unciphered (seq=%u)", seq);
     }
 }
 
@@ -1222,8 +1222,8 @@ void calypso_l1_init(const char *firmware_elf)
         g.last_rach_addr = elf_symbol(firmware_elf, "last_rach");
     }
     if (!g.l1s_addr || !g.last_rach_addr) {
-        L1_LOG("symboles firmware introuvables (l1s=0x%x last_rach=0x%x) : "
-               "fenetres CCCH et req-ref degradees", g.l1s_addr, g.last_rach_addr);
+        L1_LOG("firmware symbols not found (l1s=0x%x last_rach=0x%x): "
+               "CCCH windows and req-ref degraded", g.l1s_addr, g.last_rach_addr);
     }
     udp_listen(GSMTAP_PORT, gsmtap_readable);
     udp_listen(SCH_PORT, sch_readable);

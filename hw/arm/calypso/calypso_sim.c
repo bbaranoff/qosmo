@@ -350,7 +350,7 @@ static void resp_fire(void *opaque)
         rx_push(s, s->pend[i]);
     }
     if (s->pend_len) {
-        SIM_LOG("reponse carte : %d octet(s) livres", s->pend_len);
+        SIM_LOG("card response: %d byte(s) delivered", s->pend_len);
     }
     s->pend_len = 0;
     s->defer = was && false;
@@ -663,7 +663,7 @@ static void cmd_run_gsm_algo(CalypsoSim *s, uint8_t lc, const uint8_t *data)
     } else {
         for (int i = 0; i < 4; i++) resp[i]    = data[i] ^ 0xAA;
         for (int i = 0; i < 8; i++) resp[4+i] = 0x00;
-        SIM_LOG("RUN_GSM_ALGORITHM SANS Ki (CALYPSO_SIM_CFG ?) → SRES bidon RAND^0xAA");
+        SIM_LOG("RUN_GSM_ALGORITHM WITHOUT Ki (CALYPSO_SIM_CFG?) → dummy SRES RAND^0xAA");
     }
     respond_with_data_pending(s, resp, 12);
 }
@@ -734,7 +734,7 @@ static void apdu_tx_byte_inner(CalypsoSim *s, uint8_t b)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (s->apdu_pos > 0 && now - s->last_tx_ns > APDU_ABANDON_NS) {
-        SIM_LOG("APDU abandonne par le terminal apres %d octet(s) (silence %lld ms) : resynchronisation",
+        SIM_LOG("APDU abandoned by the terminal after %d byte(s) (silence %lld ms): resync",
                 s->apdu_pos, (long long)((now - s->last_tx_ns) / 1000000));
         s->apdu_pos = 0;
         s->apdu_expected = 0;
@@ -879,7 +879,7 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
             (((val & CALYPSO_SIM_CONF1_SCLKEN) && !(old & CALYPSO_SIM_CONF1_SCLKEN)) ||
              ((val & CALYPSO_SIM_CONF1_SRSTLEV) && !(old & CALYPSO_SIM_CONF1_SRSTLEV)))) {
             s->atr_manual_done = true;
-            SIM_LOG("mode manuel (TI) : ATR livre sur CONF1=0x%04x", val);
+            SIM_LOG("manual mode (TI): ATR delivered on CONF1=0x%04x", val);
             schedule_atr(s);
         }
         if (!(val & CALYPSO_SIM_CONF1_SVCCLEV) && (old & CALYPSO_SIM_CONF1_SVCCLEV)) {
@@ -940,7 +940,7 @@ static void load_config_from_file(CalypsoSim *s, const char *path)
         }
         if (strncmp(p, "sms-service-center ", 19) == 0) {   /* -> EF_SMSP, see rec_store */
             sscanf(p + 19, "%23s", g_sim_smsc);
-            SIM_LOG("centre SMS (EF_SMSP) depuis %s : %s", path, g_sim_smsc);
+            SIM_LOG("SMS centre (EF_SMSP) from %s: %s", path, g_sim_smsc);
             continue;
         }
         if (!in_test_sim) continue;

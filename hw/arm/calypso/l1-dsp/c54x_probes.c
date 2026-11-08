@@ -438,7 +438,7 @@ void rsbx_intm_check(C54xState *s, uint16_t op)
         if (g_rsbx_intm_hits <= 20 || (g_rsbx_intm_hits % 1000) == 0) {
             fprintf(stderr,
                 "[c54x] RSBX-INTM #%llu @insn=%u PC=0x%04x  ST1 INTM 0x%04x → "
-                "(cleared) — IRQ enable path atteint !\n",
+                "(cleared) — IRQ enable path reached!\n",
                 (unsigned long long)g_rsbx_intm_hits, s->insn_count, s->pc,
                 s->st1);
         }
@@ -578,10 +578,10 @@ void mvpd_trace_dump_if_due(unsigned insn)
         "writes=%u → %s\n",
         bucket_0_to_6_total,
         bucket_0_to_6_total == 0
-            ? "EMPTY (safe pour BSP buffer placement ici)"
+            ? "EMPTY (safe for BSP buffer placement here)"
             : bucket_0_to_6_total < 100
             ? "lightly used (probably safe, audit specifics)"
-            : "HEAVILY USED (code overlay, NE PAS placer BSP buffer ici)");
+            : "HEAVILY USED (code overlay, do NOT place BSP buffer here)");
 }
 
 /* === Correlator trace ===
@@ -753,7 +753,7 @@ static void stuck_probe_init_lazy(void)
     g_stuck_probe_enabled = (e && *e == '1') ? 1 : 0;
     if (g_stuck_probe_enabled) {
         fprintf(stderr,
-            "[c54x] STUCK-PROBE enabled : capture PC+XPC histogramme quand "
+            "[c54x] STUCK-PROBE enabled: capture PC+XPC histogram when "
             "INTM=1 + IFR bit5 (BRINT0) pending\n");
     }
 }
@@ -859,12 +859,12 @@ void force_intm_oneshot_check(C54xState *s)
                 fprintf(stderr,
                     "[c54x] FORCE-INTM-ONESHOT enabled : will clear INTM ONCE "
                     "when INTM=1 + BRINT0 pending + PC=0x%04x (= safe-PC gate, "
-                    "départage state-corruption vs aval-cassé)\n",
+                    "separates state-corruption vs broken-downstream)\n",
                     g_force_intm_at_pc);
             } else {
                 fprintf(stderr,
                     "[c54x] FORCE-INTM-ONESHOT enabled : will clear INTM ONCE "
-                    "when INTM=1 + BRINT0 pending (= sonde aval-sain, no PC gate)\n");
+                    "when INTM=1 + BRINT0 pending (= healthy-downstream probe, no PC gate)\n");
             }
         }
     }
@@ -936,8 +936,8 @@ static void int3_trace_init_lazy(void)
     g_int3_trace_enabled = (e && *e == '1') ? 1 : 0;
     if (g_int3_trace_enabled) {
         fprintf(stderr,
-            "[c54x] INT3-CYCLE-TRACE enabled : par cycle vec=19, log toutes "
-            "branches conditionnelles + RETE/orphan tag. Cap=%u branches/cycle.\n",
+            "[c54x] INT3-CYCLE-TRACE enabled: per cycle vec=19, log all "
+            "conditional branches + RETE/orphan tag. Cap=%u branches/cycle.\n",
             INT3_BRANCH_TRACE_MAX);
     }
 }

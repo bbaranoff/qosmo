@@ -100,7 +100,7 @@ static void c139_export(CalypsoUwireState *s)
         buf[SHM_HDR + 2 * i + 1] = s->ram[i] >> 8;
     }
     if (pwrite(s->shm_fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf)) {
-        fprintf(stderr, "[c139lcd] ecriture de %s : %s\n", s->shm_path, strerror(errno));
+        fprintf(stderr, "[c139lcd] writing %s: %s\n", s->shm_path, strerror(errno));
     }
 }
 
@@ -281,7 +281,7 @@ static void uwire_realize(DeviceState *dev, Error **errp)
     if (strcmp(s->shm_path, "none")) {
         s->shm_fd = open(s->shm_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
         if (s->shm_fd < 0) {
-            fprintf(stderr, "[c139lcd] %s : %s (pas d'image partagee)\n",
+            fprintf(stderr, "[c139lcd] %s: %s (no shared image)\n",
                     s->shm_path, strerror(errno));
         } else {
             fchmod(s->shm_fd, 0666);
@@ -289,7 +289,7 @@ static void uwire_realize(DeviceState *dev, Error **errp)
                 fprintf(stderr, "[c139lcd] ftruncate %s : %s\n", s->shm_path, strerror(errno));
             }
             c139_export(s);
-            fprintf(stderr, "[c139lcd] ecran C139 96x64 couleur (uWire CS0) : image partagee %s\n",
+            fprintf(stderr, "[c139lcd] C139 96x64 colour screen (uWire CS0): shared image %s\n",
                     s->shm_path);
         }
     }
@@ -309,7 +309,7 @@ static void uwire_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = uwire_realize;
-    dc->desc = "Calypso uWire + LCD couleur 96x64 du Motorola C139";
+    dc->desc = "Calypso uWire + Motorola C139 96x64 colour LCD";
     device_class_set_props(dc, uwire_properties);
 }
 

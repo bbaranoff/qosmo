@@ -21,7 +21,7 @@ def ex(c):
     try:
         return gdb.execute(c, to_string=True)
     except gdb.error as e:
-        return "  (%s : %s)\n" % (c, e)
+        return "  (%s: %s)\n" % (c, e)
 
 
 def out(t):
@@ -41,7 +41,7 @@ def pause_etape():
     p = gdb.convenience_variable("demo_pause")
     t = float(p) if p is not None else 4.0
     if t > 0:
-        out("[demo]        ... (suite dans %.0f s)" % t)
+        out("[demo]        ... (next in %.0f s)" % t)
         time.sleep(t)
 
 
@@ -56,16 +56,16 @@ def etat():
     fr = gdb.newest_frame()
     sal = fr.find_sal()
     ou = "%s:%d" % (sal.symtab.filename, sal.line) if sal.symtab else "?"
-    out("[demo] ===== 1. L'ARM EST ARRETE : pc=0x%08x dans %s (%s)" % (fr.pc(), fr.name() or "?", ou))
+    out("[demo] ===== 1. THE ARM IS STOPPED: pc=0x%08x in %s (%s)" % (fr.pc(), fr.name() or "?", ou))
     out(ex("bt 6"))
     out(ex("x/3i $pc"))
     pause_etape()
-    out("[demo] ===== 2. CE QUE LA COUCHE 1 SAIT (symboles l1s du firmware) :")
+    out("[demo] ===== 2. WHAT LAYER 1 KNOWS (firmware l1s symbols):")
     out(ex("fn"))
     out(ex("l1"))
     pause_etape()
-    out("[demo] ===== 3. LA BOITE AUX LETTRES ARM<->DSP, lue par l'ARM a 0xffd00000")
-    out("[demo]        (= « d@ 0800 8 » dans harvard.sh : meme memoire, /dev/shm/calypso_api_ram)")
+    out("[demo] ===== 3. THE ARM<->DSP MAILBOX, read by the ARM at 0xffd00000")
+    out("[demo]        (= 'd@ 0800 8' in harvard.sh: same memory, /dev/shm/calypso_api_ram)")
     out(ex("x/8hx 0xffd00000"))
     out(ex("tasks"))
     pause_etape()
@@ -73,13 +73,13 @@ def etat():
 
 def trame():
     avant = val("l1s.current_time.fn")
-    out("[demo] ===== 4. ON RELANCE JUSQU'A LA PROCHAINE TRAME TDMA (tbreak tdma_sched_execute), fn=%s" % avant)
+    out("[demo] ===== 4. RUN UNTIL THE NEXT TDMA FRAME (tbreak tdma_sched_execute), fn=%s" % avant)
     t0 = time.time()
     ex("tbreak tdma_sched_execute")
     gdb.execute("continue")
     apres = val("l1s.current_time.fn")
     d = (apres - avant) if (apres is not None and avant is not None) else "?"
-    out("[demo]        arrete dans tdma_sched_execute : fn=%s (+%s) en %.0f ms  (une trame = 4,615 ms)"
+    out("[demo]        stopped in tdma_sched_execute: fn=%s (+%s) in %.0f ms  (one frame = 4.615 ms)"
         % (apres, d, 1000 * (time.time() - t0)))
     out(ex("bt 4"))
     pause_etape()
@@ -90,10 +90,10 @@ def hello(libre=None):
     # by hand just above the bss (_end + 0x100): free area (no heap, the stacks are at
     # the very top of RAM, TOP_OF_RAM 0x83fff0 in board/compal/macros.S), then puts() on it.
     fn = val("l1s.current_time.fn")
-    out("[demo] ===== 5. ON FAIT PARLER LE FIRMWARE : la chaine ecrite en RAM libre, puis call puts() -> console sercomm (osmocon.log)")
+    out("[demo] ===== 5. MAKING THE FIRMWARE TALK: the string written to free RAM, then call puts() -> sercomm console (osmocon.log)")
     adr = val("(unsigned long)&_end")
     if adr is None:
-        out("[demo]        (_end introuvable : ELF sans symboles ?)"); return
+        out("[demo]        (_end not found: ELF without symbols?)"); return
     adr = (adr + 0x100) & ~0xf
     # ANSI colours in the string itself: osmocon copies the sercomm console byte for byte
     # (hdlc_console_cb -> write(1, ...)), so "tail -f osmocon.log" in a terminal shows it in colour.
@@ -105,10 +105,10 @@ def hello(libre=None):
                  "\033[36m(0x%x, fn=%s)\033[0m\n" % (adr, fn))
     msg = texte.encode() + b"\0"
     gdb.selected_inferior().write_memory(adr, msg)
-    out("[demo]        %d octets ecrits a 0x%08x : %s" % (len(msg), adr, ex("x/s 0x%x" % adr).strip()))
-    out("[demo]        soit, rendu : " + texte.rstrip("\n"))
+    out("[demo]        %d bytes written at 0x%08x: %s" % (len(msg), adr, ex("x/s 0x%x" % adr).strip()))
+    out("[demo]        rendered: " + texte.rstrip("\n"))
     out(ex("call (int)puts((const char *)0x%x)" % adr))
-    out("[demo]        (regarder : tail -f /tmp/c54x-pont/osmocon.log)")
+    out("[demo]        (watch: tail -f /tmp/c54x-pont/osmocon.log)")
     pause_etape()
 
 
@@ -117,9 +117,9 @@ def fin():
     # Measured (harvard.sh demo arm, API RAM write pages): while this Python command runs, the ARM
     # does not move yet; it runs as soon as the command gives gdb back. No check from in here: it
     # would read a state that is not the one after the command (the old is_running() test said
-    # "il est ARRETE ?!" while the call went on).
-    out("[demo] ===== FIN : continue & -- l'ARM repart des que cette commande rend la main a gdb"
-        " (harvard.sh demo arm le mesure ensuite ; Ctrl-C ou stop pour l'arreter, help_osmo pour le reste).")
+    # "it is STOPPED?!" while the call went on).
+    out("[demo] ===== END: continue & -- the ARM resumes as soon as this command returns to gdb"
+        " (harvard.sh demo arm measures it next; Ctrl-C or stop to halt it, help_osmo for the rest).")
 
 
 def corps(arg):
@@ -127,7 +127,7 @@ def corps(arg):
         if arg.split()[0] == "dit":
             libre = arg[3:].strip()
             if not libre:
-                out("usage : demo dit <texte>   (ex : demo dit hello 40c3)"); return
+                out("usage: demo dit <text>   (e.g. demo dit hello 40c3)"); return
             hello(libre[:200]); return
         if arg in ("etat", "tout"):
             etat()
@@ -138,9 +138,9 @@ def corps(arg):
         if arg in ("go", "tout"):
             fin()
         if arg not in ("etat", "trame", "hello", "go", "tout"):
-            out("usage : demo [tout|etat|trame|hello|go|dit <texte>]")
+            out("usage: demo [tout|etat|trame|hello|go|dit <text>]")
     except Exception as e:
-        out("[demo] erreur : %s" % e)
+        out("[demo] error: %s" % e)
 
 
 class Demo(gdb.Command):
@@ -152,7 +152,7 @@ class Demo(gdb.Command):
     def invoke(self, arg, from_tty):
         arg = arg.strip() or "tout"
         if en_marche():
-            out("[demo] l'ARM tourne : interrupt ; la suite des que la cible est arretee...")
+            out("[demo] the ARM is running: interrupt; continuing once the target is stopped...")
 
             def on_stop(ev):
                 gdb.events.stop.disconnect(on_stop)
@@ -164,4 +164,4 @@ class Demo(gdb.Command):
 
 
 Demo()
-gdb.write("[demo-layer1] tape  demo  (ou demo etat | trame | hello | go | dit <texte>)\n")
+gdb.write("[demo-layer1] type  demo  (or demo etat | trame | hello | go | dit <text>)\n")

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""qosmo-couleurs : colore a la volee les journaux du banc (stdin -> stdout).
+"""qosmo-couleurs: colours the bench logs on the fly (stdin -> stdout).
 
   tail -F qemu-asm.log | qosmo-couleurs            trace -d in_asm / exec de QEMU
   tail -F qemu.log     | qosmo-couleurs            [trx] [sim] [dcch] [c54x] ...
   tail -F mailbox.log  | qosmo-couleurs            ARM>WR ARM<RD DSP>WR DSP<RD
   watch -n 0.5 --color "tail -n 40 qemu-asm.log | qosmo-couleurs"
 
-Les lignes deja colorees (mobile.log) passent telles quelles. QOSMO_COULEURS=0
-ou une sortie qui n'est pas un terminal (et pas --force) : copie sans couleur.
-Les panes tmux du banc (tmux_modules/_commun.sh) et ./run.sh --logs de c54x_exe
-passent par ici. Rien n'est ecrit dans les fichiers : la couleur est a l'affichage."""
+Lines already coloured (mobile.log) pass through unchanged. QOSMO_COULEURS=0
+or an output that is not a terminal (and no --force): plain copy, no colour.
+The bench tmux panes (tmux_modules/_commun.sh) and c54x_exe's ./run.sh --logs
+go through here. Nothing is written to the files: colour is display only."""
 import os, re, sys, signal
 
 def principal():
@@ -38,9 +38,10 @@ def principal():
     re_mbx   = re.compile(r'^(\s*\d+\s+\d+\s+)(ARM>WR|ARM<RD|DSP>WR|DSP<RD)(\s+)(0x[0-9a-f]+|\S+)(\s+\S+\s+)(.*)$')
     re_fn    = re.compile(r'\b(fn=)(\d+)')
     re_hex   = re.compile(r'\b(0x[0-9A-Fa-f]{2,})\b')
-    re_mal   = re.compile(r'(ERREUR|ECHEC|erreur|error|Error|ERROR|\bKO\b|perdu[es]?|PERDUE?|PAS (?:finie|recue)|crc_ko|Dropping|timeout|TIMEOUT|result=255|no cell|quand meme|INACTIF|introuvable|impossible|tick saute)')
-    re_bon   = re.compile(r'(\bOK\b|CRC_OK|\bfinie\b|PLAUSIBLE|accept|ACTIF|tout tourne|Synchronize_TDMA|=> SB|camp)')
-    re_att   = re.compile(r'(attente|attend|retard|en retard|toujours pas|LOST|saute)')
+    # French and English words: old recorded logs are French, current ones English.
+    re_mal   = re.compile(r'(ERREUR|ECHEC|erreur|error|Error|ERROR|\bFAILED\b|\bKO\b|perdu[es]?|PERDUE?|\blost\b|PAS (?:finie|recue)|NOT (?:finished|received)|crc_ko|Dropping|timeout|TIMEOUT|result=255|no cell|quand meme|anyway|INACTIF|INACTIVE|introuvable|not found|NOT FOUND|impossible|cannot|tick saute|tick skipped)')
+    re_bon   = re.compile(r'(\bOK\b|CRC_OK|(?<!PAS )\bfinie\b|(?<!NOT )\bfinished\b|PLAUSIBLE|accept|ACTIF|\bACTIVE\b|tout tourne|Synchronize_TDMA|=> SB|camp)')
+    re_att   = re.compile(r'(attente|attend|retard|en retard|toujours pas|still not|\bwaits?\b|waiting|\bPENDING\b|\blate\b|LOST|saute|skipped)')
     re_asmins = re.compile(r'^(\s+[0-9a-f]+:\s+)([0-9a-f]{8}|[0-9a-f]{4} [0-9a-f]{4}|[0-9a-f]{4})(\s+)([a-z][a-z0-9.]*)(.*)$')
     def generique(s):
         s = re_mal.sub(MAUVAIS + r'\1' + R, s)
@@ -50,7 +51,7 @@ def principal():
         s = re_hex.sub(c(81) + r'\1' + R, s)
         return s
     for l in sys.stdin:
-        if '\033[' in l:                       # deja colore (mobile.log) : tel quel
+        if '\033[' in l:                       # already coloured (mobile.log): as is
             out.write(l); out.flush(); continue
         s = l.rstrip('\n'); t = s
         m = re_adr.match(s)
